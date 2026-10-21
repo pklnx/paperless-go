@@ -81,6 +81,8 @@ type Document struct {
 	ArchiveSize         *int64
 	CorrespondentID     pgtype.UUID
 	DocumentTypeID      pgtype.UUID
+	ThumbnailSha256     *string
+	ProcessingNote      string
 }
 
 type DocumentTag struct {
@@ -104,6 +106,21 @@ type Installation struct {
 	ID        pgtype.UUID
 	Singleton bool
 	CreatedAt time.Time
+}
+
+type Job struct {
+	ID          int64
+	DocumentID  pgtype.UUID
+	Kind        string
+	State       string
+	Attempts    int32
+	MaxAttempts int32
+	RunAfter    time.Time
+	LeaseToken  pgtype.UUID
+	LockedUntil *time.Time
+	LastError   string
+	CreatedAt   time.Time
+	FinishedAt  *time.Time
 }
 
 type SavedView struct {

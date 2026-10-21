@@ -41,6 +41,9 @@ services:
     image: ${PAPERLESS_GO_IMAGE:-paperless-go:local}
     restart: unless-stopped
     command: ["serve", "--listen", ":8080"]
+    # Time to stop the OCR tools and give running jobs back (up to 10 s
+    # each) before Docker kills the server.
+    stop_grace_period: 30s
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,6 +55,9 @@ services:
       # Required: serve refuses to start without it (generate with ./pgo keygen).
       PAPERLESS_GO_SECRET_KEY: ${PAPERLESS_GO_SECRET_KEY:-}
       PAPERLESS_GO_REQUIRE_2FA: ${PAPERLESS_GO_REQUIRE_2FA:-false}
+      PAPERLESS_GO_OCR_WORKERS: ${PAPERLESS_GO_OCR_WORKERS:-1}
+      PAPERLESS_GO_OCR_LANGUAGES: ${PAPERLESS_GO_OCR_LANGUAGES:-deu+eng}
+      PAPERLESS_GO_OCR_TIMEOUT: ${PAPERLESS_GO_OCR_TIMEOUT:-30m}
     volumes:
       - ${DATA_DIR:-./data}:/data
     ports:
@@ -72,6 +78,9 @@ services:
     environment:
       PAPERLESS_GO_DATABASE_URL: postgres://paperless:${POSTGRES_PASSWORD}@postgres:5432/paperless?sslmode=disable
       PAPERLESS_GO_LOG_LEVEL: ${PAPERLESS_GO_LOG_LEVEL:-info}
+      PAPERLESS_GO_OCR_WORKERS: ${PAPERLESS_GO_OCR_WORKERS:-1}
+      PAPERLESS_GO_OCR_LANGUAGES: ${PAPERLESS_GO_OCR_LANGUAGES:-deu+eng}
+      PAPERLESS_GO_OCR_TIMEOUT: ${PAPERLESS_GO_OCR_TIMEOUT:-30m}
     volumes:
       # Document files. A bind mount keeps them visible on the host for backups.
       - ${DATA_DIR:-./data}:/data

@@ -66,11 +66,11 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ !inputs.dry_run }}
           # Layer cache in the GitHub Actions cache for the build stages. The
-          # runtime stage is always rebuilt, so every release gets the current
+          # runtime stages are always rebuilt, so every release gets the current
           # Debian security updates (Ghostscript parses uploaded PDFs).
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          no-cache-filters: runtime
+          no-cache-filters: runtime-base,runtime
           tags: ${{ steps.version.outputs.tags }}
           build-args: VERSION=${{ steps.version.outputs.version }}
           provenance: mode=max

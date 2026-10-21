@@ -311,9 +311,9 @@ func TestLoginMigrationRefusesUsers(t *testing.T) {
 	ctx := context.Background()
 	storetest.User(t, st, "alice", false)
 
-	// 2FA and the audit log first, which has no entries.
-	if rolledBack, err := st.MigrateDown(ctx); err != nil || rolledBack != "00006_two_factor.sql" {
-		t.Fatalf("roll back 2FA: %q, %v", rolledBack, err)
+	// The newer migrations and the audit log first, which has no entries.
+	if err := st.MigrateDownTo(ctx, 5); err != nil {
+		t.Fatal(err)
 	}
 	if rolledBack, err := st.MigrateDown(ctx); err != nil || rolledBack != "00005_audit_log.sql" {
 		t.Fatalf("roll back the audit log: %q, %v", rolledBack, err)

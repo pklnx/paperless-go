@@ -27,3 +27,6 @@ Compose, set them in `.env`; `docker-compose.yml` passes them on.
 | `PAPERLESS_GO_SECRET_KEY` | (required) | 32 random bytes, base64: encrypts the TOTP secrets (AES-256-GCM) and keys the hashes of the recovery codes. Generate it once with `./pgo keygen` (`paperless-go keygen`). `serve` refuses to start without a valid key. Keep it with your backups and never change it: with another key, nobody who uses two-factor login can log in until an admin runs `user reset-2fa`. See [Secret key](./security#secret-key). |
 | `PAPERLESS_GO_REQUIRE_2FA` | `false` | `true` makes two-factor login required for every user; admins always need it. Other values are refused. |
 | `PAPERLESS_GO_OPERATOR` | (none) | Who runs a command, recorded in the [audit log](../guide/audit-log) (not verified). `./pgo` sets it to the host user. |
+| `PAPERLESS_GO_OCR_WORKERS` | `1` | How many documents `serve` processes at once (0 to 16). Each runs its tools on every CPU. `0` turns processing in `serve` off; `process` still works. |
+| `PAPERLESS_GO_OCR_LANGUAGES` | `deu+eng` | Tesseract languages, joined with `+`. `serve` and `process` refuse to start when Tesseract lacks one; the image has `deu`, `eng` and `osd`. |
+| `PAPERLESS_GO_OCR_TIMEOUT` | `30m` | Limit of each processing attempt (at least `1m`, for example `2h`). An attempt that takes longer is stopped and retried. |

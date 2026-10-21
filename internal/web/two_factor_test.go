@@ -102,8 +102,9 @@ func TestUpgradeKeepsOnlyAdmin(t *testing.T) {
 	f := newAuthFixture(t)
 	ctx := context.Background()
 	f.addUserWithout2FA("admin", "correct horse battery", true)
-	if m, err := f.st.MigrateDown(ctx); err != nil || m != "00006_two_factor.sql" {
-		t.Fatalf("roll back 2FA: %q, %v", m, err)
+	// Back to the schema before 2FA, whatever came after it.
+	if err := f.st.MigrateDownTo(ctx, 5); err != nil {
+		t.Fatalf("roll back 2FA: %v", err)
 	}
 	if _, err := f.st.Migrate(ctx); err != nil {
 		t.Fatal(err)
