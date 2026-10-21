@@ -155,8 +155,14 @@ func syncClose(f syncCloser, what string) error {
 	return nil
 }
 
-// RelPath returns the relative path for a hash: documents/ab/cd/<hash>.
-func RelPath(hash string) string {
+// ErrNotHash means a hash passed to the store is not a lowercase hex
+// SHA-256. Every name the store builds comes from such a hash, so no input
+// can reach a path outside documents/.
+var ErrNotHash = errors.New("blobstore: not a SHA-256")
+
+// relPath returns the relative path for a hash: documents/ab/cd/<hash>. The
+// hash must be valid (IsHash).
+func relPath(hash string) string {
 	return "documents/" + hash[0:2] + "/" + hash[2:4] + "/" + hash
 }
 
@@ -200,7 +206,7 @@ func (s *Store) Put(r io.Reader) (blob Blob, created bool, err error) {
 		return Blob{}, false, fmt.Errorf("write temp file: %w", err)
 	}
 	hash := hex.EncodeToString(h.Sum(nil))
-	blob = Blob{SHA256: hash, Size: size, Path: RelPath(hash)}
+	blob = Blob{SHA256: hash, Size: size, Path: relPath(hash)}
 	final := s.abs(blob.Path)
 
 	synced := false
@@ -272,14 +278,28 @@ func (s *Store) syncShard(hash string) error {
 	return nil
 }
 
-// Open opens a stored blob by its relative path.
-func (s *Store) Open(relPath string) (*os.File, error) {
-	return os.Open(s.abs(relPath))
+// OpenHash opens the stored blob for hash. A malformed hash gives
+// ErrNotHash, a missing blob an error matching fs.ErrNotExist.
+func (s *Store) OpenHash(hash string) (*os.File, error) {
+	if !IsHash(hash) {
+		return nil, fmt.Errorf("%w: %q", ErrNotHash, hash)
+	}
+	return s.open(relPath(hash))
 }
 
-// Exists reports whether the blob for hash is present on disk.
+// open opens a stored blob by its relative path, which must come from
+// relPath.
+func (s *Store) open(rel string) (*os.File, error) {
+	return os.Open(s.abs(rel)) //nolint:gosec // rel is built from a validated hash
+}
+
+// Exists reports whether the blob for hash is present on disk. A malformed
+// hash is never present.
 func (s *Store) Exists(hash string) bool {
-	_, err := os.Stat(s.abs(RelPath(hash)))
+	if !IsHash(hash) {
+		return false
+	}
+	_, err := os.Stat(s.abs(relPath(hash)))
 	return err == nil
 }
 
@@ -292,9 +312,9 @@ func (s *Store) Exists(hash string) bool {
 // that no row refers to the blob and no concurrent Put needs it.
 func (s *Store) Remove(hash string) error {
 	if !IsHash(hash) {
-		return fmt.Errorf("not a SHA-256: %q", hash)
+		return fmt.Errorf("%w: %q", ErrNotHash, hash)
 	}
-	if err := s.ops.unlink(s.abs(RelPath(hash))); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := s.ops.unlink(s.abs(relPath(hash))); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	dir := filepath.Join(s.phys, "documents", hash[0:2], hash[2:4])

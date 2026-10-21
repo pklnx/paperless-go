@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -100,14 +102,78 @@ func documentFromDB(r db.GetDocumentRow) *Document {
 	}
 }
 
+// DocumentRef names a document.
+type DocumentRef struct {
+	ID    string
+	Title string
+}
+
+// isSHA256 reports whether s is a lowercase hex SHA-256, as the blob store
+// names its files.
+func isSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range []byte(s) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// validText reports whether s can be stored in a TEXT column: valid UTF-8
+// without NUL.
+func validText(s string) bool { return utf8.ValidString(s) && !strings.ContainsRune(s, 0) }
+
+// validate checks a new document before it reaches the database. A refused
+// field gives a *ValidationError (ErrInvalid) naming it.
+func (in *NewDocument) validate() error {
+	for _, f := range []struct{ name, v string }{
+		{"title", in.Title}, {"notes", in.Notes}, {"extracted_text", in.ExtractedText},
+		{"text_source", in.TextSource}, {"original_file_name", in.OriginalFileName},
+		{"original_mime", in.OriginalMIME},
+	} {
+		if !validText(f.v) {
+			return invalid(f.name)
+		}
+	}
+	switch {
+	case in.Source != SourceFile && in.Source != SourceScan && in.Source != SourceImage:
+		return invalid("source")
+	case !isSHA256(in.OriginalSHA256):
+		return invalid("original_sha256")
+	case in.OriginalSize < 0:
+		return invalid("original_size")
+	case strings.TrimSpace(in.OriginalMIME) == "":
+		return invalid("original_mime")
+	case in.PageCount < 0:
+		return invalid("page_count")
+	case in.ArchiveSerialNumber != nil && *in.ArchiveSerialNumber <= 0:
+		return invalid("archive_serial_number")
+	case (in.ArchiveSHA256 == nil) != (in.ArchiveSize == nil):
+		return invalid("archive_size")
+	case in.ArchiveSHA256 != nil && !isSHA256(*in.ArchiveSHA256):
+		return invalid("archive_sha256")
+	case in.ArchiveSize != nil && *in.ArchiveSize < 0:
+		return invalid("archive_size")
+	}
+	return nil
+}
+
 // CreateDocument adds a document owned by the scope's user, with its tags.
-// When the owner already has a document with the same original file, the
-// error is a *DuplicateError (ErrDuplicate); other owners' documents do not
-// count. A linked tag, correspondent or document type that is not the
-// owner's gives ErrOwnerMismatch; a taken ASN gives ErrASNTaken.
+// The input is validated first: a refused field gives a *ValidationError
+// (ErrInvalid). When the owner already has a document with the same
+// original file, the error is a *DuplicateError (ErrDuplicate); other
+// owners' documents do not count. A linked tag, correspondent or document
+// type that is not the owner's gives ErrOwnerMismatch; a taken ASN gives
+// ErrASNTaken; an owner that does not exist gives ErrUnknownUser.
 func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*Document, error) {
 	owner, err := sc.creator()
 	if err != nil {
+		return nil, err
+	}
+	if err := in.validate(); err != nil {
 		return nil, err
 	}
 	corr, err := parseLink(in.CorrespondentID)
@@ -149,11 +215,8 @@ func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*
 	})
 	if isUniqueViolation(err, "documents_owner_original_sha256_key") {
 		dup := &DuplicateError{}
-		existing, lerr := s.q.DocumentIDByOriginal(ctx, db.DocumentIDByOriginalParams{
-			OwnerID: owner, OriginalSha256: in.OriginalSHA256,
-		})
-		if lerr == nil {
-			dup.ExistingID = idString(existing)
+		if existing, lerr := s.FindDocumentByOriginal(ctx, owner, in.OriginalSHA256); lerr == nil {
+			dup.ExistingID = existing.ID
 		}
 		return nil, dup
 	}
@@ -161,6 +224,22 @@ func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*
 		return nil, mapErr(err)
 	}
 	return s.GetDocument(ctx, Scope{UserID: owner}, idString(id))
+}
+
+// FindDocumentByOriginal returns the document of ownerID whose original file
+// has the SHA-256 hash, or ErrNotFound. It looks only at that owner's
+// documents, never through a scope: an admin's duplicate check must not
+// find another user's document. A malformed hash gives a *ValidationError
+// (ErrInvalid).
+func (s *Store) FindDocumentByOriginal(ctx context.Context, ownerID int64, hash string) (*DocumentRef, error) {
+	if !isSHA256(hash) {
+		return nil, invalid("original_sha256")
+	}
+	r, err := s.q.DocumentByOriginal(ctx, db.DocumentByOriginalParams{OwnerID: ownerID, OriginalSha256: hash})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &DocumentRef{ID: idString(r.ID), Title: r.Title}, nil
 }
 
 // GetDocument returns one document in the scope, with its tags.

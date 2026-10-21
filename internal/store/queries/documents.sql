@@ -17,8 +17,8 @@ INSERT INTO documents (
 )
 RETURNING id;
 
--- name: DocumentIDByOriginal :one
-SELECT id FROM documents WHERE owner_id = $1 AND original_sha256 = $2;
+-- name: DocumentByOriginal :one
+SELECT id, title FROM documents WHERE owner_id = $1 AND original_sha256 = $2;
 
 -- name: GetDocument :one
 SELECT d.*,
