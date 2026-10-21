@@ -13,8 +13,9 @@ export class ApiError extends Error {
 
 /**
  * Dispatched on window when an API request answers 401 (the session ended
- * or was never there) or says the password must be changed first. The
- * login gate then checks the session again and shows the login page.
+ * or was never there) or says the password must be changed or two-factor
+ * login set up first. The login gate then checks the session again and
+ * shows the login page or the setup.
  */
 export const UNAUTHORIZED_EVENT = "paperless-go:unauthorized";
 
@@ -33,7 +34,11 @@ async function errorFrom(res: Response): Promise<ApiError> {
 async function errorFor(path: string, res: Response): Promise<ApiError> {
   const err = await errorFrom(res);
   // A failed login is no reason to check the session: only other paths.
-  if ((res.status === 401 && !path.startsWith(sessionPath)) || err.body.passwordChangeRequired === true) {
+  if (
+    (res.status === 401 && !path.startsWith(sessionPath)) ||
+    err.body.passwordChangeRequired === true ||
+    err.body.twoFactorSetupRequired === true
+  ) {
     window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
   }
   return err;
@@ -61,7 +66,14 @@ export interface User {
   admin: boolean;
   /** Logged in with a generated password: must choose their own first. */
   mustChangePassword: boolean;
+  /** Two-factor login is on for this user. */
+  twoFactorEnabled: boolean;
+  /** Two-factor login is required (admins, or everybody by configuration). */
+  twoFactorRequired: boolean;
 }
+
+/** The answer to the password step: a user, or the challenge for the second step. */
+export type LoginResult = { user: User } | { twoFactorRequired: true; challenge: string };
 
 /** The login state: a user, or none and whether the first admin is missing. */
 export type SessionState = { user: User } | { user: null; setupRequired: boolean };
@@ -76,8 +88,10 @@ export const sessionApi = {
     if (!res.ok) throw await errorFrom(res);
     return (await res.json()) as { user: User };
   },
-  login: async (username: string, password: string): Promise<User> =>
-    (await send<{ user: User }>("POST", sessionPath, { username, password }))!.user,
+  login: async (username: string, password: string): Promise<LoginResult> => (await send<LoginResult>("POST", sessionPath, { username, password }))!,
+  /** The second step: a TOTP or recovery code for the challenge of the password step. */
+  login2FA: async (challenge: string, code: string): Promise<User> =>
+    (await send<{ user: User }>("POST", `${sessionPath}/2fa`, { challenge, code }))!.user,
   logout: () => send("DELETE", sessionPath),
 };
 
@@ -88,8 +102,27 @@ export function retryAfter(err: unknown): number | null {
   return typeof s === "number" && s > 0 ? s : 60;
 }
 
+/** The user's 2FA state; the secret, URI and QR code only right after a setup started. */
+export interface TwoFactorState {
+  enabled: boolean;
+  required: boolean;
+  admin: boolean;
+  setupPending: boolean;
+  recoveryCodesLeft: number;
+  secret?: string;
+  otpauthUri?: string;
+  qrDataUrl?: string;
+}
+
 export const profileApi = {
   changePassword: (current: string, next: string) => send("PUT", "/api/profile/password", { current, new: next }),
+  twoFactor: {
+    get: () => getJSON<TwoFactorState>("/api/profile/2fa"),
+    setup: async () => (await send<TwoFactorState>("POST", "/api/profile/2fa/setup"))!,
+    confirm: async (code: string) => (await send<{ recoveryCodes: string[] }>("POST", "/api/profile/2fa/confirm", { code }))!,
+    disable: (currentPassword: string, code: string) => send("DELETE", "/api/profile/2fa", { currentPassword, code }),
+    regenerateRecoveryCodes: async (code: string) => (await send<{ recoveryCodes: string[] }>("POST", "/api/profile/2fa/recovery-codes", { code }))!,
+  },
 };
 
 /** A user as admins see them on the users page. */
@@ -98,6 +131,7 @@ export interface ManagedUser {
   admin: boolean;
   locked: boolean;
   mustChangePassword: boolean;
+  twoFactorEnabled: boolean;
   /** The rows the user owns; any of them keeps the user from being removed. */
   owned: { documents: number; tags: number; correspondents: number; documentTypes: number; savedViews: number };
   createdAt: string;
@@ -126,6 +160,7 @@ export const usersApi = {
   setAdmin: (name: string, admin: boolean) => send("PATCH", userPath(name), { admin }),
   setLocked: (name: string, locked: boolean) => send("PATCH", userPath(name), { locked }),
   remove: (name: string) => send("DELETE", userPath(name)),
+  reset2FA: (name: string) => send("POST", `${userPath(name)}/2fa/reset`),
 };
 
 /** One entry of the audit log, as GET /api/audit lists it. */

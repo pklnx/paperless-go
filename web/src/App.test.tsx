@@ -124,6 +124,77 @@ describe("App", () => {
     });
   });
 
+  it("asks for the second factor after the password", async () => {
+    let session: Reply = loggedOut;
+    stubServer((method, url, body) => {
+      if (url === "/api/session" && method === "POST") return { status: 200, body: { twoFactorRequired: true, challenge: "ch1" } };
+      if (url === "/api/session/2fa") {
+        const code = (body as { code: string }).code;
+        if (code === "000000") return { status: 401, body: { error: "invalid two-factor code" } };
+        if (code === "111111") return { status: 401, body: { error: "the login has expired; log in again" } };
+        session = { status: 200, body: { user: { ...alice, twoFactorEnabled: true } } };
+        return session;
+      }
+      if (url === "/api/session") return session;
+      return { status: 200 };
+    });
+    render(<App />);
+    const logIn = async () => {
+      fireEvent.change(await screen.findByLabelText(t.userName), { target: { value: "alice" } });
+      fireEvent.change(screen.getByLabelText(t.fieldPassword), { target: { value: "correct horse battery" } });
+      fireEvent.click(screen.getByRole("button", { name: t.logIn }));
+      await screen.findByText(t.twoFactorLogin);
+    };
+    await logIn();
+    // The code field never shows the password.
+    expect((screen.getByLabelText(t.twoFactorCode) as HTMLInputElement).value).toBe("");
+    fireEvent.change(screen.getByLabelText(t.twoFactorCode), { target: { value: "000000" } });
+    fireEvent.click(screen.getByRole("button", { name: t.logIn }));
+    expect((await screen.findByRole("alert")).textContent).toBe(t.invalidTwoFactor);
+
+    // An expired login goes back to the password.
+    fireEvent.change(screen.getByLabelText(t.twoFactorCode), { target: { value: "111111" } });
+    fireEvent.click(screen.getByRole("button", { name: t.logIn }));
+    expect((await screen.findByRole("alert")).textContent).toBe(t.twoFactorExpired);
+    expect(screen.getByLabelText(t.fieldPassword)).toBeTruthy();
+
+    await logIn();
+    fireEvent.change(screen.getByLabelText(t.twoFactorCode), { target: { value: "abcd-efgh-jkmn-pqrs" } });
+    fireEvent.click(screen.getByRole("button", { name: t.logIn }));
+    await screen.findByRole("button", { name: t.profile });
+    expect(requests.filter((r) => r.url === "/api/session/2fa").at(-1)?.body).toEqual({ challenge: "ch1", code: "abcd-efgh-jkmn-pqrs" });
+  });
+
+  it("makes an admin without 2FA set it up first", async () => {
+    const admin = { ...alice, admin: true, twoFactorRequired: true, twoFactorEnabled: false };
+    let session: Reply = { status: 200, body: { user: admin } };
+    const codes = Array.from({ length: 10 }, (_, i) => `aaaa-bbbb-cccc-ddd${i}`);
+    stubServer((_, url) => {
+      if (url === "/api/session") return session;
+      if (url === "/api/profile/2fa") return { status: 200, body: { enabled: false, required: true, admin: true, setupPending: false, recoveryCodesLeft: 0 } };
+      if (url === "/api/profile/2fa/setup")
+        return { status: 200, body: { enabled: false, required: true, admin: true, setupPending: true, recoveryCodesLeft: 0, secret: "SECRETKEY", qrDataUrl: "data:image/png;base64,AA" } };
+      if (url === "/api/profile/2fa/confirm") {
+        session = { status: 200, body: { user: { ...admin, twoFactorEnabled: true } } };
+        return { status: 200, body: { recoveryCodes: codes } };
+      }
+      return { status: 200 };
+    });
+    render(<App />);
+    await screen.findByText(t.twoFactorRequired);
+    expect(screen.queryByRole("button", { name: t.users })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: t.twoFactorSetup }));
+    expect(await screen.findByText("SECRETKEY")).toBeTruthy();
+    expect(screen.getByAltText(t.twoFactorQR)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(t.twoFactorCode), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: t.twoFactorConfirm }));
+    // The codes are shown once; only "saved" goes on.
+    expect((await screen.findByLabelText(t.twoFactorRecovery)).textContent).toBe(codes.join("\n"));
+    fireEvent.click(screen.getByRole("button", { name: t.twoFactorCodesSaved }));
+    await screen.findByRole("button", { name: t.users });
+    expect(requests.find((r) => r.url === "/api/profile/2fa/confirm")?.body).toEqual({ code: "123456" });
+  });
+
   it("returns to the login page when the session ends", async () => {
     let session: Reply = { status: 200, body: { user: { ...alice, admin: true } } };
     stubServer((_, url) => {

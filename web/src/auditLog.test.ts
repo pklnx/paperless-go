@@ -46,6 +46,10 @@ describe("entry texts", () => {
     expect(entryDetail(entry("auth.login", { details: { method: "password" } }), en)).toBe("password");
     expect(entryDetail(entry("user.add", { details: { admin: true } }), de)).toBe("Admin");
     expect(entryDetail(entry("user.add", { details: { admin: false } }), en)).toBe("");
+    expect(entryDetail(entry("auth.login", { details: { method: "2fa", factor: "recovery_code" } }), en)).toBe("password and code, recovery code");
+    expect(entryDetail(entry("auth.login_failed", { details: { method: "2fa", reason: "second_factor" } }), de)).toBe("Passwort und Code, falscher Code");
+    expect(entryDetail(entry("profile.2fa_disable", { details: { factor: "totp" } }), en)).toBe("authenticator app");
+    expect(entryDetail(entry("profile.2fa_enable"), en)).toBe("");
     // A code the UI does not know yet is shown as it is.
     expect(entryDetail(entry("auth.login", { details: { method: "passkey" } }), de)).toBe("passkey");
   });

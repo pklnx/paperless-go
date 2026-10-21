@@ -97,7 +97,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (name, password_hash, is_admin, must_change_password)
 VALUES ($1, $2, $3, $4)
-RETURNING id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at
+RETURNING id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at, two_factor_secret, two_factor_enabled, two_factor_pending_secret, two_factor_last_counter, two_factor_version
 `
 
 type CreateUserParams struct {
@@ -125,6 +125,11 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.LockedAt,
 		&i.PasswordChangedAt,
 		&i.LastLoginAt,
+		&i.TwoFactorSecret,
+		&i.TwoFactorEnabled,
+		&i.TwoFactorPendingSecret,
+		&i.TwoFactorLastCounter,
+		&i.TwoFactorVersion,
 	)
 	return i, err
 }
@@ -192,7 +197,7 @@ func (q *Queries) DeleteUserSessions(ctx context.Context, userID int64) error {
 }
 
 const getSession = `-- name: GetSession :one
-SELECT s.id, s.last_seen_at, u.id AS user_id, u.name, u.is_admin, u.must_change_password
+SELECT s.id, s.last_seen_at, u.id AS user_id, u.name, u.is_admin, u.must_change_password, u.two_factor_enabled
 FROM sessions s
 JOIN users u ON u.id = s.user_id
 WHERE s.id = $1
@@ -214,6 +219,7 @@ type GetSessionRow struct {
 	Name               string
 	IsAdmin            bool
 	MustChangePassword bool
+	TwoFactorEnabled   bool
 }
 
 // A session is valid while it has not expired, was used after the idle
@@ -228,12 +234,13 @@ func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (GetSess
 		&i.Name,
 		&i.IsAdmin,
 		&i.MustChangePassword,
+		&i.TwoFactorEnabled,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at FROM users WHERE id = $1
+SELECT id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at, two_factor_secret, two_factor_enabled, two_factor_pending_secret, two_factor_last_counter, two_factor_version FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
@@ -249,12 +256,17 @@ func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
 		&i.LockedAt,
 		&i.PasswordChangedAt,
 		&i.LastLoginAt,
+		&i.TwoFactorSecret,
+		&i.TwoFactorEnabled,
+		&i.TwoFactorPendingSecret,
+		&i.TwoFactorLastCounter,
+		&i.TwoFactorVersion,
 	)
 	return i, err
 }
 
 const getUserByName = `-- name: GetUserByName :one
-SELECT id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at FROM users WHERE name = $1
+SELECT id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at, two_factor_secret, two_factor_enabled, two_factor_pending_secret, two_factor_last_counter, two_factor_version FROM users WHERE name = $1
 `
 
 func (q *Queries) GetUserByName(ctx context.Context, name string) (User, error) {
@@ -270,12 +282,17 @@ func (q *Queries) GetUserByName(ctx context.Context, name string) (User, error) 
 		&i.LockedAt,
 		&i.PasswordChangedAt,
 		&i.LastLoginAt,
+		&i.TwoFactorSecret,
+		&i.TwoFactorEnabled,
+		&i.TwoFactorPendingSecret,
+		&i.TwoFactorLastCounter,
+		&i.TwoFactorVersion,
 	)
 	return i, err
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at FROM users ORDER BY name
+SELECT id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at, two_factor_secret, two_factor_enabled, two_factor_pending_secret, two_factor_last_counter, two_factor_version FROM users ORDER BY name
 `
 
 func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
@@ -297,6 +314,11 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 			&i.LockedAt,
 			&i.PasswordChangedAt,
 			&i.LastLoginAt,
+			&i.TwoFactorSecret,
+			&i.TwoFactorEnabled,
+			&i.TwoFactorPendingSecret,
+			&i.TwoFactorLastCounter,
+			&i.TwoFactorVersion,
 		); err != nil {
 			return nil, err
 		}

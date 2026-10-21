@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/pklnx/paperless-go/internal/auth"
+	"github.com/pklnx/paperless-go/internal/crypto"
 	"github.com/pklnx/paperless-go/internal/store"
 	"github.com/pklnx/paperless-go/internal/store/storetest"
 )
@@ -44,12 +45,16 @@ func (c *testClock) Advance(d time.Duration) {
 }
 
 type authFixture struct {
-	t      *testing.T
-	st     *store.Store
-	srv    *httptest.Server
-	client *http.Client
-	clock  *testClock
-	dbURL  string
+	t         *testing.T
+	st        *store.Store
+	srv       *httptest.Server
+	client    *http.Client
+	clock     *testClock
+	dbURL     string
+	sealer    *crypto.Sealer
+	secretKey []byte
+	// secrets are the TOTP secrets by user name, for login.
+	secrets map[string]string
 }
 
 func newAuthFixture(t *testing.T) *authFixture {
@@ -57,18 +62,28 @@ func newAuthFixture(t *testing.T) *authFixture {
 	return newAuthFixtureOpts(t, Options{})
 }
 
-// newAuthFixtureOpts is newAuthFixture with TrustedProxies from opts.
+// newAuthFixtureOpts is newAuthFixture with TrustedProxies and Require2FA
+// from opts.
 func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 	t.Helper()
 	st, dbURL := storetest.NewWithURL(t)
+	key := bytes.Repeat([]byte{7}, crypto.KeySize)
+	sealer, err := crypto.NewSealer(key)
+	if err != nil {
+		t.Fatal(err)
+	}
 	clock := &testClock{now: time.Now()}
 	s := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{
 		AllowedHosts: []string{"127.0.0.1"}, Hasher: storetest.Hasher, Now: clock.Now, TrustedProxies: opts.TrustedProxies,
+		Sealer: sealer, SecretKey: key, Require2FA: opts.Require2FA,
 	})
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	jar, _ := cookiejar.New(nil)
-	return &authFixture{t: t, st: st, srv: srv, client: &http.Client{Jar: jar}, clock: clock, dbURL: dbURL}
+	return &authFixture{
+		t: t, st: st, srv: srv, client: &http.Client{Jar: jar}, clock: clock, dbURL: dbURL,
+		sealer: sealer, secretKey: key, secrets: map[string]string{},
+	}
 }
 
 // as returns a copy of the fixture with its own cookie jar, i.e. another
@@ -90,7 +105,63 @@ func (f *authFixture) addUser(name, password string, admin bool) *store.User {
 	if err != nil {
 		f.t.Fatal(err)
 	}
+	if admin {
+		// Admins need 2FA: set it up like the profile page does.
+		f.enableTOTP(u)
+		if u, err = f.st.GetUserByID(context.Background(), u.ID); err != nil {
+			f.t.Fatal(err)
+		}
+	}
 	return u
+}
+
+// addUserWithout2FA creates a user without setting up 2FA, also an admin:
+// like an admin from before 2FA existed.
+func (f *authFixture) addUserWithout2FA(name, password string, admin bool) *store.User {
+	f.t.Helper()
+	h, err := storetest.Hasher.Hash(context.Background(), password)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	u, err := f.st.CreateUser(context.Background(), name, h, admin)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return u
+}
+
+// enableTOTP turns 2FA on for u and returns its secret and recovery codes.
+func (f *authFixture) enableTOTP(u *store.User) (string, []string) {
+	f.t.Helper()
+	ctx := context.Background()
+	secret, err := auth.GenerateTOTPSecret()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	codes, err := auth.GenerateRecoveryCodes()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if err := f.st.BeginTwoFactorSetup(ctx, u.ID, secret, f.sealer); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := f.st.ConfirmTwoFactorSetup(ctx, u.ID, f.code(secret), f.clock.Now(), f.sealer, codes, f.secretKey); err != nil {
+		f.t.Fatal(err)
+	}
+	f.secrets[u.Name] = secret
+	return secret, codes
+}
+
+// code returns the TOTP code for secret one time step after the last one,
+// like a user who logs in again after a while: each step counts only once.
+func (f *authFixture) code(secret string) string {
+	f.t.Helper()
+	f.clock.Advance(auth.TOTPPeriod)
+	code, err := auth.GenerateTOTP(secret, f.clock.Now())
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return code
 }
 
 func (f *authFixture) do(method, path string, body any) (*http.Response, map[string]any) {
@@ -122,9 +193,20 @@ func (f *authFixture) expect(method, path string, body any, want int) map[string
 	return out
 }
 
+// login logs in with the password and, for a user with 2FA, the next TOTP
+// code.
 func (f *authFixture) login(name, password string) *http.Response {
 	f.t.Helper()
-	resp, _ := f.do("POST", "/api/session", map[string]string{"username": name, "password": password})
+	resp, out := f.do("POST", "/api/session", map[string]string{"username": name, "password": password})
+	if resp.StatusCode == 200 {
+		if challenge, ok := out["challenge"].(string); ok {
+			secret, ok := f.secrets[auth.NormalizeUserName(name)]
+			if !ok {
+				f.t.Fatalf("no test TOTP secret for %q", name)
+			}
+			resp, _ = f.do("POST", "/api/session/2fa", map[string]string{"challenge": challenge, "code": f.code(secret)})
+		}
+	}
 	return resp
 }
 
@@ -228,7 +310,7 @@ func TestRouteTable(t *testing.T) {
 	if got := strings.Join(public, ","); got != "GET /healthz,GET /{$},GET /assets/" {
 		t.Errorf("public routes: %s", got)
 	}
-	if seen[accessSession] == 0 || seen[accessLogin] != 3 {
+	if seen[accessSession] == 0 || seen[accessLogin] != 4 {
 		t.Errorf("routes per access: %v", seen)
 	}
 }

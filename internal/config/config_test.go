@@ -82,3 +82,48 @@ func TestLoadTrustedProxies(t *testing.T) {
 		t.Errorf("invalid: %v", err)
 	}
 }
+
+func TestLoadSecretKey(t *testing.T) {
+	t.Setenv(EnvDatabaseURL, "postgres://x")
+	t.Setenv(EnvSecretKey, "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SecretKey != nil {
+		t.Fatalf("SecretKey without the variable: %v", cfg.SecretKey)
+	}
+	if _, err := cfg.Sealer(); err == nil || !strings.Contains(err.Error(), "keygen") {
+		t.Errorf("Sealer without a key: %v", err)
+	}
+
+	key := strings.Repeat("A", 43) + "=" // 32 zero bytes
+	t.Setenv(EnvSecretKey, " "+key+"\n")
+	if cfg, err = Load(); err != nil || len(cfg.SecretKey) != 32 {
+		t.Fatalf("valid key: %v, %v", cfg, err)
+	}
+	if _, err := cfg.Sealer(); err != nil {
+		t.Errorf("Sealer: %v", err)
+	}
+	for _, bad := range []string{"not base64!", "c2hvcnQ="} {
+		t.Setenv(EnvSecretKey, bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), EnvSecretKey) {
+			t.Errorf("key %q: %v", bad, err)
+		}
+	}
+}
+
+func TestLoadRequire2FA(t *testing.T) {
+	t.Setenv(EnvDatabaseURL, "postgres://x")
+	for v, want := range map[string]bool{"": false, "false": false, "TRUE": true, " true ": true} {
+		t.Setenv(EnvRequire2FA, v)
+		cfg, err := Load()
+		if err != nil || cfg.Require2FA != want {
+			t.Errorf("%q: %v, %v", v, cfg, err)
+		}
+	}
+	t.Setenv(EnvRequire2FA, "yes")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), EnvRequire2FA) {
+		t.Errorf("yes: %v", err)
+	}
+}

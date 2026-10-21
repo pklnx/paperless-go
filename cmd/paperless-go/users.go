@@ -14,6 +14,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/pklnx/paperless-go/internal/auth"
+	"github.com/pklnx/paperless-go/internal/config"
 	"github.com/pklnx/paperless-go/internal/store"
 )
 
@@ -34,6 +35,7 @@ Create the first admin with:  user add NAME --admin`,
 		newUserAdminCmd(false),
 		newUserLockCmd(true),
 		newUserLockCmd(false),
+		newUserReset2FACmd(),
 		newUserRemoveCmd(),
 	)
 	return cmd
@@ -187,10 +189,13 @@ func newUserListCmd() *cobra.Command {
 				return nil
 			}
 			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tROLE\tSTATE\tDOCUMENTS\tCREATED\tLAST LOGIN")
+			fmt.Fprintln(w, "NAME\tROLE\tSTATE\t2FA\tDOCUMENTS\tCREATED\tLAST LOGIN")
 			// STATE says "must change password" for generated passwords.
 			for _, u := range users {
-				role, state, last := "user", "active", "never"
+				role, state, last, twoFactor := "user", "active", "never", "off"
+				if u.TwoFactorEnabled {
+					twoFactor = "on"
+				}
 				if u.IsAdmin {
 					role = "admin"
 				}
@@ -203,7 +208,7 @@ func newUserListCmd() *cobra.Command {
 				if u.LastLoginAt != nil {
 					last = u.LastLoginAt.Local().Format(time.DateTime)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", u.Name, role, state, owned[u.ID].Documents, u.CreatedAt.Local().Format(time.DateOnly), last)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", u.Name, role, state, twoFactor, owned[u.ID].Documents, u.CreatedAt.Local().Format(time.DateOnly), last)
 			}
 			return w.Flush()
 		},
@@ -340,6 +345,31 @@ func newUserAdminCmd(admin bool) *cobra.Command {
 				return lastAdminError(err, u.Name)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%q %s\n", u.Name, done)
+			return nil
+		},
+	}
+}
+
+func newUserReset2FACmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "reset-2fa NAME",
+		Short: "Turn off a user's two-factor login (TOTP) and log them out everywhere",
+		Long: `Turn off a user's two-factor login: the TOTP secret and the recovery codes
+are deleted, and the user is logged out everywhere. Use it when someone lost
+their authenticator and their recovery codes. It also works for the last
+admin. Admins (and everybody with ` + config.EnvRequire2FA + `=true) must set up
+2FA again at their next login.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, u, err := loadUser(cmd, args[0])
+			if err != nil {
+				return err
+			}
+			defer a.close()
+			if err := a.store.ResetTwoFactor(withCLIAudit(cmd, cliUserEntry(cmd, "user.2fa_reset", u)), u.ID); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "two-factor login of %q reset; existing logins ended\n", u.Name)
 			return nil
 		},
 	}

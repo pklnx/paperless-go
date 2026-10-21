@@ -55,14 +55,15 @@ const (
 	reasonWrongPassword = "wrong_password"
 	reasonUnknownUser   = "unknown_user"
 	reasonLocked        = "locked"
+	reasonSecondFactor  = "second_factor"
 )
 
 // auditLoginFailed records a refused login. Without a known user, the name
 // is kept only if it is a valid user name (see loggableUserName), so that a
 // password typed into the name field is not stored.
-func (s *Server) auditLoginFailed(r *http.Request, reason, name string, u *store.User) {
+func (s *Server) auditLoginFailed(r *http.Request, method, reason, name string, u *store.User) {
 	e := s.auditEntry(r, "auth.login_failed")
-	e.Detail("method", "password")
+	e.Detail("method", method)
 	e.Detail("reason", reason)
 	if u != nil {
 		e.SetUser(u.ID, u.Name)
