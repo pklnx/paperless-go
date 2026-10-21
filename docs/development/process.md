@@ -39,7 +39,7 @@ changes). When the plan is good, the reviewer or the maintainer replaces
 `review` with **`ready`**. Only `ready` issues are implemented.
 
 A plan with several parts gets one sub-issue per part, titled
-`<what> (#N, part K)`. The `ready` on the main issue covers all parts, and the
+`<what> (#N, part K)`; the planner creates them when posting the plan. The `ready` on the main issue covers all parts, and the
 main issue closes with the last part.
 
 The order of `ready` issues is chosen during implementation, with a short
