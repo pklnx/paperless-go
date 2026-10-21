@@ -39,7 +39,8 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 
 The first migration creates `installation`, one row with a random UUID
 that identifies this server (for example as "created by" in exported archive
-folders). The document model (`00002_documents.sql`) follows the Document
+folders). The document model (`00002_documents.sql`, deadlines and saved
+views in `00003_deadlines_saved_views.sql`) follows the Document
 Archive app (`DocumentArchive/Model` there), so archives can move between the
 app and the server through the app's archive folder format:
 
@@ -49,14 +50,15 @@ app and the server through the app's archive folder format:
 | `Document`: id (UUID), title, documentDate, createdAt, modifiedAt, notes, isFavorite, isInbox, archiveSerialNumber, pageCount, fileSize, extractedText, source, originalFileName, textSource, contentHash | `documents`, with the UUID as primary key; the original file (`original_sha256`, size, MIME type) and the archive PDF (`archive_sha256`, size) |
 | `Tag`: name, colorHex, symbol, parent, matchText, matchMode | `tags`, `document_tags` (nested through `parent_id`) |
 | `Correspondent`, `DocumentType`: name, matchText, matchMode | `correspondents`, `document_types` |
-| `Deadline`: kind, date, label, origin, isDone | `deadlines` (planned) |
-| `SavedView` | `saved_views` (planned) |
+| `Deadline`: kind, date, label, origin, isDone, addedToCalendarAt, addedToRemindersAt, createdAt, modifiedAt | `deadlines`, several per document |
+| `SavedView`: name, symbol, sortIndex, createdAt, filterJSON | `saved_views`, with the filter as a `JSONB` object |
 
 UUIDs as keys (not serials) keep imported and exported records stable across
 the app and the server.
 
-**Owner.** Every document, tag, correspondent and document type has an
-`owner_id` (`ON DELETE RESTRICT`: a user with rows cannot be deleted).
+**Owner.** Every document, tag, correspondent, document type, deadline and
+saved view has an `owner_id` (`ON DELETE RESTRICT`: a user with rows cannot
+be deleted).
 Metadata is per owner, and names are unique per owner, ignoring case (tags:
 among siblings). Links use composite foreign keys `(owner_id, x_id) →
 x (owner_id, id)`, so the database itself refuses a document that points at
@@ -80,9 +82,26 @@ leaves its files; the orphan sweep comes with the trash.
 without one; deleting a tag removes it from its documents and makes its
 children root tags (refused with `ErrTagNameConflict` when a child would
 collide with a root tag of the same name; nothing is renamed). Deleting a
-document removes its tag links. The trigger `tags_no_cycle` refuses a parent
+document removes its tag links and its deadlines. The trigger `tags_no_cycle` refuses a parent
 that would make a tag its own ancestor (`ErrTagCycle`); a per-owner advisory
 lock keeps two concurrent changes from building a cycle together.
+
+**Deadlines.** A deadline belongs to one document and to that document's
+owner: the composite foreign key `(owner_id, document_id) → documents
+(owner_id, id)` (`ON DELETE CASCADE`) refuses a deadline whose owner differs
+from its document's. `AddDeadline` gives the deadline the document's owner,
+also for an admin; a document outside the scope gives `ErrOwnerMismatch`.
+`kind` (`expires`, `due`, `noticeEnds`, `other`) and `origin` (`manual`,
+`heuristic`, `ai`) are the app's raw strings without a `CHECK`, so values of
+newer app versions survive a round trip. All dates are `TIMESTAMPTZ`
+(microseconds), so the archive format's millisecond dates round-trip.
+
+**Saved views.** A saved view is per owner; names need not be unique, as in
+the app. `filter` holds the app's `filterJSON` as a `JSONB` object (a `CHECK`
+refuses anything else; the store gives `ErrInvalidFilter`). The server does
+not interpret it: unknown keys and values are kept, while whitespace and key
+order are normalized by PostgreSQL. Lists are ordered as in the app: by
+`sort_index`, then `created_at`, then `id`.
 
 ## Blob durability
 

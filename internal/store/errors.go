@@ -31,8 +31,9 @@ var (
 	// its own ancestor.
 	ErrTagCycle = errors.New("store: tag cycle")
 
-	// ErrOwnerMismatch means a linked tag, parent tag, correspondent or
-	// document type is not one of the owner's own. It covers both "belongs
+	// ErrOwnerMismatch means a linked tag, parent tag, correspondent,
+	// document type or (for a deadline) document is not one of the owner's
+	// own. It covers both "belongs
 	// to another owner" and "does not exist" on purpose: telling them apart
 	// would reveal that another user's row exists. Do not split it.
 	ErrOwnerMismatch = errors.New("store: linked row does not belong to the owner")
@@ -94,8 +95,11 @@ func mapErr(err error) error {
 	case errTagCycleCode:
 		return ErrTagCycle
 	case "23514": // check_violation
-		if pgErr.ConstraintName == "tags_parent_not_self" {
+		switch pgErr.ConstraintName {
+		case "tags_parent_not_self":
 			return ErrTagCycle
+		case "saved_views_filter_object":
+			return ErrInvalidFilter
 		}
 	case "23505": // unique_violation
 		switch pgErr.ConstraintName {
@@ -106,7 +110,8 @@ func mapErr(err error) error {
 		}
 	case "23503": // foreign_key_violation
 		switch pgErr.ConstraintName {
-		case "tags_parent_fkey", "documents_correspondent_fkey", "documents_document_type_fkey", "document_tags_tag_fkey":
+		case "tags_parent_fkey", "documents_correspondent_fkey", "documents_document_type_fkey", "document_tags_tag_fkey",
+			"deadlines_document_fkey":
 			return ErrOwnerMismatch
 		case "document_tags_document_fkey":
 			return ErrNotFound
