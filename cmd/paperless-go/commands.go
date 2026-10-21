@@ -175,6 +175,10 @@ and the security review are done (see the security docs).
 Generate it once with "keygen" and keep it with your backups; without it
 nobody with two-factor login can log in.
 
+Passkeys need ` + config.EnvPublicURL + `, the address users open (like
+https://docs.example.ts.net): they are bound to its host name, which is
+accepted in addition to the allowed hosts. Without it passkeys are off.
+
 Requests are only accepted with a Host header listed in
 ` + config.EnvAllowedHosts + ` (default: localhost, 127.0.0.1, ::1), which blocks DNS
 rebinding; state-changing requests must come from the same origin. Use HTTPS
@@ -223,7 +227,7 @@ at a time, default 1; 0 turns it off).`,
 			}
 			srv := web.New(a.store, log, web.Options{
 				AllowedHosts: a.cfg.AllowedHosts, TrustedProxies: a.cfg.TrustedProxies,
-				Sealer: sealer, SecretKey: a.cfg.SecretKey, Require2FA: a.cfg.Require2FA,
+				Sealer: sealer, SecretKey: a.cfg.SecretKey, Require2FA: a.cfg.Require2FA, PublicURL: a.cfg.PublicURL,
 				Blobs: blobs, MaxUploadSize: a.cfg.MaxUploadSize,
 			})
 			log.Info("listening", "addr", listen, "version", version)

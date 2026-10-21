@@ -184,9 +184,38 @@ func ownedRowCounts(ctx context.Context, q *db.Queries) (map[int64]OwnedRows, er
 // user. With mustChange (a generated password) the user has to choose their
 // own password at the next login.
 func (s *Store) SetUserPassword(ctx context.Context, id int64, passwordHash string, mustChange bool) error {
+	return s.ResetUserPassword(ctx, id, passwordHash, PasswordReset{MustChange: mustChange})
+}
+
+// PasswordReset says what else ResetUserPassword does.
+type PasswordReset struct {
+	// MustChange (a generated password): the user has to choose their own
+	// password at the next login.
+	MustChange bool
+	// DropPasskeys removes the user's passkeys: after a compromise a new
+	// password alone would not lock the attacker out. The pending audit
+	// entry gets the number removed.
+	DropPasskeys bool
+}
+
+// ResetUserPassword stores a new password hash, ends all sessions of the
+// user and does what opts says.
+func (s *Store) ResetUserPassword(ctx context.Context, id int64, passwordHash string, opts PasswordReset) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		if err := one(q.SetUserPassword(ctx, db.SetUserPasswordParams{ID: id, PasswordHash: passwordHash, MustChangePassword: mustChange})); err != nil {
+		if _, err := lockUserRow(ctx, q, id); err != nil {
 			return err
+		}
+		if err := one(q.SetUserPassword(ctx, db.SetUserPasswordParams{ID: id, PasswordHash: passwordHash, MustChangePassword: opts.MustChange})); err != nil {
+			return err
+		}
+		if opts.DropPasskeys {
+			n, err := removePasskeys(ctx, q, id)
+			if err != nil {
+				return err
+			}
+			if e := auditFrom(ctx); e != nil {
+				e.Detail("passkeysRemoved", n)
+			}
 		}
 		return q.DeleteUserSessions(ctx, id)
 	})

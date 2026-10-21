@@ -52,10 +52,12 @@ func (s *Server) auditBestEffort(r *http.Request, e *store.AuditEntry) {
 
 // Reasons of a failed login.
 const (
-	reasonWrongPassword = "wrong_password"
-	reasonUnknownUser   = "unknown_user"
-	reasonLocked        = "locked"
-	reasonSecondFactor  = "second_factor"
+	reasonWrongPassword  = "wrong_password"
+	reasonUnknownUser    = "unknown_user"
+	reasonLocked         = "locked"
+	reasonSecondFactor   = "second_factor"
+	reasonUnknownPasskey = "unknown_passkey"
+	reasonPasskeyInvalid = "passkey_invalid"
 )
 
 // auditSecondFactorFailed records a refused password or code when a

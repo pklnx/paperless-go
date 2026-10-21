@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { ApiError, profileApi, retryAfter, type TwoFactorState, type User } from "./api";
 import { t } from "./i18n";
+import { PasskeySection } from "./Passkeys";
 import { recoveryFileName, recoveryPdf, recoveryText, saveFile, type RecoverySheet } from "./recoveryCodes";
 import { button, input, primary } from "./styles";
 
@@ -67,7 +68,7 @@ export function PasswordForm({ done }: { done: () => void }) {
   );
 }
 
-/** The user's own login settings: the password and two-factor login. */
+/** The user's own login settings: the password, two-factor login and passkeys. */
 export function ProfilePage({ user }: { user: User }) {
   const [changed, setChanged] = useState(false);
   return (
@@ -86,6 +87,10 @@ export function ProfilePage({ user }: { user: User }) {
       <section className="flex flex-col gap-3 rounded-lg border border-line p-4">
         <h3 className="font-semibold">{t.twoFactor}</h3>
         <TwoFactorSettings user={user.name} />
+      </section>
+      <section className="flex flex-col gap-3 rounded-lg border border-line p-4">
+        <h3 className="font-semibold">{t.passkeys}</h3>
+        <PasskeySection />
       </section>
     </div>
   );

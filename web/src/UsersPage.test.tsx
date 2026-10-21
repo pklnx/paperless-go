@@ -11,6 +11,7 @@ const user = (name: string, extra: Partial<ManagedUser> = {}): ManagedUser => ({
   locked: false,
   mustChangePassword: false,
   twoFactorEnabled: false,
+  passkeys: 0,
   owned: none,
   createdAt: "2026-10-21T10:00:00Z",
   lastLoginAt: null,
@@ -68,6 +69,36 @@ describe("UsersPage", () => {
     expect(within(rows[2]!).queryByRole("button", { name: t.twoFactorReset })).toBeNull();
     fireEvent.click(within(rows[1]!).getByRole("button", { name: t.twoFactorReset }));
     await vi.waitFor(() => expect(requests.some((r) => r.method === "POST" && r.url === "/api/users/kim/2fa/reset")).toBe(true));
+  });
+
+  it("shows passkeys and removes them after confirmation", async () => {
+    stubServer([user("admin", { admin: true, self: true }), user("kim", { passkeys: 2 }), user("lee")]);
+    render(<UsersPage />);
+    const rows = await screen.findAllByRole("listitem");
+    expect(within(rows[1]!).getByText(t.passkeyCount(2))).toBeTruthy();
+    expect(within(rows[2]!).queryByRole("button", { name: t.removePasskeys })).toBeNull();
+    fireEvent.click(within(rows[1]!).getByRole("button", { name: t.removePasskeys }));
+    await vi.waitFor(() => expect(requests.some((r) => r.method === "DELETE" && r.url === "/api/users/kim/passkeys")).toBe(true));
+  });
+
+  it("resets a password, removing passkeys unless unticked", async () => {
+    stubServer([user("admin", { admin: true, self: true }), user("kim", { passkeys: 1 }), user("lee")]);
+    render(<UsersPage />);
+    const rows = await screen.findAllByRole("listitem");
+    fireEvent.click(within(rows[1]!).getByRole("button", { name: t.resetPassword }));
+    const box = within(rows[1]!).getByLabelText(t.resetAlsoPasskeys(1)) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    fireEvent.click(box);
+    fireEvent.click(within(within(rows[1]!).getByRole("group")).getByRole("button", { name: t.confirmReset }));
+    await vi.waitFor(() => expect(requests.some((r) => r.method === "POST" && r.url === "/api/users/kim/password")).toBe(true));
+    expect(requests.find((r) => r.url === "/api/users/kim/password")?.body).toEqual({ removePasskeys: false });
+
+    // Without passkeys there is nothing to tick; the default stays.
+    fireEvent.click(within(rows[2]!).getByRole("button", { name: t.resetPassword }));
+    expect(within(rows[2]!).queryByRole("checkbox")).toBeNull();
+    fireEvent.click(within(within(rows[2]!).getByRole("group")).getByRole("button", { name: t.confirmReset }));
+    await vi.waitFor(() => expect(requests.some((r) => r.url === "/api/users/lee/password")).toBe(true));
+    expect(requests.find((r) => r.url === "/api/users/lee/password")?.body).toEqual({ removePasskeys: true });
   });
 
   it("adds a user and shows the generated password once", async () => {

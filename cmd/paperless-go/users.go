@@ -36,6 +36,7 @@ Create the first admin with:  user add NAME --admin`,
 		newUserLockCmd(true),
 		newUserLockCmd(false),
 		newUserReset2FACmd(),
+		newUserRemovePasskeysCmd(),
 		newUserRemoveCmd(),
 	)
 	return cmd
@@ -183,13 +184,17 @@ func newUserListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			passkeys, err := a.store.PasskeyCounts(cmd.Context())
+			if err != nil {
+				return err
+			}
 			out := cmd.OutOrStdout()
 			if len(users) == 0 {
 				fmt.Fprintf(out, "No users yet. Create the first admin with: %s user add NAME --admin\n", commandName())
 				return nil
 			}
 			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tROLE\tSTATE\t2FA\tDOCUMENTS\tCREATED\tLAST LOGIN")
+			fmt.Fprintln(w, "NAME\tROLE\tSTATE\t2FA\tPASSKEYS\tDOCUMENTS\tCREATED\tLAST LOGIN")
 			// STATE says "must change password" for generated passwords.
 			for _, u := range users {
 				role, state, last, twoFactor := "user", "active", "never", "off"
@@ -208,7 +213,7 @@ func newUserListCmd() *cobra.Command {
 				if u.LastLoginAt != nil {
 					last = u.LastLoginAt.Local().Format(time.DateTime)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", u.Name, role, state, twoFactor, owned[u.ID].Documents, u.CreatedAt.Local().Format(time.DateOnly), last)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n", u.Name, role, state, twoFactor, passkeys[u.ID], owned[u.ID].Documents, u.CreatedAt.Local().Format(time.DateOnly), last)
 			}
 			return w.Flush()
 		},
@@ -271,12 +276,16 @@ func newUserSetPasswordCmd() *cobra.Command {
 }
 
 func newUserResetPasswordCmd() *cobra.Command {
-	return &cobra.Command{
+	var keepPasskeys bool
+	cmd := &cobra.Command{
 		Use:   "reset-password NAME",
 		Short: "Generate a new password the user must change at the next login",
 		Long: `Generate a random password and print it once. Hand it to the user: at the
 next login they must choose their own password. The user is logged out
-everywhere.`,
+everywhere.
+
+The user's passkeys are removed too, unless --keep-passkeys is given: after
+a compromise, a new password alone would not lock the attacker out.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, u, err := loadUser(cmd, args[0])
@@ -292,10 +301,42 @@ everywhere.`,
 			if err != nil {
 				return err
 			}
-			if err := a.store.SetUserPassword(withCLIAudit(cmd, cliUserEntry(cmd, "user.password_reset", u)), u.ID, hash, true); err != nil {
+			e := cliUserEntry(cmd, "user.password_reset", u)
+			opts := store.PasswordReset{MustChange: true, DropPasskeys: !keepPasskeys}
+			if err := a.store.ResetUserPassword(withCLIAudit(cmd, e), u.ID, hash, opts); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "new password for %q (shown only now; to be changed at the next login):\n%s\n", u.Name, pw)
+			out := cmd.OutOrStdout()
+			if !keepPasskeys {
+				fmt.Fprintf(out, "%v passkey(s) of %q removed\n", e.Details["passkeysRemoved"], u.Name)
+			}
+			fmt.Fprintf(out, "new password for %q (shown only now; to be changed at the next login):\n%s\n", u.Name, pw)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&keepPasskeys, "keep-passkeys", false, "do not remove the user's passkeys")
+	return cmd
+}
+
+func newUserRemovePasskeysCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "remove-passkeys NAME",
+		Short: "Remove all passkeys of a user and log them out everywhere",
+		Long: `Remove all passkeys of a user, for a lost or stolen device. The user is
+logged out everywhere and logs in with their password (and second factor)
+again.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, u, err := loadUser(cmd, args[0])
+			if err != nil {
+				return err
+			}
+			defer a.close()
+			n, err := a.store.RemovePasskeys(withCLIAudit(cmd, cliUserEntry(cmd, "user.passkeys_removed", u)), u.ID)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%d passkey(s) of %q removed; existing logins ended\n", n, u.Name)
 			return nil
 		},
 	}

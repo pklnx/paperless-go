@@ -236,7 +236,7 @@ func (s *Server) handleTwoFactorLogin(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, store.ErrTwoFactorInvalid):
 		s.limiter.Fail(u.Name, addr)
-		s.log.Info("login failed: second factor", "user", u.Name, "addr", addr)
+		s.log.Info("login failed: second factor", "user", u.Name, "addr", s.clientIP(r))
 		s.auditLoginFailed(r, "2fa", reasonSecondFactor, u.Name, u)
 		s.fail(w, r, http.StatusUnauthorized, errInvalidSecondFactor, nil)
 		return
@@ -249,7 +249,7 @@ func (s *Server) handleTwoFactorLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only now is the login complete.
 	s.limiter.Succeed(u.Name)
-	s.log.Info("login", "user", user.Name, "addr", addr, "2fa", true)
+	s.log.Info("login", "user", user.Name, "addr", s.clientIP(r), "2fa", true)
 	setSessionCookie(w, r, token, auth.MaxSessionAge)
 	s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(user.Name, user.IsAdmin, user.MustChangePassword, true)})
 }

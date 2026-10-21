@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { App } from "./App";
 import { firstAdminCommand } from "./Auth";
 import { t } from "./i18n";
@@ -208,5 +208,124 @@ describe("App", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: t.users }));
     await screen.findByLabelText(t.userName);
+  });
+});
+
+describe("passkey login", () => {
+  const buf = (...b: number[]) => new Uint8Array(b).buffer;
+  const assertion = {
+    id: "AQ",
+    rawId: buf(1),
+    type: "public-key",
+    authenticatorAttachment: "platform",
+    getClientExtensionResults: () => ({}),
+    response: { clientDataJSON: buf(2), authenticatorData: buf(3), signature: buf(4), userHandle: buf(5) },
+  };
+
+  /** A browser with passkeys but without autofill; credentials.get answers with get. */
+  function stubPasskeys(get: () => Promise<unknown>) {
+    const signalUnknownCredential = vi.fn(async () => {});
+    vi.stubGlobal("PublicKeyCredential", Object.assign(function PublicKeyCredential() {}, { signalUnknownCredential }));
+    const credentials = { get: vi.fn((_options: CredentialRequestOptions) => get()), create: vi.fn() };
+    Object.defineProperty(navigator, "credentials", { value: credentials, configurable: true });
+    return { credentials, signalUnknownCredential };
+  }
+
+  const offered = (): Reply => ({ status: 401, body: { error: "login required", setupRequired: false, passkeyOrigin: window.location.origin } });
+  const ceremony: Reply = { status: 200, body: { token: "tok", publicKey: { challenge: "CQo", rpId: "localhost", userVerification: "required" } } };
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, "credentials");
+  });
+
+  it("is offered only at the public URL", async () => {
+    stubPasskeys(async () => assertion);
+    stubServer(() => ({ status: 401, body: { error: "login required", setupRequired: false, passkeyOrigin: "https://docs.example.test" } }));
+    render(<App />);
+    await screen.findByLabelText(t.userName);
+    expect(screen.queryByRole("button", { name: t.passkeySignIn })).toBeNull();
+  });
+
+  it("logs in with the browser's passkey", async () => {
+    const { credentials } = stubPasskeys(async () => assertion);
+    let session = offered();
+    stubServer((_, url) => {
+      if (url === "/api/session/passkey/begin") return ceremony;
+      if (url === "/api/session/passkey/finish") {
+        session = { status: 200, body: { user: { ...alice, admin: true } } };
+        return session;
+      }
+      if (url === "/api/session") return session;
+      return { status: 200 };
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: t.passkeySignIn }));
+    await screen.findByRole("button", { name: t.users });
+    const options = credentials.get.mock.calls[0]![0] as { publicKey: PublicKeyCredentialRequestOptions };
+    expect(Array.from(new Uint8Array(options.publicKey.challenge as ArrayBuffer))).toEqual([9, 10]);
+    expect(requests.find((r) => r.url === "/api/session/passkey/finish")?.body).toEqual({
+      token: "tok",
+      credential: {
+        id: "AQ",
+        rawId: "AQ",
+        type: "public-key",
+        authenticatorAttachment: "platform",
+        clientExtensionResults: {},
+        response: { clientDataJSON: "Ag", authenticatorData: "Aw", signature: "BA", userHandle: "BQ" },
+      },
+    });
+  });
+
+  it("forgets a passkey the server does not know", async () => {
+    const { signalUnknownCredential } = stubPasskeys(async () => assertion);
+    stubServer((_, url) => {
+      if (url === "/api/session/passkey/begin") return ceremony;
+      if (url === "/api/session/passkey/finish")
+        return { status: 401, body: { error: "this passkey is not registered", unknownCredential: true, credentialId: "AQ", rpId: "localhost" } };
+      return offered();
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: t.passkeySignIn }));
+    expect((await screen.findByRole("alert")).textContent).toBe(t.passkeyUnknown);
+    expect(signalUnknownCredential).toHaveBeenCalledWith({ rpId: "localhost", credentialId: "AQ" });
+  });
+
+  it("says when no passkey was chosen", async () => {
+    stubPasskeys(async () => {
+      throw new DOMException("cancelled", "NotAllowedError");
+    });
+    stubServer((_, url) => (url === "/api/session/passkey/begin" ? ceremony : offered()));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: t.passkeySignIn }));
+    expect((await screen.findByRole("alert")).textContent).toBe(t.passkeyCancelled);
+    expect(requests.some((r) => r.url === "/api/session/passkey/finish")).toBe(false);
+  });
+
+  it("renews an expired autofill offer once", async () => {
+    const signalUnknownCredential = vi.fn(async () => {});
+    vi.stubGlobal(
+      "PublicKeyCredential",
+      Object.assign(function PublicKeyCredential() {}, { signalUnknownCredential, isConditionalMediationAvailable: async () => true }),
+    );
+    // Each conditional request answers at once, as if the user picked the
+    // passkey after the ceremony expired.
+    // A third request never answers, so that a loop would stop there.
+    const get = vi.fn((_options: CredentialRequestOptions) => (get.mock.calls.length <= 2 ? Promise.resolve(assertion) : new Promise(() => {})));
+    Object.defineProperty(navigator, "credentials", { value: { get, create: vi.fn() }, configurable: true });
+    stubServer((_, url) => {
+      if (url === "/api/session/passkey/begin") return ceremony;
+      if (url === "/api/session/passkey/finish") return { status: 401, body: { error: "the passkey login has expired; try again" } };
+      return offered();
+    });
+    render(<App />);
+    expect((await screen.findByRole("alert")).textContent).toBe(t.passkeyExpired);
+    await waitFor(() => expect(requests.filter((r) => r.url === "/api/session/passkey/finish")).toHaveLength(2));
+    // The first offer and one renewal, both conditional; then no more.
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    // Let the second failure's handling finish: no third offer follows.
+    await act(async () => {});
+    expect(get).toHaveBeenCalledTimes(2);
+    for (const [options] of get.mock.calls) expect((options as CredentialRequestOptions).mediation).toBe("conditional");
+    expect(requests.filter((r) => r.url === "/api/session/passkey/begin")).toHaveLength(2);
   });
 });

@@ -18,16 +18,21 @@ export function targetLabel(e: AuditEntry): string {
 }
 
 /**
- * The detail worth a glance: a login's method, second factor and reason, a
- * failed login's name, the role of a new user, the factor that confirmed a
- * 2FA change.
+ * The detail worth a glance: a login's method, passkey, second factor and
+ * reason, a failed login's name, the role of a new user, the factor that
+ * confirmed a 2FA change, the passkey added or removed.
  */
 export function entryDetail(e: AuditEntry, m: Messages = t): string {
   const d = e.details;
   const str = (v: unknown) => (typeof v === "string" ? v : "");
   const code = (v: unknown) => (str(v) ? m.auditCode(str(v)) : "");
   if (e.action.startsWith("auth."))
-    return [str(d.name) && m.logTriedName(str(d.name)), code(d.method), code(d.factor), code(d.reason)].filter(Boolean).join(", ");
+    return [str(d.name) && m.logTriedName(str(d.name)), code(d.method), str(d.passkey) && m.logTriedName(str(d.passkey)), code(d.factor), code(d.reason)]
+      .filter(Boolean)
+      .join(", ");
+  if (e.action === "profile.passkey_add" || e.action === "profile.passkey_remove") return str(d.name) && m.logTriedName(str(d.name));
+  if (e.action === "user.passkeys_removed" && typeof d.count === "number") return m.passkeyCount(d.count);
+  if (e.action === "user.password_reset" && typeof d.passkeysRemoved === "number" && d.passkeysRemoved > 0) return `${m.removePasskeys}: ${d.passkeysRemoved}`;
   if (e.action === "profile.2fa_disable" || e.action === "profile.recovery_codes") return code(d.factor);
   if (e.action === "profile.2fa_failed") return [str(d.attempted) && m.auditAction(str(d.attempted)), code(d.reason)].filter(Boolean).join(", ");
   if (e.action === "user.add" && d.admin === true) return m.auditCode("admin");

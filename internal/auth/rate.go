@@ -26,6 +26,14 @@ func NewRate(limit int, window time.Duration) *Rate {
 	return &Rate{limit: limit, window: window, counts: map[string]*rateWindow{}, now: time.Now}
 }
 
+// SetClock replaces the clock, for a server with an injected clock and for
+// tests. Call it before the Rate is used.
+func (r *Rate) SetClock(now func() time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.now = now
+}
+
 // Allow counts an event for key. If the limit is reached, it returns false
 // and how long until the window ends.
 func (r *Rate) Allow(key string) (bool, time.Duration) {
