@@ -19,6 +19,7 @@ type adminUserJSON struct {
 	Admin              bool   `json:"admin"`
 	Locked             bool   `json:"locked"`
 	MustChangePassword bool   `json:"mustChangePassword"`
+	TwoFactorEnabled   bool   `json:"twoFactorEnabled"`
 	// Owned counts the rows the user owns; any of them keeps the user from
 	// being removed.
 	Owned       ownedJSON  `json:"owned"`
@@ -63,7 +64,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	for _, u := range users {
 		o := owned[u.ID]
 		out = append(out, adminUserJSON{
-			Name: u.Name, Admin: u.IsAdmin, Locked: u.LockedAt != nil, MustChangePassword: u.MustChangePassword,
+			Name: u.Name, Admin: u.IsAdmin, Locked: u.LockedAt != nil, MustChangePassword: u.MustChangePassword, TwoFactorEnabled: u.TwoFactorEnabled,
 			Owned:     ownedJSON{Documents: o.Documents, Tags: o.Tags, Correspondents: o.Correspondents, DocumentTypes: o.DocumentTypes, SavedViews: o.SavedViews},
 			CreatedAt: u.CreatedAt, LastLoginAt: u.LastLoginAt, Self: u.ID == userID(r),
 		})

@@ -148,9 +148,16 @@ func (s *Server) authenticate(mux *http.ServeMux, accessOf map[string]access) ht
 			s.fail(w, r, http.StatusUnauthorized, "login required", nil)
 			return
 		}
-		// A generated password restricts the session to choosing one's own.
+		// A generated password, and a required 2FA that is not set up yet,
+		// both restrict the session to finishing the setup: first the
+		// password, then 2FA.
 		if sess.MustChangePassword && (r.Method != http.MethodPut || r.URL.Path != profilePasswordPath) {
 			s.writeJSON(w, http.StatusForbidden, passwordChangeJSON{Error: "choose your own password first", PasswordChangeRequired: true})
+			return
+		}
+		if !sess.MustChangePassword && s.twoFactorRequired(sess.IsAdmin) && !sess.TwoFactorEnabled &&
+			!twoFactorSetupPathAllowed(r.Method, r.URL.Path) {
+			s.writeJSON(w, http.StatusForbidden, twoFactorSetupJSON{Error: "set up two-factor authentication first", TwoFactorSetupRequired: true})
 			return
 		}
 		mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, sess)))
@@ -163,6 +170,14 @@ type userJSON struct {
 	// MustChangePassword: the user logged in with a generated password and
 	// must choose their own before anything else works.
 	MustChangePassword bool `json:"mustChangePassword"`
+	// TwoFactorEnabled and TwoFactorRequired: a user who must use 2FA but
+	// has not set it up can only do that until it is on.
+	TwoFactorEnabled  bool `json:"twoFactorEnabled"`
+	TwoFactorRequired bool `json:"twoFactorRequired"`
+}
+
+func (s *Server) userJSON(name string, admin, mustChange, twoFactor bool) userJSON {
+	return userJSON{Name: name, Admin: admin, MustChangePassword: mustChange, TwoFactorEnabled: twoFactor, TwoFactorRequired: s.twoFactorRequired(admin)}
 }
 
 type sessionJSON struct {
@@ -183,7 +198,7 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if sess != nil {
-		s.writeJSON(w, http.StatusOK, sessionJSON{User: userJSON{Name: sess.UserName, Admin: sess.IsAdmin, MustChangePassword: sess.MustChangePassword}})
+		s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(sess.UserName, sess.IsAdmin, sess.MustChangePassword, sess.TwoFactorEnabled)})
 		return
 	}
 	n, err := s.store.CountUsers(r.Context())
@@ -226,7 +241,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if len(in.Password) > auth.MaxPasswordLength {
 		// No stored password is that long; skip the hashing work.
 		s.limiter.Fail(name, addr)
-		s.auditLoginFailed(r, reasonWrongPassword, name, nil)
+		s.auditLoginFailed(r, "password", reasonWrongPassword, name, nil)
 		s.fail(w, r, http.StatusUnauthorized, errWrongLogin, nil)
 		return
 	}
@@ -251,15 +266,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.limiter.Fail(name, addr)
 		s.log.Info("login failed", "user", loggableUserName(name), "addr", addr)
 		if u == nil {
-			s.auditLoginFailed(r, reasonUnknownUser, name, nil)
+			s.auditLoginFailed(r, "password", reasonUnknownUser, name, nil)
 		} else {
-			s.auditLoginFailed(r, reasonWrongPassword, name, u)
+			s.auditLoginFailed(r, "password", reasonWrongPassword, name, u)
 		}
 		s.fail(w, r, http.StatusUnauthorized, errWrongLogin, nil)
 		return
 	}
 	if u.LockedAt != nil {
-		s.auditLoginFailed(r, reasonLocked, name, u)
+		s.auditLoginFailed(r, "password", reasonLocked, name, u)
 		s.fail(w, r, http.StatusForbidden, "this user is locked", nil)
 		return
 	}
@@ -270,6 +285,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 				s.log.Warn("renew password hash", "user", u.Name, "err", err)
 			}
 		}
+	}
+	// With 2FA on (required or voluntary), the password is only the first
+	// step: the limiter is reset after the second one.
+	if u.TwoFactorEnabled {
+		s.startTwoFactorLogin(w, r, u)
+		return
 	}
 	s.limiter.Succeed(name)
 	// A fresh token on every login: a token planted before the login is
@@ -292,7 +313,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("login", "user", u.Name, "addr", addr)
 	setSessionCookie(w, r, token, auth.MaxSessionAge)
-	s.writeJSON(w, http.StatusOK, sessionJSON{User: userJSON{Name: u.Name, Admin: u.IsAdmin, MustChangePassword: u.MustChangePassword}})
+	s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(u.Name, u.IsAdmin, u.MustChangePassword, false)})
 }
 
 // handleLogout ends the session. A logout never fails because of the audit

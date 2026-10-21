@@ -1,6 +1,7 @@
 package process
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -289,5 +290,30 @@ func TestCheckLanguages(t *testing.T) {
 	}}
 	if err := CheckLanguages(ctx, broken, t.TempDir(), "deu"); err == nil {
 		t.Fatal("no error without tesseract")
+	}
+}
+
+func TestPipelineTextTooLong(t *testing.T) {
+	for size, wantErr := range map[int]bool{MaxTextBytes: false, MaxTextBytes + 1: true} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "original")
+		if err := os.WriteFile(path, []byte("%PDF-1.4"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f := &fakeRunner{handle: func(ctx context.Context, c Command) ([]byte, error) {
+			if c.Name == "pdftotext" {
+				return nil, os.WriteFile(filepath.Join(c.Dir, c.Args[len(c.Args)-1]), bytes.Repeat([]byte("a"), size), 0o600)
+			}
+			return poppler(pdf{pages: []string{longText}})(ctx, c)
+		}}
+		res, err := (&Pipeline{Runner: f}).Run(context.Background(), Input{Dir: dir, Path: path, MIME: mimePDF})
+		var pe *PermanentError
+		if wantErr {
+			if !errors.As(err, &pe) || pe.Msg != msgTextTooLong {
+				t.Fatalf("%d bytes of text: %v", size, err)
+			}
+		} else if err != nil || len(res.Text) != size {
+			t.Fatalf("%d bytes of text: %d, %v", size, len(res.Text), err)
+		}
 	}
 }

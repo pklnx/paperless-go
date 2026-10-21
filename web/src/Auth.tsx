@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { ApiError, UNAUTHORIZED_EVENT, retryAfter, sessionApi, type SessionState, type User } from "./api";
-import { PasswordForm } from "./Profile";
+import { PasswordForm, TwoFactorSettings } from "./Profile";
 import { ThemeToggle } from "./ThemeToggle";
 import { t } from "./i18n";
 import logo from "./logo.svg";
@@ -18,8 +18,9 @@ interface Props {
 
 /**
  * Shows the app only with a valid session. Without one it shows the login
- * page, or how to create the first admin. Any 401 from the API (the session
- * ended) brings the login page back.
+ * page, or how to create the first admin. A user who must choose a password
+ * or set up two-factor login does that first. Any 401 from the API (the
+ * session ended) brings the login page back.
  */
 export function AuthGate({ children }: Props) {
   const [state, setState] = useState<GateState>({ loading: true });
@@ -63,6 +64,19 @@ export function AuthGate({ children }: Props) {
         </Centered>
       );
     }
+    if (state.user.twoFactorRequired && !state.user.twoFactorEnabled) {
+      return (
+        <Centered>
+          <Brand />
+          <h2 className="font-semibold">{t.twoFactorSetup}</h2>
+          <p>{t.twoFactorRequired}</p>
+          <TwoFactorSettings user={state.user.name} onDone={check} />
+          <button type="button" className="self-start text-accent-ink hover:underline" onClick={logout}>
+            {t.logOut}
+          </button>
+        </Centered>
+      );
+    }
     return children(state.user, logout);
   }
   if (state.setupRequired) return <SetupNotice check={check} />;
@@ -100,6 +114,8 @@ function loginError(err: unknown): string {
 function LoginPage({ done }: { done: (user: User) => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [challenge, setChallenge] = useState<string | null>(null);
+  const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -108,13 +124,74 @@ function LoginPage({ done }: { done: (user: User) => void }) {
     setBusy(true);
     setError("");
     try {
-      done(await sessionApi.login(username, password));
+      const result = await sessionApi.login(username, password);
+      setPassword("");
+      if ("user" in result) {
+        done(result.user);
+        return;
+      }
+      // The second step: a code from the app or a recovery code.
+      setChallenge(result.challenge);
+      setBusy(false);
     } catch (err) {
       setError(loginError(err));
       setPassword("");
       setBusy(false);
     }
   };
+
+  const submitCode = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!challenge) return;
+    setBusy(true);
+    setError("");
+    try {
+      done(await sessionApi.login2FA(challenge, code));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401 && err.message.includes("expired")) {
+        setChallenge(null);
+        setError(t.twoFactorExpired);
+      } else {
+        setError(err instanceof ApiError && err.status === 401 ? t.invalidTwoFactor : loginError(err));
+      }
+      setCode("");
+      setBusy(false);
+    }
+  };
+
+  if (challenge) {
+    return (
+      <Centered>
+        <Brand />
+        <h2 className="font-semibold">{t.twoFactorLogin}</h2>
+        <p>{t.twoFactorLoginText}</p>
+        <form className="flex flex-col gap-3" onSubmit={submitCode}>
+          <label className="flex flex-col gap-1">
+            {t.twoFactorCode}
+            {/* Text, not numeric: recovery codes contain letters. */}
+            <input
+              className={input}
+              required
+              autoFocus
+              autoComplete="one-time-code"
+              autoCapitalize="none"
+              spellCheck={false}
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+            />
+          </label>
+          {error && (
+            <p role="alert" className="text-danger">
+              {error}
+            </p>
+          )}
+          <button type="submit" className={`${primary} mt-1`} disabled={busy}>
+            {busy ? t.loggingIn : t.logIn}
+          </button>
+        </form>
+      </Centered>
+    );
+  }
 
   return (
     <Centered>

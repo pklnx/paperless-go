@@ -156,14 +156,34 @@ type Tag struct {
 	ModifiedAt time.Time
 }
 
+type TwoFactorChallenge struct {
+	ID               []byte
+	UserID           int64
+	TwoFactorVersion int64
+	CreatedAt        time.Time
+	ExpiresAt        time.Time
+}
+
+type TwoFactorRecoveryCode struct {
+	ID       int64
+	UserID   int64
+	CodeHash []byte
+	UsedAt   *time.Time
+}
+
 type User struct {
-	ID                 int64
-	Name               string
-	IsAdmin            bool
-	CreatedAt          time.Time
-	PasswordHash       string
-	MustChangePassword bool
-	LockedAt           *time.Time
-	PasswordChangedAt  time.Time
-	LastLoginAt        *time.Time
+	ID                     int64
+	Name                   string
+	IsAdmin                bool
+	CreatedAt              time.Time
+	PasswordHash           string
+	MustChangePassword     bool
+	LockedAt               *time.Time
+	PasswordChangedAt      time.Time
+	LastLoginAt            *time.Time
+	TwoFactorSecret        []byte
+	TwoFactorEnabled       bool
+	TwoFactorPendingSecret []byte
+	TwoFactorLastCounter   *int64
+	TwoFactorVersion       int64
 }

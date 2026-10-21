@@ -77,6 +77,9 @@ export function UsersPage() {
               <span className={`text-sm ${u.locked ? "text-danger" : "text-ink-muted"}`}>
                 {u.locked ? t.stateLocked : u.mustChangePassword ? t.stateMustChange : t.stateActive}
               </span>
+              <span className={`text-sm ${u.twoFactorEnabled ? "text-ok" : "text-ink-muted"}`}>
+                {u.twoFactorEnabled ? t.twoFactorShortOn : t.twoFactorShortOff}
+              </span>
               <span className="ml-auto text-sm text-ink-muted">
                 {t.colDocuments}: {u.owned.documents} · {t.colLastLogin}: {u.lastLoginAt ? formatTime(u.lastLoginAt) : t.never}
               </span>
@@ -99,6 +102,15 @@ export function UsersPage() {
                 >
                   {u.locked ? t.unlock : t.lock}
                 </button>
+                {u.twoFactorEnabled && (
+                  <button
+                    type="button"
+                    className={button}
+                    onClick={() => window.confirm(t.twoFactorResetConfirm(u.name)) && run(() => usersApi.reset2FA(u.name))}
+                  >
+                    {t.twoFactorReset}
+                  </button>
+                )}
                 <button type="button" className={button} onClick={() => run(() => usersApi.setAdmin(u.name, !u.admin))}>
                   {u.admin ? t.removeAdmin : t.makeAdmin}
                 </button>

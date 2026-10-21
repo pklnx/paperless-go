@@ -55,14 +55,25 @@ const (
 	reasonWrongPassword = "wrong_password"
 	reasonUnknownUser   = "unknown_user"
 	reasonLocked        = "locked"
+	reasonSecondFactor  = "second_factor"
 )
+
+// auditSecondFactorFailed records a refused password or code when a
+// logged-in user changes their own 2FA (attempted names the change). Best
+// effort, like a failed login: the limiter counts it either way.
+func (s *Server) auditSecondFactorFailed(r *http.Request, attempted, reason string) {
+	e := s.auditEntry(r, "profile.2fa_failed")
+	e.Detail("attempted", attempted)
+	e.Detail("reason", reason)
+	s.auditBestEffort(r, e)
+}
 
 // auditLoginFailed records a refused login. Without a known user, the name
 // is kept only if it is a valid user name (see loggableUserName), so that a
 // password typed into the name field is not stored.
-func (s *Server) auditLoginFailed(r *http.Request, reason, name string, u *store.User) {
+func (s *Server) auditLoginFailed(r *http.Request, method, reason, name string, u *store.User) {
 	e := s.auditEntry(r, "auth.login_failed")
-	e.Detail("method", "password")
+	e.Detail("method", method)
 	e.Detail("reason", reason)
 	if u != nil {
 		e.SetUser(u.ID, u.Name)

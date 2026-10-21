@@ -20,6 +20,11 @@ import (
 // OCR.
 const MinPageChars = 15
 
+// MaxTextBytes bounds the text layer of one document. A PDF with more text
+// (a decompression bomb, or a dump of data rather than a document) fails:
+// the text would be read into memory and stored in one row.
+const MaxTextBytes = 16 << 20
+
 // MIME types of stored originals (internal/ingest detects them).
 const (
 	mimePDF  = "application/pdf"
@@ -43,6 +48,7 @@ func permanent(msg string) error { return &PermanentError{Msg: msg} }
 const (
 	msgUnreadablePDF = "The PDF cannot be read: it is damaged, or it needs a password to open."
 	msgNoPages       = "The PDF has no pages."
+	msgTextTooLong   = "The PDF has more than 16 MiB of text, more than one document may have."
 	msgUnsupported   = "Documents of this type cannot be processed."
 	// Image conversion and OCR come with #5, part 3; until then such
 	// documents fail and are queued again with reprocess --failed.
@@ -178,7 +184,15 @@ func (p *Pipeline) pdfText(ctx context.Context, in Input) (text string, copyAllo
 	if err != nil {
 		return "", false, popplerError(err)
 	}
-	b, err := os.ReadFile(filepath.Join(in.Dir, out))
+	path := filepath.Join(in.Dir, out)
+	fi, err := os.Stat(path)
+	if err != nil {
+		return "", false, err
+	}
+	if fi.Size() > MaxTextBytes {
+		return "", false, permanent(msgTextTooLong)
+	}
+	b, err := os.ReadFile(path) //nolint:gosec // in the job's work directory
 	if err != nil {
 		return "", false, err
 	}

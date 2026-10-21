@@ -291,6 +291,24 @@ func TestWorkerShutdownGivesJobBack(t *testing.T) {
 	e.workDirEmpty(t)
 }
 
+func TestWorkerShutdownWhileStoring(t *testing.T) {
+	e := newEnv(t)
+	d := e.doc(t, "%PDF done")
+	ctx, cancel := context.WithCancel(context.Background())
+	// The tools are done; the shutdown comes as the result is stored.
+	e.w.completing = cancel
+	if o, err := e.w.RunOnce(ctx); err != nil || o != Released {
+		t.Fatalf("RunOnce: %v, %v", o, err)
+	}
+	j := e.job(t, d.ID)
+	if j.State != store.JobQueued || j.Attempts != 0 || j.LockedUntil != nil {
+		t.Fatalf("job after shutdown: %+v", j)
+	}
+	if got, _ := e.st.GetDocument(context.Background(), e.owner, d.ID); got.ArchiveSHA256 != nil {
+		t.Fatalf("result stored: %+v", got)
+	}
+}
+
 func TestWorkerRunShutdown(t *testing.T) {
 	e := newEnv(t)
 	d := e.doc(t, "%PDF long")

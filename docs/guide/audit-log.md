@@ -8,20 +8,25 @@ change or delete entries.
 
 | Action | When |
 |---|---|
-| `auth.login`, `auth.logout` | A user logs in or out. |
-| `auth.login_failed` | A login is refused: wrong password, unknown user or a locked user. For an unknown user the tried name is kept only if it is a valid user name. Attempts the login limit refuses are not recorded. |
+| `auth.login`, `auth.logout` | A user logs in or out. A two-factor login records the factor: the authenticator app (`totp`) or a recovery code, with how many are left. |
+| `auth.login_failed` | A login is refused: wrong password, unknown user, a locked user or a wrong second factor. For an unknown user the tried name is kept only if it is a valid user name. Attempts the login limit refuses are not recorded. |
 | `user.add`, `user.remove` | An admin adds or removes a user. |
 | `user.lock`, `user.unlock` | An admin locks or unlocks a user. |
 | `user.promote`, `user.demote` | An admin grants or takes away the admin role. |
 | `user.password_reset` | An admin generates a new password for a user. |
 | `user.password_set` | `user set-password` sets a password on the command line. |
+| `user.2fa_reset` | An admin, or `user reset-2fa`, turns a user's two-factor login off. |
 | `profile.password_change` | A user changes their own password. |
+| `profile.2fa_enable`, `profile.2fa_disable` | A user turns their two-factor login on or off. |
+| `profile.recovery_codes` | A user creates new recovery codes. |
+| `profile.2fa_failed` | A wrong code or password when a user sets up, turns off or renews their two-factor login. |
 | `audit.export` | `audit export` writes the log out. |
 | `document.reprocess` | `reprocess` queues documents for processing again (with the selection and how many it queued). |
 
 Each entry has the time, the user (by the name they had then), the client
 address and browser in the web UI, the user an admin action was about, and
-details such as a failed login's reason. Passwords are never recorded.
+details such as a failed login's reason. Passwords, TOTP secrets and codes
+are never recorded.
 Commands record the command, the operating system user and the operator
 `./pgo` passes (the user on the host); neither is verified, because whoever
 can run commands holds the database password.

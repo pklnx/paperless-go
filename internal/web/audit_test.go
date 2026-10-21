@@ -243,8 +243,9 @@ func TestAuditChangesFailClosed(t *testing.T) {
 	// The own password is unchanged: the old one still logs in below.
 	f.expect("DELETE", "/api/session", nil, 204)
 	f.expect("GET", "/api/users", nil, 401)
-	resp, _ := f.do("POST", "/api/session", map[string]string{"username": "root", "password": "correct horse battery"})
-	if resp.StatusCode != 503 {
+	// The password step creates no session and writes nothing; the second
+	// step needs its entry.
+	if resp := f.login("root", "correct horse battery"); resp.StatusCode != 503 {
 		t.Fatalf("login: %d", resp.StatusCode)
 	}
 	f.expect("GET", "/api/session", nil, 401)

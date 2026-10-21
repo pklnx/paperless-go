@@ -86,10 +86,12 @@ type Worker struct {
 
 	// Test hooks. after returns a channel that fires after d (heartbeat,
 	// idle wait); nil means time.After. listening is called each time the
-	// listener is ready, heartbeat after each lease renewal.
-	after     func(d time.Duration) <-chan time.Time
-	listening func()
-	heartbeat func(error)
+	// listener is ready, heartbeat after each lease renewal, completing
+	// before the result is stored.
+	after      func(d time.Duration) <-chan time.Time
+	listening  func()
+	heartbeat  func(error)
+	completing func()
 }
 
 func (w *Worker) now() time.Time {
@@ -142,13 +144,7 @@ func (w *Worker) RunOnce(ctx context.Context) (Outcome, error) {
 
 	switch {
 	case ctx.Err() != nil:
-		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
-		defer cancel()
-		if err := w.Store.ReleaseJob(rctx, job, w.now()); err != nil && !errors.Is(err, store.ErrLeaseLost) {
-			return Released, fmt.Errorf("give job %d back: %w", job.ID, err)
-		}
-		log.Info("shutdown: job given back")
-		return Released, nil
+		return w.release(ctx, job, log)
 	case errors.Is(context.Cause(jobCtx), errLeaseLost):
 		log.Warn("lease lost; result dropped")
 		return Dropped, nil
@@ -161,8 +157,15 @@ func (w *Worker) RunOnce(ctx context.Context) (Outcome, error) {
 		return w.failAttempt(ctx, job, err, log)
 	}
 
+	if w.completing != nil {
+		w.completing()
+	}
 	err = w.Store.CompleteJob(ctx, job, w.now(), res)
 	switch {
+	case err != nil && ctx.Err() != nil:
+		// Shutdown while storing: nothing or everything was committed. A
+		// job that is done is no longer ours to give back.
+		return w.release(ctx, job, log)
 	case errors.Is(err, store.ErrNotFound):
 		log.Info("document deleted; result dropped")
 		return Dropped, nil
@@ -174,6 +177,18 @@ func (w *Worker) RunOnce(ctx context.Context) (Outcome, error) {
 	}
 	log.Info("document processed", "pages", res.PageCount, "text_source", res.TextSource)
 	return Done, nil
+}
+
+// release gives job back at shutdown, without counting the attempt, on a
+// context that outlives ctx.
+func (w *Worker) release(ctx context.Context, job *store.Job, log *slog.Logger) (Outcome, error) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+	if err := w.Store.ReleaseJob(rctx, job, w.now()); err != nil && !errors.Is(err, store.ErrLeaseLost) {
+		return Released, fmt.Errorf("give job %d back: %w", job.ID, err)
+	}
+	log.Info("shutdown: job given back")
+	return Released, nil
 }
 
 // timeoutError is an attempt that ran out of time. It is retried: a busy

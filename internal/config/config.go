@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/pklnx/paperless-go/internal/crypto"
 )
 
 // Environment variable names.
@@ -26,6 +28,13 @@ const (
 	// EnvOperator names who runs a command, for the audit log (not
 	// verified). ./pgo sets it to the host user.
 	EnvOperator = "PAPERLESS_GO_OPERATOR"
+	// EnvSecretKey is the 32-byte key (base64) that seals TOTP secrets and
+	// keys the recovery code hashes; generate one with keygen. serve
+	// refuses to start without it.
+	EnvSecretKey = "PAPERLESS_GO_SECRET_KEY" //nolint:gosec // variable name, not a credential
+	// EnvRequire2FA set to true makes two-factor login required for every
+	// user; admins always need it.
+	EnvRequire2FA = "PAPERLESS_GO_REQUIRE_2FA"
 	// EnvOCRWorkers is how many documents serve processes at once; 0 turns
 	// processing in serve off.
 	EnvOCRWorkers = "PAPERLESS_GO_OCR_WORKERS"
@@ -62,6 +71,11 @@ type Config struct {
 	OCRLanguages string
 	// OCRTimeout limits each processing attempt.
 	OCRTimeout time.Duration
+	// SecretKey seals TOTP secrets; nil if not configured. It is a
+	// secret: never log it.
+	SecretKey []byte
+	// Require2FA makes two-factor login required for every user.
+	Require2FA bool
 }
 
 // DataDirFromEnv returns the data directory, ./data unless set.
@@ -89,6 +103,16 @@ func Load() (*Config, error) {
 	}
 	var err error
 	if cfg.TrustedProxies, err = ParseNetworks(EnvTrustedProxies, os.Getenv(EnvTrustedProxies)); err != nil {
+		return nil, err
+	}
+	if raw := strings.TrimSpace(os.Getenv(EnvSecretKey)); raw != "" {
+		key, err := crypto.ParseKey(raw)
+		if err != nil {
+			return nil, errors.New(EnvSecretKey + ": " + err.Error())
+		}
+		cfg.SecretKey = key
+	}
+	if cfg.Require2FA, err = parseBool(EnvRequire2FA, os.Getenv(EnvRequire2FA)); err != nil {
 		return nil, err
 	}
 	if cfg.LogLevel == "" {
@@ -145,6 +169,26 @@ func parseTimeout(v string) (time.Duration, error) {
 		return 0, fmt.Errorf("%s: want a duration of at least 1m, such as 30m or 2h, got %q", EnvOCRTimeout, v)
 	}
 	return d, nil
+}
+
+// Sealer returns a Sealer for the configured secret key, or an error that
+// says how to create one.
+func (c *Config) Sealer() (*crypto.Sealer, error) {
+	if c.SecretKey == nil {
+		return nil, errors.New(EnvSecretKey + " is not set: generate one with `paperless-go keygen` and set it in the environment (.env)")
+	}
+	return crypto.NewSealer(c.SecretKey)
+}
+
+// parseBool reads true or false (any case); empty is false.
+func parseBool(env, v string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	}
+	return false, fmt.Errorf("%s: want true or false, got %q", env, v)
 }
 
 // ParseNetworks reads a comma-separated list of CIDR networks and single
