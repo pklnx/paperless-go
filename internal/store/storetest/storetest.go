@@ -66,3 +66,13 @@ func NewWithURL(t *testing.T) (*store.Store, string) {
 	}
 	return st, u.String()
 }
+
+// User creates a user in st and fails the test on error.
+func User(t *testing.T, st *store.Store, name string, admin bool) *store.User {
+	t.Helper()
+	u, err := st.CreateUser(context.Background(), name, admin)
+	if err != nil {
+		t.Fatalf("create user %q: %v", name, err)
+	}
+	return u
+}
