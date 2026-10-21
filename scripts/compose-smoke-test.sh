@@ -198,6 +198,24 @@ if [ "$status" != 503 ]; then
 fi
 docker compose --progress quiet start postgres
 
+echo "== import"
+# The container user (65532) must be able to read the mounted folder.
+mkdir -p "$work/scans/sub"
+printf '%%PDF-1.4\n%% smoke\n%%%%EOF\n' > "$work/scans/sub/smoke.pdf"
+chmod -R a+rX "$work/scans"
+./pgo import "$work/scans" --dry-run | tee "$work/out"
+expect "$work/out" 'sub/smoke.pdf: would import'
+./pgo import "$work/scans" | tee "$work/out"
+expect "$work/out" 'sub/smoke.pdf: imported'
+expect "$work/out" 'imported: 1, duplicates: 0, failed: 0'
+./pgo import "$work/scans" | tee "$work/out"
+expect "$work/out" 'sub/smoke.pdf: duplicate'
+if ./pgo import "$work/scans/sub/smoke.pdf" > "$work/out" 2>&1; then
+	echo "a file instead of a folder must be refused" >&2
+	exit 1
+fi
+expect "$work/out" 'is not a directory'
+
 echo "== backup"
 ./pgo backup "$work/backups" | tee "$work/out"
 expect "$work/out" "wrote .*paperless-[0-9TZ]+\.dump"

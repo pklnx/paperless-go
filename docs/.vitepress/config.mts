@@ -26,6 +26,7 @@ export default defineConfig({
         items: [
           { text: "Getting started", link: "/guide/getting-started" },
           { text: "Backups and upgrades", link: "/guide/operations" },
+          { text: "Importing files", link: "/guide/import" },
           { text: "Audit log", link: "/guide/audit-log" },
         ],
       },
