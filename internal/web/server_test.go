@@ -3,12 +3,17 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/pklnx/paperless-go/internal/store"
 )
 
 type fakeDB struct{ err error }
@@ -136,5 +141,36 @@ func TestUIRoutes(t *testing.T) {
 	// Other paths are session-only: 401 without a login.
 	if rec := serve(h, httptest.NewRequest("GET", "http://localhost/somewhere", nil)); rec.Code != http.StatusUnauthorized {
 		t.Errorf("/somewhere: status %d, want 401", rec.Code)
+	}
+}
+
+// failStore answers with fixed wording: a validation error is a 400, and an
+// unknown error (for example a raw database error) a 500 that names
+// nothing of the cause.
+func TestFailStore(t *testing.T) {
+	var logs strings.Builder
+	s := New(nil, slog.New(slog.NewTextHandler(&logs, nil)), Options{})
+	raw := &pgconn.PgError{Code: "23505", ConstraintName: "secret_constraint", Message: "duplicate key value violates unique constraint"}
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+		body   string
+	}{
+		{"validation", &store.ValidationError{Field: "source", Constraint: "documents_source_check"}, http.StatusBadRequest, `{"error":"invalid input"}`},
+		{"not found", store.ErrNotFound, http.StatusNotFound, `{"error":"not found"}`},
+		{"raw database error", raw, http.StatusInternalServerError, `{"error":"internal error"}`},
+		{"wrapped unknown error", fmt.Errorf("query: %w", raw), http.StatusInternalServerError, `{"error":"internal error"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			s.failStore(rec, httptest.NewRequest("GET", "http://localhost/api/x", nil), tc.err)
+			if rec.Code != tc.status || strings.TrimSpace(rec.Body.String()) != tc.body {
+				t.Errorf("answer = %d %s, want %d %s", rec.Code, rec.Body, tc.status, tc.body)
+			}
+		})
+	}
+	if !strings.Contains(logs.String(), "SQLSTATE 23505") {
+		t.Errorf("the 500's cause is not logged: %s", logs.String())
 	}
 }

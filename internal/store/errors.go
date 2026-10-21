@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -43,7 +44,38 @@ var (
 	// tag. The error is a *TagNameConflictError naming that child. Nothing
 	// is renamed or merged.
 	ErrTagNameConflict = errors.New("store: a child tag would collide with a root tag")
+
+	// ErrInvalid means a value was refused: by the store's own input
+	// validation or by a database check or not-null constraint the store
+	// has no more specific error for. The error is a *ValidationError; its
+	// message never contains SQL or the refused value.
+	ErrInvalid = errors.New("store: invalid value")
+
+	// ErrUnknownUser means the owner of a new row does not exist (any
+	// more), for example because the user was deleted meanwhile.
+	ErrUnknownUser = errors.New("store: unknown user")
 )
+
+// ValidationError is a refused value. errors.Is(err, ErrInvalid) holds.
+type ValidationError struct {
+	// Field names the refused input field or column, if known.
+	Field string
+	// Constraint names the database constraint that refused it, if any.
+	Constraint string
+}
+
+func (e *ValidationError) Error() string {
+	if e.Field != "" {
+		return "store: invalid " + e.Field
+	}
+	return "store: invalid value"
+}
+
+// Is makes errors.Is(err, ErrInvalid) true.
+func (e *ValidationError) Is(target error) bool { return target == ErrInvalid }
+
+// invalid returns a *ValidationError for an input field.
+func invalid(field string) error { return &ValidationError{Field: field} }
 
 // DuplicateError is returned by CreateDocument when the owner already has a
 // document with the same original file. errors.Is(err, ErrDuplicate) holds.
@@ -78,14 +110,19 @@ func (e *TagNameConflictError) Is(target error) bool { return target == ErrTagNa
 // errTagCycleCode is the SQLSTATE the tags_no_cycle trigger raises.
 const errTagCycleCode = "PGT01"
 
-// mapErr turns PostgreSQL errors into the store's errors. Errors it does not
-// know are returned unchanged.
+// mapErr turns PostgreSQL errors into the store's errors. Check and
+// not-null violations without a more specific error become a
+// *ValidationError (ErrInvalid), and a missing owner ErrUnknownUser. Other
+// errors are returned unchanged. Audit errors stay ErrAuditUnavailable.
 func mapErr(err error) error {
 	if err == nil {
 		return nil
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
+	}
+	if errors.Is(err, ErrAuditUnavailable) {
+		return err
 	}
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
@@ -101,6 +138,9 @@ func mapErr(err error) error {
 		case "saved_views_filter_object":
 			return ErrInvalidFilter
 		}
+		return &ValidationError{Constraint: pgErr.ConstraintName}
+	case "23502": // not_null_violation
+		return &ValidationError{Field: pgErr.ColumnName}
 	case "23505": // unique_violation
 		switch pgErr.ConstraintName {
 		case "users_name_key", "correspondents_owner_name_key", "document_types_owner_name_key", "tags_owner_parent_name_key":
@@ -116,9 +156,20 @@ func mapErr(err error) error {
 		case "document_tags_document_fkey":
 			return ErrNotFound
 		}
+		if isOwnerFKey(pgErr.ConstraintName) {
+			return ErrUnknownUser
+		}
+	case "23001": // restrict_violation (PostgreSQL 18, for a racing user delete)
+		if isOwnerFKey(pgErr.ConstraintName) {
+			return ErrUnknownUser
+		}
 	}
 	return err
 }
+
+// isOwnerFKey reports whether constraint is the foreign key from a row's
+// owner_id to users.
+func isOwnerFKey(constraint string) bool { return strings.HasSuffix(constraint, "_owner_id_fkey") }
 
 // isUniqueViolation reports whether err is a unique violation of constraint.
 func isUniqueViolation(err error, constraint string) bool {
