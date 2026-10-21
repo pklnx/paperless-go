@@ -20,8 +20,8 @@ export in the app's archive folder format.
 
 Early development. This version is the foundation: one Go binary with the
 command line and the web server, PostgreSQL with migrations, the embedded web
-UI shell, Docker Compose, CI, releases and login with user name, password
-and two-factor login (TOTP). Documents, OCR, search, passkeys and API keys
+UI shell, Docker Compose, CI, releases and login with user name, password,
+two-factor login (TOTP) and passkeys. Documents, OCR, search and API keys
 follow step by step; see the
 [roadmap](https://pklnx.github.io/paperless-go/development/roadmap).
 

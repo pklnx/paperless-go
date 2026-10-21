@@ -66,6 +66,14 @@ Admins set up two-factor login at their next login (nobody is locked out:
 the password still logs them in, to the setup). Rolling the migration back
 (`migrate down`) turns 2FA off for everybody.
 
+**Passkeys (#19).** Set `PAPERLESS_GO_PUBLIC_URL` in `.env` to the
+address you open (with HTTPS) to turn passkeys on, then `./pgo migrate`
+and `docker compose up -d web`. Without it nothing changes. Rolling the
+migration back (`migrate down`) removes every passkey. A password reset by
+an admin (Users page or `./pgo user reset-password`) now also removes the
+user's passkeys, unless the admin unticks it or passes `--keep-passkeys`.
+The login limits now count IPv6 clients per `/64`, not per address.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build

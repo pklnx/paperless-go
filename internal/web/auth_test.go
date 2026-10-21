@@ -62,8 +62,8 @@ func newAuthFixture(t *testing.T) *authFixture {
 	return newAuthFixtureOpts(t, Options{})
 }
 
-// newAuthFixtureOpts is newAuthFixture with TrustedProxies and Require2FA
-// from opts.
+// newAuthFixtureOpts is newAuthFixture with TrustedProxies, Require2FA and
+// PublicURL from opts.
 func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 	t.Helper()
 	st, dbURL := storetest.NewWithURL(t)
@@ -75,7 +75,7 @@ func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 	clock := &testClock{now: time.Now()}
 	s := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{
 		AllowedHosts: []string{"127.0.0.1"}, Hasher: storetest.Hasher, Now: clock.Now, TrustedProxies: opts.TrustedProxies,
-		Sealer: sealer, SecretKey: key, Require2FA: opts.Require2FA,
+		Sealer: sealer, SecretKey: key, Require2FA: opts.Require2FA, PublicURL: opts.PublicURL,
 	})
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
@@ -275,7 +275,7 @@ func TestRouteTable(t *testing.T) {
 		if !ok {
 			method, path = "GET", rt.pattern
 		}
-		path = strings.NewReplacer("{$}", "", "{name}", "alice").Replace(path)
+		path = strings.NewReplacer("{$}", "", "{name}", "alice", "{id}", "1").Replace(path)
 		if strings.HasSuffix(path, "/") && path != "/" {
 			path += "x"
 		}
@@ -310,7 +310,7 @@ func TestRouteTable(t *testing.T) {
 	if got := strings.Join(public, ","); got != "GET /healthz,GET /{$},GET /assets/" {
 		t.Errorf("public routes: %s", got)
 	}
-	if seen[accessSession] == 0 || seen[accessLogin] != 4 {
+	if seen[accessSession] == 0 || seen[accessLogin] != 6 {
 		t.Errorf("routes per access: %v", seen)
 	}
 }
@@ -656,5 +656,66 @@ func TestLoggableUserName(t *testing.T) {
 		if got := loggableUserName(n); got == n {
 			t.Errorf("invalid name %q was logged", n)
 		}
+	}
+}
+
+// The limits count IPv6 clients per /64 and IPv4 clients per address; an
+// IPv4-mapped IPv6 address is the IPv4 address.
+func TestClientAddrGroupsIPv6(t *testing.T) {
+	s := &Server{trustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}
+	for remote, want := range map[string]string{
+		"192.0.2.1:1234":             "192.0.2.1",
+		"[::ffff:192.0.2.1]:1234":    "192.0.2.1",
+		"[2001:db8:1:2::5]:1234":     "2001:db8:1:2::/64",
+		"[2001:db8:1:2:ffff::]:1234": "2001:db8:1:2::/64",
+		"[2001:db8:1:3::5]:1234":     "2001:db8:1:3::/64",
+		"[fe80::1%eth0]:1234":        "fe80::/64",
+	} {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = remote
+		if got := s.clientAddr(r); got != want {
+			t.Errorf("%s: %s, want %s", remote, got, want)
+		}
+	}
+	// Behind a proxy too; the full address stays for logs and the audit log.
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.2:1234"
+	r.Header.Set("X-Forwarded-For", "2001:db8::abcd")
+	if got := s.clientAddr(r); got != "2001:db8::/64" {
+		t.Errorf("behind a proxy: %s", got)
+	}
+	if got := s.clientIP(r).String(); got != "2001:db8::abcd" {
+		t.Errorf("full address: %s", got)
+	}
+}
+
+// Failed logins from two addresses of one IPv6 /64 share the limit.
+func TestLoginRateLimitIPv6Prefix(t *testing.T) {
+	f := newAuthFixtureOpts(t, Options{TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}})
+	n := 0
+	post := func(client string) int {
+		n++
+		b, _ := json.Marshal(map[string]string{"username": fmt.Sprintf("u%d", n), "password": "wrong horse battery"})
+		req, _ := http.NewRequest("POST", f.srv.URL+"/api/session", bytes.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", f.srv.URL)
+		req.Header.Set("X-Forwarded-For", client)
+		resp, err := f.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	for i := range 20 {
+		if code := post(fmt.Sprintf("2001:db8:0:1::%x", i+1)); code != 401 {
+			t.Fatalf("status %d", code)
+		}
+	}
+	if code := post("2001:db8:0:1::ffff"); code != 429 {
+		t.Fatalf("same /64: %d", code)
+	}
+	if code := post("2001:db8:0:2::1"); code != 401 {
+		t.Fatalf("other /64: %d", code)
 	}
 }
