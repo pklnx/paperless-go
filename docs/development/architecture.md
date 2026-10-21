@@ -50,7 +50,7 @@ app and the server through the app's archive folder format:
 
 | App (SwiftData) | Server table |
 |---|---|
-| — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges` |
+| — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`, `webauthn_handle` in `00008_passkeys.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges`, `passkeys`, `webauthn_ceremonies` |
 | — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; see [Audit log](#audit-log)) |
 | `Document`: id (UUID), title, documentDate, createdAt, modifiedAt, notes, isFavorite, isInbox, archiveSerialNumber, pageCount, fileSize, extractedText, source, originalFileName, textSource, contentHash | `documents`, with the UUID as primary key; the original file (`original_sha256`, size, MIME type) and the archive PDF (`archive_sha256`, size) |
 | `Tag`: name, colorHex, symbol, parent, matchText, matchMode | `tags`, `document_tags` (nested through `parent_id`) |
@@ -355,6 +355,24 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   Turning 2FA off and new recovery codes check the code in the same
   transaction as the change, so the audit entry records the factor used.
   `serve` refuses to start without the key.
+- **Passkeys** (`internal/store/passkeys.go`, `internal/web/passkeys.go`,
+  go-webauthn, migration `00008_passkeys.sql`). Off without
+  `PAPERLESS_GO_PUBLIC_URL` (`503` from the endpoints); its host is the RP
+  ID and an allowed host. `users.webauthn_handle` is a random 32-byte user
+  handle made at the first registration. `webauthn_ceremonies` holds the
+  library's session data of a registration or login under the SHA-256 of
+  the client's token; it is used up in its own statement (a failed check
+  still consumes it) and expires on the server clock. Registration
+  (`/api/profile/passkeys/begin|finish`) checks password and second factor
+  first and locks the user row (limit 10, unique name per user); the login
+  (`/api/session/passkey/begin|finish`, `accessLogin`, discoverable, user
+  verification required) locks user, then passkey row, rejects a sign
+  count that did not increase, and stores the new count, the session and
+  `auth.login` in one transaction. The session it creates is restricted
+  like a password login's. Removing one passkey ends the user's other
+  sessions; an admin's removal of all (`DELETE /api/users/{name}/passkeys`,
+  `user remove-passkeys`) and a password reset (unless `removePasskeys:
+  false` / `--keep-passkeys`) end all sessions.
 
 ## Audit log
 
@@ -394,7 +412,9 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   `user.password_reset`, `user.password_set` (CLI), `user.2fa_reset` (web
   and CLI), `profile.password_change`, `profile.2fa_enable`,
   `profile.2fa_disable`, `profile.recovery_codes` (with the `factor` that
-  confirmed it), `audit.export` (CLI, written before the export starts).
+  confirmed it), `profile.passkey_add`, `profile.passkey_remove` (with the
+  passkey's `name`), `user.passkeys_removed` (`count`; web and CLI),
+  `audit.export` (CLI, written before the export starts).
   A two-factor login records `method: 2fa` and its `factor` (`totp`,
   `recovery_code` with `recoveryCodesLeft`); a wrong code gives
   `auth.login_failed` with `reason: second_factor`. Requests refused

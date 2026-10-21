@@ -123,6 +123,16 @@ type Job struct {
 	FinishedAt  *time.Time
 }
 
+type Passkey struct {
+	ID           int64
+	UserID       int64
+	CredentialID []byte
+	Name         string
+	Credential   []byte
+	CreatedAt    time.Time
+	LastUsedAt   *time.Time
+}
+
 type SavedView struct {
 	ID         pgtype.UUID
 	OwnerID    int64
@@ -186,4 +196,15 @@ type User struct {
 	TwoFactorPendingSecret []byte
 	TwoFactorLastCounter   *int64
 	TwoFactorVersion       int64
+	WebauthnHandle         []byte
+}
+
+type WebauthnCeremony struct {
+	ID        []byte
+	Kind      string
+	UserID    *int64
+	Name      *string
+	Data      []byte
+	CreatedAt time.Time
+	ExpiresAt time.Time
 }

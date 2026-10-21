@@ -26,14 +26,15 @@ see every user's documents.
 | Command | Does |
 |---|---|
 | `user add NAME [--admin] [--password-stdin]` | Creates a user. Create the first admin with `./pgo user add NAME --admin`. |
-| `user list` | Lists users with role, state (active, locked, must change password), two-factor login (on, off), documents, creation and last login. |
+| `user list` | Lists users with role, state (active, locked, must change password), two-factor login (on, off), passkeys, documents, creation and last login. |
 | `user set-password NAME [--password-stdin]` | Sets a new password and logs the user out everywhere. |
-| `user reset-password NAME` | Generates a password, prints it once and logs the user out everywhere; the user must choose their own at the next login. |
+| `user reset-password NAME [--keep-passkeys]` | Generates a password, prints it once and logs the user out everywhere; the user must choose their own at the next login. The user's passkeys are removed too, unless `--keep-passkeys` is given: after a compromise, a new password alone would not lock the attacker out. |
 | `user promote NAME` (`user admin`) | Makes a user an admin. |
 | `user demote NAME` (`user unadmin`) | Takes the admin role away. |
 | `user lock NAME` | Stops a user from logging in and logs them out everywhere. |
 | `user unlock NAME` | Lets a locked user log in again. |
 | `user reset-2fa NAME` | Turns the user's two-factor login off: deletes the TOTP secret and the recovery codes and logs them out everywhere. Works for the last admin too, for an admin who lost both the authenticator and the recovery codes; admins set it up again at the next login. |
+| `user remove-passkeys NAME` | Removes all passkeys of a user, for a lost or stolen device, and logs them out everywhere. They log in with their password (and second factor) again. |
 | `user remove NAME` | Deletes a user and their logins. Refused while the user owns documents, tags, correspondents, document types or saved views: the message names how many of each. Delete them first, or lock the user instead. |
 
 The last admin who can log in (not locked) can be neither demoted, locked

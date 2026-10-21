@@ -30,6 +30,14 @@ type sessionKey struct{}
 // may use (besides the session endpoints).
 const profilePasswordPath = "/api/profile/password" //nolint:gosec // a URL path, not a credential
 
+// The passkey login endpoints, which need no session.
+//
+//nolint:gosec // URL paths, not credentials
+const (
+	passkeyLoginBeginPath  = "/api/session/passkey/begin"
+	passkeyLoginFinishPath = "/api/session/passkey/finish"
+)
+
 type passwordChangeJSON struct {
 	Error                  string `json:"error"`
 	PasswordChangeRequired bool   `json:"passwordChangeRequired"`
@@ -189,6 +197,8 @@ type noSessionJSON struct {
 	// SetupRequired is true while no user exists; the UI then explains how
 	// to create the first admin.
 	SetupRequired bool `json:"setupRequired"`
+	// PasskeyOrigin is where passkey logins work; empty when they are off.
+	PasskeyOrigin string `json:"passkeyOrigin,omitempty"`
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
@@ -206,7 +216,7 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusInternalServerError, "internal error", err)
 		return
 	}
-	s.writeJSON(w, http.StatusUnauthorized, noSessionJSON{Error: "login required", SetupRequired: n == 0})
+	s.writeJSON(w, http.StatusUnauthorized, noSessionJSON{Error: "login required", SetupRequired: n == 0, PasskeyOrigin: s.publicOrigin})
 }
 
 type loginInput struct {

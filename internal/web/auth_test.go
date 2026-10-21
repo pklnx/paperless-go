@@ -62,8 +62,8 @@ func newAuthFixture(t *testing.T) *authFixture {
 	return newAuthFixtureOpts(t, Options{})
 }
 
-// newAuthFixtureOpts is newAuthFixture with TrustedProxies and Require2FA
-// from opts.
+// newAuthFixtureOpts is newAuthFixture with TrustedProxies, Require2FA and
+// PublicURL from opts.
 func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 	t.Helper()
 	st, dbURL := storetest.NewWithURL(t)
@@ -75,7 +75,7 @@ func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 	clock := &testClock{now: time.Now()}
 	s := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{
 		AllowedHosts: []string{"127.0.0.1"}, Hasher: storetest.Hasher, Now: clock.Now, TrustedProxies: opts.TrustedProxies,
-		Sealer: sealer, SecretKey: key, Require2FA: opts.Require2FA,
+		Sealer: sealer, SecretKey: key, Require2FA: opts.Require2FA, PublicURL: opts.PublicURL,
 	})
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
@@ -275,7 +275,7 @@ func TestRouteTable(t *testing.T) {
 		if !ok {
 			method, path = "GET", rt.pattern
 		}
-		path = strings.NewReplacer("{$}", "", "{name}", "alice").Replace(path)
+		path = strings.NewReplacer("{$}", "", "{name}", "alice", "{id}", "1").Replace(path)
 		if strings.HasSuffix(path, "/") && path != "/" {
 			path += "x"
 		}
@@ -310,7 +310,7 @@ func TestRouteTable(t *testing.T) {
 	if got := strings.Join(public, ","); got != "GET /healthz,GET /{$},GET /assets/" {
 		t.Errorf("public routes: %s", got)
 	}
-	if seen[accessSession] == 0 || seen[accessLogin] != 4 {
+	if seen[accessSession] == 0 || seen[accessLogin] != 6 {
 		t.Errorf("routes per access: %v", seen)
 	}
 }

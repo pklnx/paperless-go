@@ -195,6 +195,19 @@ func checkSecondFactor(ctx context.Context, q *db.Queries, u db.User, code strin
 	return nil
 }
 
+// VerifyTwoFactorCode checks a TOTP or recovery code of a user with 2FA on
+// at now and records its use, as at a login: a code confirms one action
+// only. A wrong code gives ErrTwoFactorInvalid.
+func (s *Store) VerifyTwoFactorCode(ctx context.Context, id int64, code string, now time.Time, sealer *crypto.Sealer, key []byte) error {
+	return s.inTx(ctx, func(q *db.Queries) error {
+		u, err := lockUserRow(ctx, q, id)
+		if err != nil {
+			return err
+		}
+		return checkSecondFactor(ctx, q, u, code, now, sealer, key)
+	})
+}
+
 // ResetTwoFactor turns 2FA off for a user (by an admin or the CLI), removes
 // the recovery codes and ends all their sessions and pending logins. It also
 // works for the last admin: a lost authenticator must never lock everyone

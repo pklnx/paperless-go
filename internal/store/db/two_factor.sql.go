@@ -236,7 +236,7 @@ func (q *Queries) LockTwoFactorChallenge(ctx context.Context, arg LockTwoFactorC
 }
 
 const lockUserRow = `-- name: LockUserRow :one
-SELECT id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at, two_factor_secret, two_factor_enabled, two_factor_pending_secret, two_factor_last_counter, two_factor_version FROM users WHERE id = $1 FOR UPDATE
+SELECT id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at, two_factor_secret, two_factor_enabled, two_factor_pending_secret, two_factor_last_counter, two_factor_version, webauthn_handle FROM users WHERE id = $1 FOR UPDATE
 `
 
 // The whole row, locked until the transaction ends.
@@ -258,6 +258,7 @@ func (q *Queries) LockUserRow(ctx context.Context, id int64) (User, error) {
 		&i.TwoFactorPendingSecret,
 		&i.TwoFactorLastCounter,
 		&i.TwoFactorVersion,
+		&i.WebauthnHandle,
 	)
 	return i, err
 }

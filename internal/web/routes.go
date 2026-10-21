@@ -35,6 +35,8 @@ func (s *Server) routes() []route {
 		h("POST /api/session", s.handleLogin, accessLogin),
 		h("DELETE /api/session", s.handleLogout, accessLogin),
 		h("POST /api/session/2fa", s.handleTwoFactorLogin, accessLogin),
+		h("POST "+passkeyLoginBeginPath, s.handleBeginPasskeyLogin, accessLogin),
+		h("POST "+passkeyLoginFinishPath, s.handleFinishPasskeyLogin, accessLogin),
 
 		h("PUT "+profilePasswordPath, s.handleChangeOwnPassword, accessSession),
 		h("GET /api/profile/2fa", s.handleGetTwoFactor, accessSession),
@@ -42,6 +44,10 @@ func (s *Server) routes() []route {
 		h("POST /api/profile/2fa/confirm", s.handleConfirmTwoFactor, accessSession),
 		h("DELETE /api/profile/2fa", s.handleDisableTwoFactor, accessSession),
 		h("POST /api/profile/2fa/recovery-codes", s.handleRegenerateRecoveryCodes, accessSession),
+		h("GET /api/profile/passkeys", s.handleListPasskeys, accessSession),
+		h("POST /api/profile/passkeys/begin", s.handleBeginPasskeyRegistration, accessSession),
+		h("POST /api/profile/passkeys/finish", s.handleFinishPasskeyRegistration, accessSession),
+		h("DELETE /api/profile/passkeys/{id}", s.handleRemovePasskey, accessSession),
 
 		h("GET /api/audit", s.handleAudit, accessSession),
 
@@ -51,6 +57,7 @@ func (s *Server) routes() []route {
 		h("DELETE /api/users/{name}", s.handleDeleteUser, accessSession),
 		h("POST /api/users/{name}/password", s.handleResetUserPassword, accessSession),
 		h("POST /api/users/{name}/2fa/reset", s.handleResetUserTwoFactor, accessSession),
+		h("DELETE /api/users/{name}/passkeys", s.handleRemoveUserPasskeys, accessSession),
 
 		// Every other path under /api/: a JSON 404, after the login.
 		h("/api/", s.handleUnknownAPI, accessSession),

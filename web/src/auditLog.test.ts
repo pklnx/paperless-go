@@ -51,7 +51,17 @@ describe("entry texts", () => {
     expect(entryDetail(entry("profile.2fa_disable", { details: { factor: "totp" } }), en)).toBe("authenticator app");
     expect(entryDetail(entry("profile.2fa_enable"), en)).toBe("");
     // A code the UI does not know yet is shown as it is.
-    expect(entryDetail(entry("auth.login", { details: { method: "passkey" } }), de)).toBe("passkey");
+    expect(entryDetail(entry("auth.login", { details: { method: "fido-v9" } }), de)).toBe("fido-v9");
+  });
+
+  it("names passkeys", () => {
+    const en = messagesFor("en");
+    expect(entryDetail(entry("auth.login", { details: { method: "passkey", passkey: "Phone" } }), en)).toBe("passkey, “Phone”");
+    expect(entryDetail(entry("auth.login_failed", { details: { method: "passkey", reason: "unknown_passkey" } }), en)).toBe("passkey, unknown passkey");
+    expect(entryDetail(entry("profile.passkey_add", { details: { name: "Key" } }), en)).toBe("“Key”");
+    expect(entryDetail(entry("user.passkeys_removed", { details: { count: 2 } }), en)).toBe("2 passkeys");
+    expect(entryDetail(entry("user.password_reset", { details: { passkeysRemoved: 1 } }), en)).toBe("Remove passkeys: 1");
+    expect(entryDetail(entry("user.password_reset", { details: { passkeysRemoved: 0 } }), en)).toBe("");
   });
 
   it("names the refused 2FA change and why", () => {

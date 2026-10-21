@@ -29,8 +29,8 @@ features:
 
 ::: warning Early development
 This version is the foundation: the server, the database schema handling and
-the web UI shell with login and two-factor login. Documents, OCR, search,
-passkeys and API keys follow step by step; see
+the web UI shell with login, two-factor login and passkeys. Documents, OCR,
+search and API keys follow step by step; see
 the [roadmap](/development/roadmap).
 :::
 
