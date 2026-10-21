@@ -203,3 +203,22 @@ export const auditApi = {
   list: (f: AuditFilter, cursor: string, signal?: AbortSignal) =>
     getJSON<{ entries: AuditEntry[]; nextCursor?: string }>(`/api/audit?${auditQuery(f, cursor)}`, signal),
 };
+
+/** A document as GET /api/documents lists it (the fields the UI uses). */
+export interface DocumentSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  documentDate: string;
+  originalFileName: string;
+  originalMime: string;
+  originalSize: number;
+  hasArchive: boolean;
+}
+
+export const documentsApi = {
+  /** The caller's documents (an admin's: everyone's), newest first, and the upload limit in bytes. */
+  list: (signal?: AbortSignal) => getJSON<{ documents: DocumentSummary[]; maxUploadSize: number }>("/api/documents", signal),
+  /** The download URL of a document's original file or archive PDF. */
+  fileURL: (id: string, kind: "original" | "archive" = "original") => `/api/documents/${encodeURIComponent(id)}/file?kind=${kind}`,
+};

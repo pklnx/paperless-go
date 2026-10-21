@@ -154,6 +154,9 @@ func (l *limitReader) Read(p []byte) (int, error) {
 // A refused file gives a Result with Outcome Refused and no error. A
 // non-nil error is transient (database, blob store, reading the body): no
 // document was created, and a retry may succeed.
+//
+// An audit entry in ctx (store.WithAudit) is written in the transaction
+// that creates the document; a duplicate or refused file writes none.
 func (im *Importer) Import(ctx context.Context, req Request) (Result, error) {
 	body := &limitReader{r: req.Body, n: im.maxSize}
 	prefix := make([]byte, PrefixSize)

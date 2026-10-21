@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/pklnx/paperless-go/internal/blobstore"
 	"github.com/pklnx/paperless-go/internal/config"
 	"github.com/pklnx/paperless-go/internal/crypto"
 	"github.com/pklnx/paperless-go/internal/store"
@@ -216,9 +217,14 @@ at a time, default 1; 0 turns it off).`,
 			} else {
 				log.Warn("document processing is off", "env", config.EnvOCRWorkers)
 			}
+			blobs, err := blobstore.New(a.cfg.DataDir)
+			if err != nil {
+				return fmt.Errorf("open the document files: %w", err)
+			}
 			srv := web.New(a.store, log, web.Options{
 				AllowedHosts: a.cfg.AllowedHosts, TrustedProxies: a.cfg.TrustedProxies,
 				Sealer: sealer, SecretKey: a.cfg.SecretKey, Require2FA: a.cfg.Require2FA,
+				Blobs: blobs, MaxUploadSize: a.cfg.MaxUploadSize,
 			})
 			log.Info("listening", "addr", listen, "version", version)
 			err = srv.ListenAndServe(ctx, listen)

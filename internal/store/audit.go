@@ -105,8 +105,14 @@ func auditFrom(ctx context.Context) *AuditEntry {
 // fillAuditTarget sets the ID of a target created in the transaction (a new
 // user) if the pending entry is about such a target.
 func fillAuditTarget(ctx context.Context, typ string, id int64) {
+	fillAuditTargetID(ctx, typ, fmt.Sprint(id))
+}
+
+// fillAuditTargetID is fillAuditTarget for a target named by a string ID
+// (a new document's UUID).
+func fillAuditTargetID(ctx context.Context, typ, id string) {
 	if e := auditFrom(ctx); e != nil && e.TargetType == typ && e.TargetID == "" {
-		e.TargetID = fmt.Sprint(id)
+		e.TargetID = id
 	}
 }
 

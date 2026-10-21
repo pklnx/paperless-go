@@ -578,3 +578,46 @@ func TestListAuditScope(t *testing.T) {
 		t.Error("the empty scope listed entries")
 	}
 }
+
+// CreateDocument writes the entry of WithAudit in its transaction, with the
+// new document's ID as the target; a duplicate writes none, and an entry
+// that cannot be written leaves no document (and no job).
+func TestAuditCreateDocument(t *testing.T) {
+	st, url := storetest.NewWithURL(t)
+	conn := connect(t, url)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+
+	e := &store.AuditEntry{Actor: store.ActorSession, Action: "document.create"}
+	e.SetTarget(store.TargetDocument, "", "invoice")
+	doc, err := st.CreateDocument(store.WithAudit(ctx, e), alice, newDoc("invoice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := auditRows(t, conn)
+	if len(rows) != 1 || rows[0].Action != "document.create" || *rows[0].TargetType != "document" ||
+		*rows[0].TargetID != doc.ID || *rows[0].TargetName != "invoice" {
+		t.Fatalf("rows %+v", rows)
+	}
+
+	e = &store.AuditEntry{Actor: store.ActorSession, Action: "document.create"}
+	e.SetTarget(store.TargetDocument, "", "invoice")
+	if _, err := st.CreateDocument(store.WithAudit(ctx, e), alice, newDoc("invoice")); !errors.Is(err, store.ErrDuplicate) {
+		t.Fatalf("duplicate: %v", err)
+	}
+	if n := len(auditRows(t, conn)); n != 1 {
+		t.Fatalf("%d rows after a duplicate", n)
+	}
+
+	bad := &store.AuditEntry{Actor: store.ActorSession, Action: "not valid"}
+	if _, err := st.CreateDocument(store.WithAudit(ctx, bad), alice, newDoc("letter")); !errors.Is(err, store.ErrAuditUnavailable) {
+		t.Fatalf("invalid entry: %v", err)
+	}
+	if _, err := st.FindDocumentByOriginal(ctx, alice.UserID, hashOf("letter")); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("the document was created without its entry: %v", err)
+	}
+	var jobs int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM jobs`).Scan(&jobs); err != nil || jobs != 1 {
+		t.Fatalf("jobs = %d, %v; want only the first document's", jobs, err)
+	}
+}

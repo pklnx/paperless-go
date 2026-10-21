@@ -16,10 +16,21 @@ const (
 	accessPublic                // no login: the health check and the UI code
 )
 
+// body says what a state-changing request to a route may carry. protect
+// enforces it per route, so a file body is allowed only where the table
+// says so.
+type body int
+
+const (
+	bodyJSON body = iota // application/json; the zero value, so a forgotten field is the strictest
+	bodyFile             // a raw file (the upload): one of uploadContentTypes, never a form or text
+)
+
 type route struct {
 	pattern string // "GET /api/users"
 	handler http.Handler
 	access  access
+	body    body
 }
 
 // routes lists every route of the server.
@@ -44,6 +55,11 @@ func (s *Server) routes() []route {
 		h("POST /api/profile/2fa/recovery-codes", s.handleRegenerateRecoveryCodes, accessSession),
 
 		h("GET /api/audit", s.handleAudit, accessSession),
+
+		{pattern: "POST /api/documents", handler: http.HandlerFunc(s.handleUpload), access: accessSession, body: bodyFile},
+		h("GET /api/documents", s.handleListDocuments, accessSession),
+		h("GET /api/documents/{id}", s.handleGetDocument, accessSession),
+		h("GET /api/documents/{id}/file", s.handleDocumentFile, accessSession),
 
 		h("GET /api/users", s.handleListUsers, accessSession),
 		h("POST /api/users", s.handleCreateUser, accessSession),

@@ -171,7 +171,9 @@ func (in *NewDocument) validate() error {
 // original file, the error is a *DuplicateError (ErrDuplicate); other
 // owners' documents do not count. A linked tag, correspondent or document
 // type that is not the owner's gives ErrOwnerMismatch; a taken ASN gives
-// ErrASNTaken; an owner that does not exist gives ErrUnknownUser.
+// ErrASNTaken; an owner that does not exist gives ErrUnknownUser. An entry
+// from WithAudit is written in the same transaction; a document target
+// without an ID gets the new document's.
 func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*Document, error) {
 	owner, err := sc.creator()
 	if err != nil {
@@ -198,8 +200,7 @@ func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*
 	}
 
 	var id pgtype.UUID
-	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		q := s.q.WithTx(tx)
+	err = s.inTx(ctx, func(q *db.Queries) error {
 		var err error
 		id, err = q.CreateDocument(ctx, db.CreateDocumentParams{
 			OwnerID: owner, Title: in.Title, DocumentDate: date, Notes: in.Notes,
@@ -212,6 +213,7 @@ func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*
 		if err != nil {
 			return err
 		}
+		fillAuditTargetID(ctx, TargetDocument, idString(id))
 		if len(tags) > 0 {
 			if err := q.AddDocumentTags(ctx, db.AddDocumentTagsParams{OwnerID: owner, DocumentID: id, TagIds: tags}); err != nil {
 				return err
