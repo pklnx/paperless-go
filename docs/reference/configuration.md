@@ -24,3 +24,4 @@ Compose, set them in `.env`; `docker-compose.yml` passes them on.
 | `PAPERLESS_GO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Host names accepted in the `Host` header, comma-separated, without port. See [DNS rebinding](./security#dns-rebinding). |
 | `PAPERLESS_GO_TRUSTED_PROXIES` | (none) | Reverse proxies whose `X-Forwarded-For` names the client, as CIDR networks or addresses, comma-separated (for example `172.16.0.0/12`). The login limits then count per client instead of per proxy. Without it, the header is ignored. |
 | `PAPERLESS_GO_OPERATOR` | (none) | Who runs a command, recorded in the [audit log](../guide/audit-log) (not verified). `./pgo` sets it to the host user. |
+| `PAPERLESS_GO_MAX_UPLOAD_SIZE` | `100MiB` | Largest file imported by upload, consume folder and CLI import: bytes, or a number with `KiB`, `MiB` or `GiB`. A file of exactly this size passes. Images may also have at most 40 megapixels. |

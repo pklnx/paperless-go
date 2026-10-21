@@ -48,6 +48,7 @@ services:
       PAPERLESS_GO_LOG_LEVEL: ${PAPERLESS_GO_LOG_LEVEL:-info}
       PAPERLESS_GO_ALLOWED_HOSTS: ${PAPERLESS_GO_ALLOWED_HOSTS:-localhost,127.0.0.1}
       PAPERLESS_GO_TRUSTED_PROXIES: ${PAPERLESS_GO_TRUSTED_PROXIES:-}
+      PAPERLESS_GO_MAX_UPLOAD_SIZE: ${PAPERLESS_GO_MAX_UPLOAD_SIZE:-}
     volumes:
       - ${DATA_DIR:-./data}:/data
     ports:
@@ -68,6 +69,7 @@ services:
     environment:
       PAPERLESS_GO_DATABASE_URL: postgres://paperless:${POSTGRES_PASSWORD}@postgres:5432/paperless?sslmode=disable
       PAPERLESS_GO_LOG_LEVEL: ${PAPERLESS_GO_LOG_LEVEL:-info}
+      PAPERLESS_GO_MAX_UPLOAD_SIZE: ${PAPERLESS_GO_MAX_UPLOAD_SIZE:-}
     volumes:
       # Document files. A bind mount keeps them visible on the host for backups.
       - ${DATA_DIR:-./data}:/data

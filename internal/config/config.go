@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -23,7 +24,14 @@ const (
 	// EnvOperator names who runs a command, for the audit log (not
 	// verified). ./pgo sets it to the host user.
 	EnvOperator = "PAPERLESS_GO_OPERATOR"
+	// EnvMaxUploadSize is the largest file accepted by the upload, the
+	// consume folder and the CLI import: bytes, or a number with KiB, MiB
+	// or GiB.
+	EnvMaxUploadSize = "PAPERLESS_GO_MAX_UPLOAD_SIZE"
 )
+
+// DefaultMaxUploadSize is the size limit when EnvMaxUploadSize is unset.
+const DefaultMaxUploadSize int64 = 100 << 20
 
 // Config holds the application configuration.
 type Config struct {
@@ -36,6 +44,9 @@ type Config struct {
 	// TrustedProxies may name the client in X-Forwarded-For, for the login
 	// limits.
 	TrustedProxies []netip.Prefix
+	// MaxUploadSize is the largest file in bytes that is imported; a
+	// file of exactly this size passes.
+	MaxUploadSize int64
 }
 
 // DataDirFromEnv returns the data directory, ./data unless set.
@@ -65,10 +76,41 @@ func Load() (*Config, error) {
 	if cfg.TrustedProxies, err = ParseNetworks(EnvTrustedProxies, os.Getenv(EnvTrustedProxies)); err != nil {
 		return nil, err
 	}
+	if cfg.MaxUploadSize, err = ParseSize(EnvMaxUploadSize, os.Getenv(EnvMaxUploadSize), DefaultMaxUploadSize); err != nil {
+		return nil, err
+	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
 	return cfg, nil
+}
+
+// sizeUnits are the suffixes ParseSize accepts.
+var sizeUnits = []struct {
+	suffix string
+	shift  uint
+}{{"KiB", 10}, {"MiB", 20}, {"GiB", 30}}
+
+// ParseSize reads a positive size: a number of bytes, or a number followed
+// by KiB, MiB or GiB (for example 100MiB). An empty value gives def; env
+// names the variable in errors.
+func ParseSize(env, v string, def int64) (int64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return def, nil
+	}
+	num, shift := v, uint(0)
+	for _, u := range sizeUnits {
+		if n, ok := strings.CutSuffix(v, u.suffix); ok {
+			num, shift = strings.TrimSpace(n), u.shift
+			break
+		}
+	}
+	n, err := strconv.ParseInt(num, 10, 64)
+	if err != nil || n <= 0 || n > (1<<62)>>shift {
+		return 0, fmt.Errorf("%s: want a positive size in bytes or with KiB, MiB or GiB like 100MiB, got %q", env, v)
+	}
+	return n << shift, nil
 }
 
 // ParseNetworks reads a comma-separated list of CIDR networks and single
