@@ -1,0 +1,80 @@
+// Command paperless-go is a self-hosted document archive with OCR,
+// full-text search and a web UI.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/spf13/cobra"
+)
+
+var version = "dev"
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := newRootCmd().ExecuteContext(ctx); err != nil {
+		var exitErr *exitError
+		if !errors.As(err, &exitErr) {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		os.Exit(exitErr.exitCode())
+	}
+}
+
+func newRootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:           "paperless-go",
+		Short:         "Self-hosted document archive with OCR, full-text search and a web UI",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+	root.AddCommand(
+		newMigrateCmd(),
+		newPrepareDataCmd(),
+		newServeCmd(),
+	)
+	return root
+}
+
+// exitError signals a failure that was already reported to the user. The
+// process exits with code, or 1 when it is 0.
+type exitError struct {
+	msg  string
+	code int
+}
+
+func (e *exitError) Error() string { return e.msg }
+
+func (e *exitError) exitCode() int {
+	if e.code == 0 {
+		return 1
+	}
+	return e.code
+}
+
+func newLogger(level string) *slog.Logger {
+	var l slog.Level
+	if err := l.UnmarshalText([]byte(level)); err != nil {
+		l = slog.LevelInfo
+	}
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l}))
+}
+
+// commandName is how the user started this program, for hints: ./pgo sets
+// PAPERLESS_GO_COMMAND.
+func commandName() string {
+	if c := os.Getenv("PAPERLESS_GO_COMMAND"); c != "" {
+		return c
+	}
+	return "paperless-go"
+}

@@ -1,0 +1,68 @@
+#!/bin/sh
+# pgo: run paperless-go commands through Docker Compose.
+#
+#   ./pgo migrate
+#   ./pgo migrate status
+#   ./pgo backup ./backups
+#
+# Starts PostgreSQL if needed, rebuilds the image when the code changed (fast
+# when cached) and hides Docker Compose's progress output. In a release
+# bundle, which has no source, it uses the released image instead. `migrate`
+# also makes a fresh data directory writable for the container user.
+set -eu
+
+cd "$(dirname "$0")"
+
+build=
+if [ -f Dockerfile ]; then
+	build=--build
+	# The version shown by `paperless-go --version`, baked into the image.
+	PAPERLESS_GO_VERSION=${PAPERLESS_GO_VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}
+	export PAPERLESS_GO_VERSION
+fi
+
+compose() {
+	docker compose --progress quiet "$@"
+}
+
+compose up -d --wait postgres
+
+# The first start: Docker creates a missing data directory as root, but the
+# container runs as UID 65532. Make it writable (no-op when it already is).
+# Only warns, so the schema upgrade below always runs.
+if [ "${1:-}" = migrate ]; then
+	compose run --rm --no-deps $build -T --user 0:0 paperless-go prepare-data ||
+		echo "warning: could not prepare the data directory (DATA_DIR in .env, default ./data)" >&2
+fi
+
+# backup runs pg_dump in the database container, so the dump always matches
+# the server version and lands on the host; the image has no pg_dump.
+if [ "${1:-}" = backup ]; then
+	if [ $# -ne 2 ] || [ -z "$2" ]; then
+		echo "usage: ./pgo backup DIR" >&2
+		exit 2
+	fi
+	dir=$2
+	umask 077
+	mkdir -p "$dir"
+	name=paperless-$(date -u +%Y%m%dT%H%M%SZ).dump
+	if ! compose exec -T postgres pg_dump --format=custom -U paperless -d paperless >"$dir/$name.partial"; then
+		rm -f "$dir/$name.partial"
+		echo "error: pg_dump failed" >&2
+		exit 1
+	fi
+	mv "$dir/$name.partial" "$dir/$name"
+	echo "wrote $dir/$name"
+	echo "now copy the data directory (DATA_DIR in .env, default ./data)"
+	exit 0
+fi
+
+# Allocate a TTY only when attached to a terminal (not in cron or pipes),
+# so interactive prompts work and stdin works otherwise.
+tty_flag=-T
+if [ -t 0 ] && [ -t 1 ]; then
+	tty_flag=
+fi
+
+exec docker compose --progress quiet run --rm $build $tty_flag \
+	-e PAPERLESS_GO_COMMAND=./pgo paperless-go "$@"

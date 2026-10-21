@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: paperless
+          POSTGRES_PASSWORD: paperless
+          POSTGRES_DB: paperless
+        # Random host port on loopback; the test step reads it below.
+        ports: ["127.0.0.1::5432"]
+        options: >-
+          --health-cmd "pg_isready -U paperless"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go mod verify
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+        env:
+          TEST_DATABASE_URL: postgres://paperless:paperless@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/paperless?sslmode=disable
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.14.0
+      # Generated database code must match internal/store/queries.
+      - run: make sqlc-check
+      # The Dockerfile's Go version guard must pass and fail where it should.
+      - run: sh scripts/check-go-toolchain-test.sh
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # govulncheck version is pinned in the Makefile and verified through
+      # the Go checksum database.
+      - run: make vuln
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build amd64 and arm64 images
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+
+  compose:
+    # End-to-end test of docker-compose.yml, the image and the ./pgo wrapper.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: scripts/compose-smoke-test.sh
+      # The release bundle, with the image the run above built: its
+      # docker-compose.yml must work without the source and without a build.
+      - name: Release bundle
+        run: |
+          scripts/release-bundle.sh 99.01-1 "$RUNNER_TEMP/dist"
+          # No entry may carry the runner's UID.
+          tar -tvzf "$RUNNER_TEMP/dist/paperless-go.tar.gz" | awk '$2 != "0/0" { print; bad = 1 } END { exit bad }'
+          tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/dist/paperless-go.tar.gz"
+          SMOKE_DIR="$RUNNER_TEMP/paperless-go" PAPERLESS_GO_IMAGE=paperless-go:smoke scripts/compose-smoke-test.sh
+      - name: Release version numbers
+        run: |
+          set -eu
+          git init -q "$RUNNER_TEMP/tags" && cd "$RUNNER_TEMP/tags"
+          git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m tags
+          check() { got=$("$GITHUB_WORKSPACE/scripts/next-version.sh" "$1"); [ "$got" = "$2" ] || { echo "$1: got $got, want $2"; exit 1; }; }
+          check 26.10 26.10-1
+          git tag v26.10-1 && git tag v26.10-3 && git tag v26.09-7 && git tag v26.10-rc
+          check 26.10 26.10-4
+          check 26.11 26.11-1
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      # Node 25+ no longer bundles corepack; keep the version in sync with the Dockerfile.
+      - run: npm install -g corepack@0.36.0 && corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm audit --prod
