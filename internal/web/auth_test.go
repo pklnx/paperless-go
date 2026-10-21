@@ -564,3 +564,14 @@ func TestSessionLookupFails(t *testing.T) {
 		t.Fatalf("closed store pings: %v", err)
 	}
 }
+
+func TestLoggableUserName(t *testing.T) {
+	if got := loggableUserName("alice"); got != "alice" {
+		t.Errorf("valid name logged as %q", got)
+	}
+	for _, n := range []string{"correct horse battery staple", "Secret!Pass", ""} {
+		if got := loggableUserName(n); got == n {
+			t.Errorf("invalid name %q was logged", n)
+		}
+	}
+}

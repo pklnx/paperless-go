@@ -40,8 +40,9 @@ from the internet.
 - **Sessions** end after 7 days without use and after 30 days at the latest.
   The cookie is `HttpOnly` and `SameSite=Strict`; over HTTPS (also behind a
   proxy that sends `X-Forwarded-Proto: https`) it is `__Host-` prefixed and
-  `Secure`. The database stores only a hash of the token. A new password,
-  a lock or removing the user ends all their sessions.
+  `Secure`. The database stores only a hash of the token. A password reset
+  by an admin, a lock or removing the user ends all their sessions;
+  changing your own password ends all your other sessions.
 - **Generated passwords** (a new user or a reset in the web UI, `user
   reset-password`) are shown once and must be replaced at the first login.
 - **Admins** manage users and see every user's documents; users see only

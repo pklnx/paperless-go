@@ -63,6 +63,11 @@ func TestParseNetworks(t *testing.T) {
 	if _, err := ParseNetworks(EnvTrustedProxies, "proxy.local"); err == nil || !strings.Contains(err.Error(), EnvTrustedProxies) {
 		t.Errorf("host name: %v", err)
 	}
+	// Shorter than /96 cannot become an IPv4 prefix; it must not silently
+	// turn into a prefix that matches nothing.
+	if _, err := ParseNetworks(EnvTrustedProxies, "::ffff:0:0/80"); err == nil || !strings.Contains(err.Error(), "/96") {
+		t.Errorf("short IPv4-mapped prefix: %v", err)
+	}
 }
 
 func TestLoadTrustedProxies(t *testing.T) {

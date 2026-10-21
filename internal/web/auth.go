@@ -248,7 +248,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		s.limiter.Fail(name, addr)
-		s.log.Info("login failed", "user", name, "addr", addr)
+		s.log.Info("login failed", "user", loggableUserName(name), "addr", addr)
 		s.fail(w, r, http.StatusUnauthorized, errWrongLogin, nil)
 		return
 	}
@@ -310,4 +310,13 @@ func truncateUserAgent(ua string) string {
 		cut--
 	}
 	return ua[:cut]
+}
+
+// loggableUserName returns name if it is a valid user name. Anything else
+// may be a password typed into the wrong field and is not logged.
+func loggableUserName(name string) string {
+	if auth.ValidateUserName(name) != nil {
+		return "(invalid name)"
+	}
+	return name
 }

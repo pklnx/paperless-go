@@ -85,6 +85,9 @@ func ParseNetworks(env, v string) ([]netip.Prefix, error) {
 			}
 			p = netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen())
 		}
+		if p.Addr().Is4In6() && p.Bits() < 96 {
+			return nil, fmt.Errorf("%s: %q is an IPv4-mapped prefix shorter than /96; write the IPv4 network instead", env, n)
+		}
 		out = append(out, netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-unmapBits(p)).Masked())
 	}
 	return out, nil
