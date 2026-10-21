@@ -49,6 +49,7 @@ type authFixture struct {
 	srv    *httptest.Server
 	client *http.Client
 	clock  *testClock
+	dbURL  string
 }
 
 func newAuthFixture(t *testing.T) *authFixture {
@@ -59,7 +60,7 @@ func newAuthFixture(t *testing.T) *authFixture {
 // newAuthFixtureOpts is newAuthFixture with TrustedProxies from opts.
 func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 	t.Helper()
-	st := storetest.New(t)
+	st, dbURL := storetest.NewWithURL(t)
 	clock := &testClock{now: time.Now()}
 	s := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{
 		AllowedHosts: []string{"127.0.0.1"}, Hasher: storetest.Hasher, Now: clock.Now, TrustedProxies: opts.TrustedProxies,
@@ -67,7 +68,7 @@ func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	jar, _ := cookiejar.New(nil)
-	return &authFixture{t: t, st: st, srv: srv, client: &http.Client{Jar: jar}, clock: clock}
+	return &authFixture{t: t, st: st, srv: srv, client: &http.Client{Jar: jar}, clock: clock, dbURL: dbURL}
 }
 
 // as returns a copy of the fixture with its own cookie jar, i.e. another

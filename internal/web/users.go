@@ -100,7 +100,10 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, err := s.store.CreateUserWithGeneratedPassword(r.Context(), name, hash, in.Admin); err != nil {
+	e := s.auditEntry(r, "user.add")
+	e.SetTarget(store.TargetUser, "", name)
+	e.Detail("admin", in.Admin)
+	if _, err := s.store.CreateUserWithGeneratedPassword(withAudit(r, e), name, hash, in.Admin); err != nil {
 		if errors.Is(err, store.ErrNameTaken) {
 			s.fail(w, r, http.StatusConflict, fmt.Sprintf("a user named %q already exists", name), nil)
 			return
@@ -151,7 +154,7 @@ func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if err := s.store.SetUserPassword(r.Context(), u.ID, hash, true); err != nil {
+	if err := s.store.SetUserPassword(withAudit(r, auditUser(s.auditEntry(r, "user.password_reset"), u)), u.ID, hash, true); err != nil {
 		s.failStore(w, r, err)
 		return
 	}
@@ -177,9 +180,9 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch {
 	case in.Admin != nil && in.Locked == nil:
-		err = s.store.SetUserAdmin(r.Context(), u.ID, *in.Admin)
+		err = s.store.SetUserAdmin(withAudit(r, auditUser(s.auditEntry(r, adminAction(*in.Admin)), u)), u.ID, *in.Admin)
 	case in.Locked != nil && in.Admin == nil:
-		err = s.store.SetUserLocked(r.Context(), u.ID, *in.Locked)
+		err = s.store.SetUserLocked(withAudit(r, auditUser(s.auditEntry(r, lockAction(*in.Locked)), u)), u.ID, *in.Locked)
 	default:
 		s.fail(w, r, http.StatusBadRequest, "send exactly one of admin and locked", nil)
 		return
@@ -201,7 +204,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	err := s.store.DeleteUser(r.Context(), u.ID)
+	err := s.store.DeleteUser(withAudit(r, auditUser(s.auditEntry(r, "user.remove"), u)), u.ID)
 	var owns *store.OwnsRowsError
 	switch {
 	case errors.Is(err, store.ErrLastAdmin):
@@ -216,6 +219,23 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("user removed", "user", u.Name, "by", currentSession(r).UserName)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminAction is the audit action of granting (promote) or revoking
+// (demote) the admin role.
+func adminAction(admin bool) string {
+	if admin {
+		return "user.promote"
+	}
+	return "user.demote"
+}
+
+// lockAction is the audit action of locking or unlocking a user.
+func lockAction(locked bool) string {
+	if locked {
+		return "user.lock"
+	}
+	return "user.unlock"
 }
 
 // ownsRowsMessage explains why a user cannot be removed.
@@ -276,7 +296,7 @@ func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 		s.fail(w, r, http.StatusInternalServerError, "internal error", err)
 		return
 	}
-	if err := s.store.ChangeOwnPassword(r.Context(), u.ID, hash, auth.HashSessionToken(sessionToken(r))); err != nil {
+	if err := s.store.ChangeOwnPassword(withAudit(r, s.auditEntry(r, "profile.password_change")), u.ID, hash, auth.HashSessionToken(sessionToken(r))); err != nil {
 		s.failStore(w, r, err)
 		return
 	}

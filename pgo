@@ -35,6 +35,9 @@ if [ "${1:-}" = migrate ]; then
 		echo "warning: could not prepare the data directory (DATA_DIR in .env, default ./data)" >&2
 fi
 
+# Who runs the command, for the audit log (not verified).
+operator=$(id -un 2>/dev/null || echo unknown)
+
 # backup runs pg_dump in the database container, so the dump always matches
 # the server version and lands on the host; the image has no pg_dump.
 if [ "${1:-}" = backup ]; then
@@ -65,4 +68,4 @@ if [ -t 0 ] && [ -t 1 ]; then
 fi
 
 exec docker compose --progress quiet run --rm $build $tty_flag \
-	-e PAPERLESS_GO_COMMAND=./pgo paperless-go "$@"
+	-e PAPERLESS_GO_COMMAND=./pgo -e PAPERLESS_GO_OPERATOR="$operator" paperless-go "$@"

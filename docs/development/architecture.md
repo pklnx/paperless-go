@@ -25,7 +25,7 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 
 | Path | Purpose |
 |---|---|
-| `cmd/paperless-go` | Command line (cobra): `migrate`, `serve`, `user`, `prepare-data` (hidden, run by `./pgo migrate`). |
+| `cmd/paperless-go` | Command line (cobra): `migrate`, `serve`, `user`, `audit export`, `prepare-data` (hidden, run by `./pgo migrate`). |
 | `internal/auth` | Argon2id password hashes, session tokens, the failed-login limiter and a rate limit, all with an injectable clock. |
 | `internal/config` | Configuration from `PAPERLESS_GO_*` environment variables. |
 | `internal/blobstore` | Content-addressed document files: named by their SHA-256 without extension (`documents/ab/cd/<sha256>`), published and removed durably (see [Blob durability](#blob-durability)). |
@@ -48,6 +48,7 @@ app and the server through the app's archive folder format:
 | App (SwiftData) | Server table |
 |---|---|
 | — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`), `sessions` |
+| — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; see [Audit log](#audit-log)) |
 | `Document`: id (UUID), title, documentDate, createdAt, modifiedAt, notes, isFavorite, isInbox, archiveSerialNumber, pageCount, fileSize, extractedText, source, originalFileName, textSource, contentHash | `documents`, with the UUID as primary key; the original file (`original_sha256`, size, MIME type) and the archive PDF (`archive_sha256`, size) |
 | `Tag`: name, colorHex, symbol, parent, matchText, matchMode | `tags`, `document_tags` (nested through `parent_id`) |
 | `Correspondent`, `DocumentType`: name, matchText, matchMode | `correspondents`, `document_types` |
@@ -218,6 +219,49 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   before) gives the same error. The last unlocked admin stays.
 - **Client address.** The login limits count per user name and per client
   address; `X-Forwarded-For` counts only from `PAPERLESS_GO_TRUSTED_PROXIES`.
+
+## Audit log
+
+Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
+`cmd/paperless-go/audit.go`, migration `00005_audit_log.sql`).
+
+- **Table.** `audit_log` is partitioned by month (`at`, from the database
+  clock). Each row has the actor (`session`, `api_key`, `cli`), the user's
+  ID and name at the time, the action (`area.verb`), an optional target
+  (`document`, `user`, `api_key`; a document target must be a UUID), client
+  address, a user agent (stored once in `audit_user_agents`) and details as
+  a JSON object. `user_id`, `api_key_id` and `target_id` have **no foreign
+  keys**: removing a user keeps their rows, and the log never blocks a
+  removal.
+- **Append-only.** Row triggers refuse `UPDATE` and `DELETE` on the log and
+  its partitions, statement triggers refuse `TRUNCATE`; all are `ENABLE
+  ALWAYS`, so `session_replication_role = replica` does not skip them. The
+  owner also revokes `UPDATE`, `DELETE` and `TRUNCATE` from itself (no
+  effect for a superuser). The down migration refuses while entries exist.
+- **Partitions.** `audit_log_ensure_partitions(n)` creates the current and
+  the next `n` months, with the trigger and revoke partitions do not
+  inherit; there is no default partition. The migration creates 3 months
+  ahead, `serve` keeps 3 ahead (at start and hourly), every command 1. An
+  insert that finds no partition creates it: on its own it retries once; in
+  a transaction it fails and the next attempt works.
+- **Same transaction.** `store.WithAudit(ctx, entry)` hands an entry to the
+  next store transaction (`inTx`), which writes it after the change and
+  before the commit. A change that fails writes nothing; an entry that
+  cannot be written rolls the change back (`ErrAuditUnavailable`, `503` in
+  the API, an error in the CLI). The user agent ID is looked up before the
+  transaction starts, so a full pool cannot deadlock.
+- **Events.** `auth.login`, `auth.logout` (same transaction as the session
+  change; a logout without its entry still ends the session),
+  `auth.login_failed` (best effort, with `reason` and, for an unknown user,
+  the tried name only if it is a valid user name), `user.add`,
+  `user.remove`, `user.lock`, `user.unlock`, `user.promote`, `user.demote`,
+  `user.password_reset`, `user.password_set` (CLI), `profile.password_change`,
+  `audit.export` (CLI, written before the export starts). Requests refused
+  by the login limiter write nothing, so a flood cannot grow the log.
+- **Reading.** `GET /api/audit` takes its scope from `requestScope`: users
+  get their own rows (`audit_log_user_idx`), admins everyone's, optionally
+  narrowed by `user` or `actor`. Paging is by a `(at, id)` cursor, newest
+  first. Reading the log writes no entry.
 
 ## Container
 

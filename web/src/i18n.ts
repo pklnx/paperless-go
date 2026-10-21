@@ -85,6 +85,46 @@ const en = {
   ownsData: "Owns documents or metadata: delete them before removing the user.",
   generatedFor: (name: string) => `Password for ${name}`,
   generatedHint: "Shown only now. Hand it over safely; at the first login it must be changed.",
+
+  // Log page
+  log: "Log",
+  logTitle: "Log",
+  logOwnNote: "Your logins, failed logins and logouts, and the changes you made to your password. Admins see these entries too.",
+  logAdminNote: "Every user's logins, failed logins and logouts, and every change of users and passwords, also from the command line.",
+  logFrom: "From",
+  logTo: "To",
+  logAction: "Action",
+  logWho: "Who",
+  logEveryone: "Everyone",
+  logCommandLine: "Command line",
+  logAllActions: "All actions",
+  logGroup: (g: string): string =>
+    ({ login: "Logins", users: "User management", profile: "Own login", export: "Log exports" })[g] ?? g,
+  logEmpty: "No entries in this period.",
+  logMore: "Load more",
+  logCLI: "command line",
+  logCLIBy: (who: string) => `command line (${who})`,
+  logViaKey: (name: string) => `with API key “${name}”`,
+  logTriedName: (name: string) => `“${name}”`,
+  /** A code in an entry's details: a login method, the reason of a failed login, a role. */
+  auditCode: (c: string): string =>
+    ({ password: "password", wrong_password: "wrong password", unknown_user: "unknown user", locked: "user locked", admin: "admin" })[c] ?? c,
+  auditAction: (a: string): string =>
+    ({
+      "auth.login": "Logged in",
+      "auth.login_failed": "Login failed",
+      "auth.logout": "Logged out",
+      "user.add": "Added user",
+      "user.remove": "Removed user",
+      "user.lock": "Locked user",
+      "user.unlock": "Unlocked user",
+      "user.promote": "Made admin",
+      "user.demote": "Removed admin role",
+      "user.password_reset": "Reset password",
+      "user.password_set": "Set password",
+      "profile.password_change": "Changed own password",
+      "audit.export": "Exported log",
+    })[a] ?? a,
 };
 
 export type Messages = typeof en;
@@ -168,6 +208,45 @@ const de: Messages = {
   ownsData: "Besitzt Dokumente oder Metadaten: lösche sie, bevor du den Benutzer entfernst.",
   generatedFor: (name) => `Passwort für ${name}`,
   generatedHint: "Wird nur jetzt angezeigt. Gib es sicher weiter; bei der ersten Anmeldung muss es geändert werden.",
+
+  log: "Protokoll",
+  logTitle: "Protokoll",
+  logOwnNote:
+    "Deine Anmeldungen, fehlgeschlagenen Anmeldungen und Abmeldungen und die Änderungen, die du an deinem Passwort vorgenommen hast. Admins sehen diese Einträge ebenfalls.",
+  logAdminNote: "Die Anmeldungen, fehlgeschlagenen Anmeldungen und Abmeldungen aller Benutzer und jede Änderung an Benutzern und Passwörtern, auch über die Kommandozeile.",
+  logFrom: "Von",
+  logTo: "Bis",
+  logAction: "Aktion",
+  logWho: "Wer",
+  logEveryone: "Alle",
+  logCommandLine: "Kommandozeile",
+  logAllActions: "Alle Aktionen",
+  logGroup: (g) =>
+    ({ login: "Anmeldungen", users: "Benutzerverwaltung", profile: "Eigene Anmeldung", export: "Protokoll-Exporte" })[g] ?? g,
+  logEmpty: "Keine Einträge in diesem Zeitraum.",
+  logMore: "Mehr laden",
+  logCLI: "Kommandozeile",
+  logCLIBy: (who) => `Kommandozeile (${who})`,
+  logViaKey: (name) => `mit API-Schlüssel „${name}“`,
+  logTriedName: (name) => `„${name}“`,
+  auditCode: (c) =>
+    ({ password: "Passwort", wrong_password: "falsches Passwort", unknown_user: "unbekannter Benutzer", locked: "Benutzer gesperrt", admin: "Admin" })[c] ?? c,
+  auditAction: (a) =>
+    ({
+      "auth.login": "Angemeldet",
+      "auth.login_failed": "Anmeldung fehlgeschlagen",
+      "auth.logout": "Abgemeldet",
+      "user.add": "Benutzer hinzugefügt",
+      "user.remove": "Benutzer entfernt",
+      "user.lock": "Benutzer gesperrt",
+      "user.unlock": "Benutzer entsperrt",
+      "user.promote": "Zum Admin gemacht",
+      "user.demote": "Admin-Rolle entzogen",
+      "user.password_reset": "Passwort zurückgesetzt",
+      "user.password_set": "Passwort gesetzt",
+      "profile.password_change": "Eigenes Passwort geändert",
+      "audit.export": "Protokoll exportiert",
+    })[a] ?? a,
 };
 
 const dictionaries = { en, de } satisfies Record<string, Messages>;

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/pklnx/paperless-go/internal/store/db"
@@ -107,11 +106,20 @@ func (s *Store) CreateUserWithGeneratedPassword(ctx context.Context, name, passw
 }
 
 func (s *Store) createUser(ctx context.Context, name, passwordHash string, admin, mustChange bool) (*User, error) {
-	r, err := s.q.CreateUser(ctx, db.CreateUserParams{Name: name, PasswordHash: passwordHash, IsAdmin: admin, MustChangePassword: mustChange})
+	var u *User
+	err := s.inTx(ctx, func(q *db.Queries) error {
+		r, err := q.CreateUser(ctx, db.CreateUserParams{Name: name, PasswordHash: passwordHash, IsAdmin: admin, MustChangePassword: mustChange})
+		if err != nil {
+			return mapErr(err)
+		}
+		u = userFromDB(r)
+		fillAuditTarget(ctx, TargetUser, u.ID)
+		return nil
+	})
 	if err != nil {
-		return nil, mapErr(err)
+		return nil, err
 	}
-	return userFromDB(r), nil
+	return u, nil
 }
 
 // GetUserByID looks up a user by ID.
@@ -250,7 +258,7 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 		// The sessions go with the user (ON DELETE CASCADE).
 		return one(q.DeleteUser(ctx, id))
 	})
-	if isRestrictViolation(err) {
+	if isRestrictViolation(err) && !errors.Is(err, ErrAuditUnavailable) {
 		// A row added concurrently, or an owned table the counts do not
 		// know yet: the foreign key refused the removal.
 		return s.ownsRowsError(ctx, id)
@@ -331,6 +339,14 @@ func (s *Store) TouchSession(ctx context.Context, idHash []byte, now time.Time) 
 	return s.q.TouchSession(ctx, db.TouchSessionParams{ID: idHash, Now: now})
 }
 
+// EndSession ends a session at logout, together with the audit entry of
+// ctx.
+func (s *Store) EndSession(ctx context.Context, idHash []byte) error {
+	return s.inTx(ctx, func(q *db.Queries) error {
+		return q.DeleteSession(ctx, idHash)
+	})
+}
+
 // DeleteSession ends a session.
 func (s *Store) DeleteSession(ctx context.Context, idHash []byte) error {
 	return s.q.DeleteSession(ctx, idHash)
@@ -340,13 +356,6 @@ func (s *Store) DeleteSession(ctx context.Context, idHash []byte) error {
 // idleCutoff and returns how many were removed.
 func (s *Store) DeleteExpiredSessions(ctx context.Context, now, idleCutoff time.Time) (int64, error) {
 	return s.q.DeleteExpiredSessions(ctx, db.DeleteExpiredSessionsParams{Now: now, IdleCutoff: idleCutoff})
-}
-
-// inTx runs fn in a transaction.
-func (s *Store) inTx(ctx context.Context, fn func(*db.Queries) error) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		return fn(s.q.WithTx(tx))
-	})
 }
 
 // one turns the row count of an update or delete into ErrNotFound when no

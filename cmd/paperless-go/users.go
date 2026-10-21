@@ -140,7 +140,10 @@ Admins manage users in the web UI and see every user's documents.`,
 			if err != nil {
 				return err
 			}
-			if _, err := a.store.CreateUser(cmd.Context(), name, hash, admin); err != nil {
+			e := cliEntry(cmd, "user.add")
+			e.SetTarget(store.TargetUser, "", name)
+			e.Detail("admin", admin)
+			if _, err := a.store.CreateUser(withCLIAudit(cmd, e), name, hash, admin); err != nil {
 				if errors.Is(err, store.ErrNameTaken) {
 					return fmt.Errorf("user %q already exists", name)
 				}
@@ -251,7 +254,7 @@ func newUserSetPasswordCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := a.store.SetUserPassword(cmd.Context(), u.ID, hash, false); err != nil {
+			if err := a.store.SetUserPassword(withCLIAudit(cmd, cliUserEntry(cmd, "user.password_set", u)), u.ID, hash, false); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "password of %q changed; existing logins ended\n", u.Name)
@@ -284,7 +287,7 @@ everywhere.`,
 			if err != nil {
 				return err
 			}
-			if err := a.store.SetUserPassword(cmd.Context(), u.ID, hash, true); err != nil {
+			if err := a.store.SetUserPassword(withCLIAudit(cmd, cliUserEntry(cmd, "user.password_reset", u)), u.ID, hash, true); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "new password for %q (shown only now; to be changed at the next login):\n%s\n", u.Name, pw)
@@ -294,9 +297,9 @@ everywhere.`,
 }
 
 func newUserLockCmd(lock bool) *cobra.Command {
-	use, short, done := "unlock NAME", "Allow a locked user to log in again", "unlocked"
+	use, short, done, action := "unlock NAME", "Allow a locked user to log in again", "unlocked", "user.unlock"
 	if lock {
-		use, short, done = "lock NAME", "Stop a user from logging in (logs them out everywhere)", "locked"
+		use, short, done, action = "lock NAME", "Stop a user from logging in (logs them out everywhere)", "locked", "user.lock"
 	}
 	return &cobra.Command{
 		Use:   use,
@@ -308,7 +311,7 @@ func newUserLockCmd(lock bool) *cobra.Command {
 				return err
 			}
 			defer a.close()
-			if err := a.store.SetUserLocked(cmd.Context(), u.ID, lock); err != nil {
+			if err := a.store.SetUserLocked(withCLIAudit(cmd, cliUserEntry(cmd, action, u)), u.ID, lock); err != nil {
 				return lastAdminError(err, u.Name)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "user %q %s\n", u.Name, done)
@@ -318,9 +321,9 @@ func newUserLockCmd(lock bool) *cobra.Command {
 }
 
 func newUserAdminCmd(admin bool) *cobra.Command {
-	use, alias, short, done := "demote NAME", "unadmin", "Take the admin role away", "is no longer an admin"
+	use, alias, short, done, action := "demote NAME", "unadmin", "Take the admin role away", "is no longer an admin", "user.demote"
 	if admin {
-		use, alias, short, done = "promote NAME", "admin", "Make a user an admin", "is now an admin"
+		use, alias, short, done, action = "promote NAME", "admin", "Make a user an admin", "is now an admin", "user.promote"
 	}
 	return &cobra.Command{
 		Use:     use,
@@ -333,7 +336,7 @@ func newUserAdminCmd(admin bool) *cobra.Command {
 				return err
 			}
 			defer a.close()
-			if err := a.store.SetUserAdmin(cmd.Context(), u.ID, admin); err != nil {
+			if err := a.store.SetUserAdmin(withCLIAudit(cmd, cliUserEntry(cmd, action, u)), u.ID, admin); err != nil {
 				return lastAdminError(err, u.Name)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%q %s\n", u.Name, done)
@@ -357,7 +360,7 @@ instead.`,
 				return err
 			}
 			defer a.close()
-			if err := a.store.DeleteUser(cmd.Context(), u.ID); err != nil {
+			if err := a.store.DeleteUser(withCLIAudit(cmd, cliUserEntry(cmd, "user.remove", u)), u.ID); err != nil {
 				var owns *store.OwnsRowsError
 				if errors.As(err, &owns) {
 					if owns.Counts.Total() == 0 {
