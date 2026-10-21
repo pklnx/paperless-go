@@ -20,6 +20,21 @@ type Correspondent struct {
 	ModifiedAt time.Time
 }
 
+type Deadline struct {
+	ID                 pgtype.UUID
+	OwnerID            int64
+	DocumentID         pgtype.UUID
+	Kind               string
+	Date               time.Time
+	Label              string
+	Origin             string
+	IsDone             bool
+	AddedToCalendarAt  *time.Time
+	AddedToRemindersAt *time.Time
+	CreatedAt          time.Time
+	ModifiedAt         time.Time
+}
+
 type Document struct {
 	ID                  pgtype.UUID
 	OwnerID             int64
@@ -66,6 +81,17 @@ type Installation struct {
 	ID        pgtype.UUID
 	Singleton bool
 	CreatedAt time.Time
+}
+
+type SavedView struct {
+	ID         pgtype.UUID
+	OwnerID    int64
+	Name       string
+	Symbol     string
+	SortIndex  int64
+	Filter     []byte
+	CreatedAt  time.Time
+	ModifiedAt time.Time
 }
 
 type Tag struct {
