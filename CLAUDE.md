@@ -11,7 +11,7 @@ A self-hosted server version of the Apple app [pklnx/document-archive](https://g
 
 ## Ticket flow
 1. Issue (template). 2. Maintainer labels `plan` (session planner) or `needs-plan` (Action planner) → `## Plan` comment (approach, files, data model, external services, tests, open questions, size), label becomes `review`. 3. Independent plan review: plan-reviewer agent, or label `plan-review` for the Action; an approving reviewer or the maintainer replaces `review` with `ready`; only `ready` issues are built.
-4. Plan with several parts: one sub-issue per part, title "<what> (#N, part K)", linked as GitHub sub-issue (`gh api -X POST repos/pklnx/paperless-go/issues/N/sub_issues -F sub_issue_id=<issue .id>`). The main issue's `ready` covers them; it closes with the last part.
+4. Plan with several parts: one sub-issue per part, created when the plan is posted (maintainer rule): by the session planner, or by the coordinator for an Action plan (the Action cannot create issues); title "<what> (#N, part K)", linked as GitHub sub-issue (`gh api -X POST repos/pklnx/paperless-go/issues/N/sub_issues -F sub_issue_id=<issue .id>`; in cloud sessions `issue_write` with `parent_issue_number`). The main issue's `ready` covers them; it closes with the last part.
 5. One branch + PR per part; body "Closes #<sub>." and "Part K of #N.".
 6. Review: local reviewer always for app code; Action review as second reviewer on risky PRs (deletes, schema changes (`db-migration`), rewriting user data, sending documents to external services): the coordinator adds `second-review` to every risky PR; automatic for migration PRs. PRs without app code (docs, CI, test-only): Action review (`second-review`) + green required checks only.
 7. Merge: approving review + green required checks; `gh pr merge <n> --squash --match-head-commit <sha>`. Never auto-merge, never change rulesets or repo settings.
@@ -32,7 +32,7 @@ Its texts end with `— Claude (Action), <role>` (planner, plan reviewer, review
 - Every behaviour change has tests; a bug fix has a regression test that fails without the fix. Tests wait for signals, never for time (no sleeps/fixed delays).
 - Locally run only the tests of what changed; CI runs everything.
 - Agents never watch CI: push, open the PR, report. The coordinator gets woken per PR by a background `gh pr checks <n> --watch --interval 120 >/dev/null 2>&1; gh pr checks <n>` (wait until the checks appear first).
-- ≤3 tickets in parallel, ≤2 PRs in CI at a time.
+- ≤3 tickets in parallel (2-3 agents at a time), ≤2 PRs in CI at a time.
 - A flaky-test rerun gets a row in `docs/development/flaky-tests.md`; a test listed twice is fixed right away.
 - After 3 review rounds that keep finding new holes in a heuristic: stop patching, rebuild it on a principle or give the maintainer options.
 - Ask instead of guessing on product decisions (via AskUserQuestion, recommendation first).
