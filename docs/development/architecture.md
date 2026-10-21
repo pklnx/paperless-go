@@ -30,6 +30,7 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 | `internal/crypto` | AES-256-GCM sealing of small secrets (the TOTP secrets) with `PAPERLESS_GO_SECRET_KEY`. |
 | `internal/config` | Configuration from `PAPERLESS_GO_*` environment variables. |
 | `internal/blobstore` | Content-addressed document files: named by their SHA-256 without extension (`documents/ab/cd/<sha256>`), published and removed durably (see [Blob durability](#blob-durability)). |
+| `internal/ingest` | Imports one file as a document: type detection from the content (PDF, JPEG, PNG, HEIC/HEIF), the size and 50-megapixel limits, then the blob store, the duplicate check and the row (see [Ingest](#ingest)). |
 | `internal/process` | The processing queue's worker: claims jobs, runs the tools (`Runner`) in a work directory, stores text, page count and archive PDF (see [Processing](#processing)). |
 | `internal/store` | PostgreSQL access: migrations (goose, embedded), queries (sqlc, generated into `internal/store/db`). |
 | `internal/store/storetest` | A throwaway, migrated database per test. |
@@ -193,6 +194,36 @@ store (`fsops`). None of them proves that data survives a power loss. That
 needs a disposable VM or a fault-injecting block device, power cuts at the
 publication and removal boundaries, a restart, and a check that every
 acknowledged blob is still there and every acknowledged removal is still gone.
+
+## Ingest
+
+`internal/ingest` turns one file into a document; the upload API, the
+consume folder and the CLI import build on it. Per file, each step finishes
+before the next starts:
+
+1. **Detect** from the first 1 MiB, never from the name or a declared
+   type: PDF (`%PDF-` within the first 1024 bytes), JPEG, PNG, or HEIC/HEIF
+   (an `ftyp` brand `heic`, `heix`, `hevc`, `hevx`, `mif1` or `msf1`; any
+   AVIF brand refuses the file). JPEG and PNG give their size through
+   `image.DecodeConfig`, HEIC/HEIF through the `ispe` property of the
+   primary item (a small box parser, no CGO); more than 50 megapixels, or a
+   HEIC without a findable size, refuses the file. Nothing is stored for a
+   refused file.
+2. **Store** the file through the size limit (`PAPERLESS_GO_MAX_UPLOAD_SIZE`;
+   exactly the limit passes) with `blobstore.Put`.
+3. **Duplicate check** with `FindDocumentByOriginal` for the new document's
+   owner.
+4. **Insert** with `CreateDocument`, in the inbox; the title is the file's
+   base name without extension (NFC, no control characters, at most 200
+   characters). An `ErrDuplicate` from a concurrent import is a duplicate too.
+
+The result is `Imported`, `Duplicate` (with the existing document's ID and
+title) or `Refused` (`unsupported`, `too_large`, `too_many_pixels`,
+`unreadable`); an error is transient, nothing was created and a retry may
+succeed. Nothing calls `blobstore.Remove`: a blob left by a failure is
+reused by the retry or swept as an orphan (#12). Images are stored as
+originals; `CreateDocument` queues every new document for
+[processing](#processing), which builds the archive PDF.
 
 ## Processing
 

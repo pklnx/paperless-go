@@ -21,11 +21,13 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv(EnvLogLevel, "")
 	t.Setenv(EnvAllowedHosts, "")
 	t.Setenv(EnvTrustedProxies, "")
+	t.Setenv(EnvMaxUploadSize, "")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.DataDir != "./data" || cfg.LogLevel != "info" || cfg.AllowedHosts != nil || cfg.TrustedProxies != nil {
+	if cfg.DataDir != "./data" || cfg.LogLevel != "info" || cfg.AllowedHosts != nil || cfg.TrustedProxies != nil ||
+		cfg.MaxUploadSize != 100<<20 {
 		t.Errorf("defaults: %+v", cfg)
 	}
 }
@@ -81,6 +83,34 @@ func TestLoadTrustedProxies(t *testing.T) {
 	t.Setenv(EnvTrustedProxies, "nope")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), EnvTrustedProxies) {
 		t.Errorf("invalid: %v", err)
+	}
+}
+
+func TestParseSize(t *testing.T) {
+	for in, want := range map[string]int64{
+		"": 7, "1": 1, " 104857600 ": 100 << 20, "100MiB": 100 << 20, "512 KiB": 512 << 10, "2GiB": 2 << 30,
+	} {
+		if got, err := ParseSize(EnvMaxUploadSize, in, 7); err != nil || got != want {
+			t.Errorf("ParseSize(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"0", "-1", "abc", "1.5MiB", "10MB", "MiB", "9223372036854775807", "8589934592GiB"} {
+		if _, err := ParseSize(EnvMaxUploadSize, in, 7); err == nil || !strings.Contains(err.Error(), EnvMaxUploadSize) {
+			t.Errorf("ParseSize(%q) error = %v, want one naming %s", in, err, EnvMaxUploadSize)
+		}
+	}
+}
+
+func TestLoadMaxUploadSize(t *testing.T) {
+	t.Setenv(EnvDatabaseURL, "postgres://x")
+	t.Setenv(EnvMaxUploadSize, "20MiB")
+	cfg, err := Load()
+	if err != nil || cfg.MaxUploadSize != 20<<20 {
+		t.Fatalf("Load() = %+v, %v", cfg, err)
+	}
+	t.Setenv(EnvMaxUploadSize, "lots")
+	if _, err := Load(); err == nil {
+		t.Error("Load() accepted an invalid size")
 	}
 }
 
