@@ -30,7 +30,7 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 | `internal/crypto` | AES-256-GCM sealing of small secrets (the TOTP secrets) with `PAPERLESS_GO_SECRET_KEY`. |
 | `internal/config` | Configuration from `PAPERLESS_GO_*` environment variables. |
 | `internal/blobstore` | Content-addressed document files: named by their SHA-256 without extension (`documents/ab/cd/<sha256>`), published and removed durably (see [Blob durability](#blob-durability)). |
-| `internal/ingest` | Imports one file as a document: type detection from the content (PDF, JPEG, PNG, HEIC/HEIF), the size and 40-megapixel limits, then the blob store, the duplicate check and the row (see [Ingest](#ingest)). |
+| `internal/ingest` | Imports one file as a document: type detection from the content (PDF, JPEG, PNG, HEIC/HEIF), the size and 50-megapixel limits, then the blob store, the duplicate check and the row (see [Ingest](#ingest)). |
 | `internal/store` | PostgreSQL access: migrations (goose, embedded), queries (sqlc, generated into `internal/store/db`). |
 | `internal/store/storetest` | A throwaway, migrated database per test. |
 | `internal/web` | HTTP server: the route table with each route's access, login and sessions, user management, the Host and same-origin checks, `/healthz`. |
@@ -204,7 +204,7 @@ before the next starts:
    (an `ftyp` brand `heic`, `heix`, `hevc`, `hevx`, `mif1` or `msf1`; any
    AVIF brand refuses the file). JPEG and PNG give their size through
    `image.DecodeConfig`, HEIC/HEIF through the `ispe` property of the
-   primary item (a small box parser, no CGO); more than 40 megapixels, or a
+   primary item (a small box parser, no CGO); more than 50 megapixels, or a
    HEIC without a findable size, refuses the file. Nothing is stored for a
    refused file.
 2. **Store** the file through the size limit (`PAPERLESS_GO_MAX_UPLOAD_SIZE`;

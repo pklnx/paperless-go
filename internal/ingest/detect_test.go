@@ -162,15 +162,23 @@ func TestDetectRefusesUnsupported(t *testing.T) {
 }
 
 func TestDetectPixelLimit(t *testing.T) {
-	// 8000×5000 is exactly MaxPixels.
+	// Sizes derive from MaxPixels, so changing the limit needs no test
+	// change. limitW×limitH is exactly MaxPixels.
+	const limitW = 10000
+	const limitH = MaxPixels / limitW
+	if limitW*limitH != MaxPixels {
+		t.Fatalf("MaxPixels %d is not a multiple of %d; pick another width", MaxPixels, limitW)
+	}
 	for _, tc := range []struct {
 		name string
 		at   []byte // exactly MaxPixels
-		over []byte // one row more
+		over []byte // more than MaxPixels
 	}{
-		{"png", pngHeader(8000, 5000), pngHeader(8000, 5001)},
-		{"jpeg", jpegHeader(8000, 5000), jpegHeader(8000, 5001)},
-		{"heic", heif("heic", 8000, 5000), heif("heic", 8000, 5001)},
+		// One pixel more: (MaxPixels+1)×1.
+		{"png", pngHeader(limitW, limitH), pngHeader(MaxPixels+1, 1)},
+		{"heic", heif("heic", limitW, limitH), heif("heic", MaxPixels+1, 1)},
+		// JPEG sides are 16-bit, so one row more.
+		{"jpeg", jpegHeader(limitW, limitH), jpegHeader(limitW, limitH+1)},
 		{"heic huge", heif("heic", 10, 10), heif("heic", 1<<31, 1<<31)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -182,6 +190,13 @@ func TestDetectPixelLimit(t *testing.T) {
 				t.Errorf("over the limit: reason = %s, want %s", got, ReasonTooManyPixels)
 			}
 		})
+	}
+}
+
+// A 48 MP iPhone photo (8064×6048) passes.
+func TestDetect48MPPhoto(t *testing.T) {
+	if typ, err := Detect(heif("heic", 8064, 6048)); err != nil || typ.MIME != MIMEHEIC {
+		t.Errorf("Detect = %+v, %v", typ, err)
 	}
 }
 

@@ -127,8 +127,9 @@ func (l *limitReader) Read(p []byte) (int, error) {
 		return 0, errTooLarge
 	}
 	// Read one byte past the limit, to tell "exactly at the limit" from
-	// "more".
-	if int64(len(p)) > l.n+1 {
+	// "more". Written without l.n+1, which overflows for a limit of
+	// math.MaxInt64.
+	if int64(len(p))-1 > l.n {
 		p = p[:l.n+1]
 	}
 	n, err := l.r.Read(p)

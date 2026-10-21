@@ -11,6 +11,7 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -98,9 +99,15 @@ func (e *env) documents(t *testing.T) []*store.Document {
 // blobCount counts the files in the blob store.
 func (e *env) blobCount(t *testing.T) int {
 	t.Helper()
+	return e.entries(t, blobstore.EntryBlob)
+}
+
+// entries counts the blob store's entries of a kind.
+func (e *env) entries(t *testing.T, kind blobstore.EntryKind) int {
+	t.Helper()
 	n := 0
 	if err := e.blobs.Walk(func(en blobstore.Entry) error {
-		if en.Kind == blobstore.EntryBlob {
+		if en.Kind == kind {
 			n++
 		}
 		return nil
@@ -173,6 +180,9 @@ func TestImportSizeLimit(t *testing.T) {
 		if n := e.blobCount(t); n != 0 {
 			t.Errorf("limit %d: %d blobs after refusal", limit, n)
 		}
+		if n := e.entries(t, blobstore.EntryTemp); n != 0 {
+			t.Errorf("limit %d: %d temporary files after refusal", limit, n)
+		}
 		at := pdfOfSize(limit, 'b')
 		res = run(t, im, e.user.ID, "exact.pdf", at)
 		if res.Outcome != ingest.Imported || res.Document.OriginalSize != int64(limit) || res.Document.OriginalSHA256 != sha(at) {
@@ -181,13 +191,26 @@ func TestImportSizeLimit(t *testing.T) {
 	}
 }
 
+// The largest possible limit must not overflow the size check.
+func TestImportMaxInt64Limit(t *testing.T) {
+	e := newEnv(t)
+	im := e.importer(t, math.MaxInt64)
+	pdf := pdfOfSize(ingest.PrefixSize+10, 'm')
+	if res := run(t, im, e.user.ID, "m.pdf", pdf); res.Outcome != ingest.Imported || res.Document.OriginalSize != int64(len(pdf)) {
+		t.Errorf("result = %+v", res)
+	}
+}
+
 func TestImportPixelLimitStoresNothing(t *testing.T) {
 	e := newEnv(t)
 	im := e.importer(t, 1<<20)
-	// A PNG header claiming 8000×5001 pixels.
+	// A PNG header claiming one pixel more than allowed.
 	var b bytes.Buffer
 	b.WriteString("\x89PNG\r\n\x1a\n")
-	ihdr := []byte{0, 0, 0, 13, 'I', 'H', 'D', 'R', 0, 0, 0x1F, 0x40, 0, 0, 0x13, 0x89, 8, 2, 0, 0, 0}
+	ihdr := []byte{0, 0, 0, 13, 'I', 'H', 'D', 'R'}
+	ihdr = binary.BigEndian.AppendUint32(ihdr, ingest.MaxPixels+1)
+	ihdr = binary.BigEndian.AppendUint32(ihdr, 1)
+	ihdr = append(ihdr, 8, 2, 0, 0, 0)
 	b.Write(ihdr)
 	b.Write(crc(ihdr[4:]))
 	res := run(t, im, e.user.ID, "huge.png", b.Bytes())

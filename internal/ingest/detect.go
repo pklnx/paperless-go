@@ -11,8 +11,11 @@ import (
 	"github.com/pklnx/paperless-go/internal/store"
 )
 
-// MaxPixels is the most pixels (width × height) an image may have.
-const MaxPixels = 40_000_000
+// MaxPixels is the most pixels (width × height) an image may have; an
+// image of exactly this many passes. 50 MP lets 48 MP phone photos through
+// (maintainer decision, 2026-10-21). This is the only place the limit is
+// set.
+const MaxPixels = 50_000_000
 
 // PrefixSize is how many leading bytes detection looks at. Type and pixel
 // checks run on this prefix before anything is stored.
