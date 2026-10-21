@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pklnx/paperless-go/internal/config"
+	"github.com/pklnx/paperless-go/internal/consume"
 	"github.com/pklnx/paperless-go/internal/crypto"
 	"github.com/pklnx/paperless-go/internal/store"
 	"github.com/pklnx/paperless-go/internal/web"
@@ -181,7 +182,13 @@ rebinding; state-changing requests must come from the same origin. Use HTTPS
 network.
 
 It also processes queued documents in the background (` + config.EnvOCRWorkers + `
-at a time, default 1; 0 turns it off).`,
+at a time, default 1; 0 turns it off).
+
+With ` + config.EnvConsumeDir + ` set, it imports the files put into the
+consume folder: consume/<user>/ for each user (created by the server), checked
+every 10 seconds. A file is imported once it has not changed for two scans,
+then deleted (also a duplicate); a file that cannot be imported moves to
+consume/<user>/failed/ with a .error.txt file that says why.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			a, err := openApp(cmd.Context())
@@ -202,6 +209,12 @@ at a time, default 1; 0 turns it off).`,
 			}
 			log := newLogger(a.cfg.LogLevel)
 			warnWithoutUsers(cmd.Context(), a.store, log)
+			var consumer *consume.Consumer
+			if a.cfg.ConsumeDir != "" {
+				if consumer, err = newConsumer(a, log); err != nil {
+					return err
+				}
+			}
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 			var worker sync.WaitGroup
@@ -216,13 +229,20 @@ at a time, default 1; 0 turns it off).`,
 			} else {
 				log.Warn("document processing is off", "env", config.EnvOCRWorkers)
 			}
+			if consumer != nil {
+				ticker := time.NewTicker(consume.DefaultInterval)
+				defer ticker.Stop()
+				log.Info("watching the consume folder", "dir", a.cfg.ConsumeDir, "every", consume.DefaultInterval)
+				worker.Go(func() { consumer.Run(ctx, ticker.C) })
+			}
 			srv := web.New(a.store, log, web.Options{
 				AllowedHosts: a.cfg.AllowedHosts, TrustedProxies: a.cfg.TrustedProxies,
 				Sealer: sealer, SecretKey: a.cfg.SecretKey, Require2FA: a.cfg.Require2FA,
 			})
 			log.Info("listening", "addr", listen, "version", version)
 			err = srv.ListenAndServe(ctx, listen)
-			// Running jobs are given back before the process ends.
+			// Running jobs are given back, and a running import of the
+			// consume folder ends, before the process ends.
 			cancel()
 			worker.Wait()
 			return err

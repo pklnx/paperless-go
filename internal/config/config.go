@@ -46,6 +46,9 @@ const (
 	EnvOCRLanguages = "PAPERLESS_GO_OCR_LANGUAGES"
 	// EnvOCRTimeout limits each processing attempt (a Go duration).
 	EnvOCRTimeout = "PAPERLESS_GO_OCR_TIMEOUT"
+	// EnvConsumeDir is the consume folder that serve imports from, with
+	// one subfolder per user; empty turns it off.
+	EnvConsumeDir = "PAPERLESS_GO_CONSUME_DIR"
 )
 
 // Processing defaults.
@@ -86,6 +89,8 @@ type Config struct {
 	SecretKey []byte
 	// Require2FA makes two-factor login required for every user.
 	Require2FA bool
+	// ConsumeDir is the consume folder serve imports from; empty: none.
+	ConsumeDir string
 }
 
 // DataDirFromEnv returns the data directory, ./data unless set.
@@ -96,12 +101,18 @@ func DataDirFromEnv() string {
 	return "./data"
 }
 
+// ConsumeDirFromEnv returns the consume folder, empty when it is off.
+func ConsumeDirFromEnv() string {
+	return strings.TrimSpace(os.Getenv(EnvConsumeDir))
+}
+
 // Load reads the configuration from the environment.
 func Load() (*Config, error) {
 	cfg := &Config{
 		DatabaseURL: os.Getenv(EnvDatabaseURL),
 		DataDir:     DataDirFromEnv(),
 		LogLevel:    os.Getenv(EnvLogLevel),
+		ConsumeDir:  ConsumeDirFromEnv(),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, errors.New(EnvDatabaseURL + " is not set")

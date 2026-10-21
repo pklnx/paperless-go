@@ -26,7 +26,7 @@ func newPrepareDataCmd() *cobra.Command {
 	var check bool
 	cmd := &cobra.Command{
 		Use:    "prepare-data",
-		Short:  "Make a fresh data directory writable for the container user (run by ./pgo migrate)",
+		Short:  "Make a fresh data directory and consume folder writable for the container user (run by ./pgo migrate)",
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -40,7 +40,11 @@ func newPrepareDataCmd() *cobra.Command {
 			}
 			// Never fails: a file permission problem must not block the
 			// schema upgrade that ./pgo migrate runs next.
-			prepareDataDir(dir, cmd.OutOrStdout(), cmd.ErrOrStderr(), systemDataDirEnv())
+			env := systemDataDirEnv()
+			prepareDataDir(dir, dataDirKind, cmd.OutOrStdout(), cmd.ErrOrStderr(), env)
+			if consume := config.ConsumeDirFromEnv(); consume != "" {
+				prepareDataDir(consume, consumeDirKind, cmd.OutOrStdout(), cmd.ErrOrStderr(), env)
+			}
 			return nil
 		},
 	}
@@ -75,27 +79,42 @@ func systemDataDirEnv() dataDirEnv {
 	return env
 }
 
+// dirKind names a directory that prepareDataDir prepares, for its
+// messages.
+type dirKind struct {
+	what string // "data directory"
+	env  string // the .env variable of the host path
+	host string // the default host path, relative to the Compose project
+	path string // the path in the container
+}
+
+var (
+	dataDirKind    = dirKind{what: "data directory", env: "DATA_DIR", host: "data", path: "/data"}
+	consumeDirKind = dirKind{what: "consume folder", env: "CONSUME_DIR", host: "consume", path: "/consume"}
+)
+
 // prepareDataDir creates dir if needed and, run as root, gives a fresh
 // empty directory, as Docker creates a missing bind mount source, to the
 // container user. It changes nothing else and only warns: never a
 // recursive chown, never an error.
-func prepareDataDir(dir string, stdout, stderr io.Writer, env dataDirEnv) {
+func prepareDataDir(dir string, kind dirKind, stdout, stderr io.Writer, env dataDirEnv) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		fmt.Fprintf(stderr, "warning: could not create the data directory %s: %v\n", dir, err)
+		fmt.Fprintf(stderr, "warning: could not create the %s %s: %v\n", kind.what, dir, err)
 		return
 	}
 	ok, err := env.canWrite(dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "warning: could not check whether the data directory %s is writable for UID %d: %v\n",
-			dir, containerUID, err)
+		fmt.Fprintf(stderr, "warning: could not check whether the %s %s is writable for UID %d: %v\n",
+			kind.what, dir, containerUID, err)
 		return
 	}
 	if ok {
 		return
 	}
 	warn := func(reason string) {
-		fmt.Fprintf(stderr, "warning: the data directory %s (DATA_DIR in .env, default ./data) is not writable "+
-			"for the container user, UID %d, %s.\n%s", dir, containerUID, reason, ownerHint(env.userns))
+		fmt.Fprintf(stderr, "warning: the %s %s (%s in .env, default ./%s) is not writable "+
+			"for the container user, UID %d, %s.\n%s", kind.what, dir, kind.env, kind.host, containerUID, reason,
+			ownerHint(env.userns, kind))
 	}
 	if !env.isRoot {
 		warn("and this command does not run as root")
@@ -127,23 +146,23 @@ func prepareDataDir(dir string, stdout, stderr io.Writer, env dataDirEnv) {
 		warn("even after changing its owner")
 		return
 	}
-	fmt.Fprintf(stdout, "data directory %s: owner set to UID %d (the container user)\n", dir, containerUID)
+	fmt.Fprintf(stdout, "%s %s: owner set to UID %d (the container user)\n", kind.what, dir, containerUID)
 }
 
-// ownerHint tells how to give an existing data directory to the container
+// ownerHint tells how to give an existing directory to the container
 // user from the host. In a user namespace, UID 65532 in the container is
 // another UID on the host, so a plain chown on the host would be wrong.
-func ownerHint(userns bool) string {
+func ownerHint(userns bool, kind dirKind) string {
 	if userns {
-		return `  Fix it on the host (use your DATA_DIR instead of data), with rootless Docker:
-    docker run --rm --user 0 -v "$PWD/data:/data" alpine chown -R 65532:65532 /data
+		return fmt.Sprintf(`  Fix it on the host (use your %[1]s instead of %[2]s), with rootless Docker:
+    docker run --rm --user 0 -v "$PWD/%[2]s:%[3]s" alpine chown -R 65532:65532 %[3]s
   or with Podman:
-    podman unshare chown -R 65532:65532 data
-`
+    podman unshare chown -R 65532:65532 %[2]s
+`, kind.env, kind.host, kind.path)
 	}
-	return `  Fix it on the host (use your DATA_DIR instead of data):
-    sudo chown -R 65532:65532 data
-`
+	return fmt.Sprintf(`  Fix it on the host (use your %[1]s instead of %[2]s):
+    sudo chown -R 65532:65532 %[2]s
+`, kind.env, kind.host)
 }
 
 // inUserNamespace reports whether UID 0 here is not root on the host.

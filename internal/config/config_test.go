@@ -198,3 +198,16 @@ func TestLoadRequire2FA(t *testing.T) {
 		t.Errorf("yes: %v", err)
 	}
 }
+
+func TestLoadConsumeDir(t *testing.T) {
+	t.Setenv(EnvDatabaseURL, "postgres://x")
+	t.Setenv(EnvConsumeDir, "")
+	cfg, err := Load()
+	if err != nil || cfg.ConsumeDir != "" {
+		t.Fatalf("unset: %+v, %v; want off", cfg, err)
+	}
+	t.Setenv(EnvConsumeDir, " /consume ")
+	if cfg, err = Load(); err != nil || cfg.ConsumeDir != "/consume" {
+		t.Fatalf("set: %q, %v", cfg.ConsumeDir, err)
+	}
+}
