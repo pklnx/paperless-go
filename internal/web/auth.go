@@ -274,7 +274,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		s.limiter.Fail(name, addr)
-		s.log.Info("login failed", "user", loggableUserName(name), "addr", addr)
+		s.log.Info("login failed", "user", loggableUserName(name), "addr", s.clientIP(r))
 		if u == nil {
 			s.auditLoginFailed(r, "password", reasonUnknownUser, name, nil)
 		} else {
@@ -321,7 +321,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.failStore(w, r, err)
 		return
 	}
-	s.log.Info("login", "user", u.Name, "addr", addr)
+	s.log.Info("login", "user", u.Name, "addr", s.clientIP(r))
 	setSessionCookie(w, r, token, auth.MaxSessionAge)
 	s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(u.Name, u.IsAdmin, u.MustChangePassword, false)})
 }

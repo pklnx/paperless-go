@@ -204,7 +204,9 @@ type WebauthnCeremony struct {
 	Kind      string
 	UserID    *int64
 	Name      *string
+	Factor    *string
 	Data      []byte
+	ClientKey *string
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }

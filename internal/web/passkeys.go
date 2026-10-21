@@ -89,8 +89,12 @@ func (s *Server) passkeysReady(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// errTooManyPasskey answers a passkey login over a limit.
-const errTooManyPasskey = "too many attempts; try again later"
+// errTooManyPasskey answers a passkey login over a limit,
+// errTooManyOpenPasskey one over the caps on open logins.
+const (
+	errTooManyPasskey     = "too many attempts; try again later"
+	errTooManyOpenPasskey = "too many passkey logins in progress; try again later"
+)
 
 // ceremonyJSON starts a ceremony in the browser: publicKey goes to
 // navigator.credentials, token comes back with the result.
@@ -128,10 +132,10 @@ func (s *Server) handleBeginPasskeyLogin(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	now := s.now()
-	token, err := s.store.BeginPasskeyLogin(r.Context(), data, now, now.Add(passkeyCeremonyTTL))
-	if errors.Is(err, store.ErrTooManyCeremonies) {
-		s.log.Warn("too many passkey logins in progress", "addr", addr)
-		s.tooMany(w, time.Minute, errTooManyPasskey)
+	token, err := s.store.BeginPasskeyLogin(r.Context(), addr, data, now, now.Add(passkeyCeremonyTTL))
+	if errors.Is(err, store.ErrTooManyCeremonies) || errors.Is(err, store.ErrTooManyClientCeremonies) {
+		s.log.Warn("too many passkey logins in progress", "addr", s.clientIP(r), "err", err)
+		s.tooMany(w, time.Minute, errTooManyOpenPasskey)
 		return
 	}
 	if err != nil {
@@ -205,7 +209,7 @@ func (s *Server) handleFinishPasskeyLogin(w http.ResponseWriter, r *http.Request
 		return
 	case errors.Is(err, store.ErrPasskeyUnknown):
 		s.limiter.FailAddr(addr)
-		s.log.Info("login failed: unknown passkey", "addr", addr)
+		s.log.Info("login failed: unknown passkey", "addr", s.clientIP(r))
 		s.auditLoginFailed(r, "passkey", reasonUnknownPasskey, "", nil)
 		s.writeJSON(w, http.StatusUnauthorized, unknownPasskeyJSON{
 			Error: "this passkey is not registered", UnknownCredential: true,
@@ -214,7 +218,7 @@ func (s *Server) handleFinishPasskeyLogin(w http.ResponseWriter, r *http.Request
 		return
 	case errors.Is(err, store.ErrPasskeyInvalid):
 		s.limiter.FailAddr(addr)
-		s.log.Info("login failed: passkey", "addr", addr, "err", err)
+		s.log.Info("login failed: passkey", "addr", s.clientIP(r), "err", err)
 		s.auditLoginFailed(r, "passkey", reasonPasskeyInvalid, "", nil)
 		s.fail(w, r, http.StatusUnauthorized, "the passkey was not accepted", nil)
 		return
@@ -231,7 +235,7 @@ func (s *Server) handleFinishPasskeyLogin(w http.ResponseWriter, r *http.Request
 	if old := sessionToken(r); old != "" {
 		_ = s.store.DeleteSession(r.Context(), auth.HashSessionToken(old))
 	}
-	s.log.Info("login", "user", u.Name, "addr", addr, "passkey", login.PasskeyName)
+	s.log.Info("login", "user", u.Name, "addr", s.clientIP(r), "passkey", login.PasskeyName)
 	setSessionCookie(w, r, token, auth.MaxSessionAge)
 	s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(u.Name, u.IsAdmin, u.MustChangePassword, u.TwoFactorEnabled)})
 }
@@ -287,49 +291,50 @@ func validCredentialName(name string) bool {
 
 // checkOwnLogin checks the password, and the second factor if the user has
 // 2FA on, with the login limits, before attempted (an audit action). It
-// answers the request and records a refusal when they fail.
-func (s *Server) checkOwnLogin(w http.ResponseWriter, r *http.Request, attempted, password, code string) bool {
+// answers the request and records a refusal when they fail. factor is the
+// second factor used (store.FactorTOTP, store.FactorRecoveryCode), or ""
+// without 2FA.
+func (s *Server) checkOwnLogin(w http.ResponseWriter, r *http.Request, attempted, password, code string) (factor string, ok bool) {
 	sess := currentSession(r)
 	addr := s.clientAddr(r)
 	if s.blocked(w, r, sess.UserName) {
-		return false
+		return "", false
 	}
 	u, err := s.store.GetUserByID(r.Context(), sess.UserID)
 	if err != nil {
 		s.failStore(w, r, err)
-		return false
+		return "", false
 	}
-	ok := false
 	if len(password) <= auth.MaxPasswordLength {
 		if ok, _, err = s.hasher.Verify(r.Context(), u.PasswordHash, password); err != nil {
 			s.fail(w, r, http.StatusInternalServerError, "internal error", err)
-			return false
+			return "", false
 		}
 	}
 	if !ok {
 		s.limiter.Fail(sess.UserName, addr)
 		s.auditSecondFactorFailed(r, attempted, reasonWrongPassword)
 		s.fail(w, r, http.StatusUnauthorized, "the current password is wrong", nil)
-		return false
+		return "", false
 	}
 	if u.TwoFactorEnabled {
 		if !s.twoFactorReady(w, r) {
-			return false
+			return "", false
 		}
-		err := s.store.VerifyTwoFactorCode(r.Context(), u.ID, auth.NormalizeTOTPCode(code), s.now(), s.sealer, s.secretKey)
+		factor, err = s.store.VerifyTwoFactorCode(r.Context(), u.ID, auth.NormalizeTOTPCode(code), s.now(), s.sealer, s.secretKey)
 		if errors.Is(err, store.ErrTwoFactorInvalid) {
 			s.limiter.Fail(sess.UserName, addr)
 			s.auditSecondFactorFailed(r, attempted, reasonSecondFactor)
 			s.fail(w, r, http.StatusUnauthorized, errInvalidSecondFactor, nil)
-			return false
+			return "", false
 		}
 		if err != nil {
 			s.failStore(w, r, err)
-			return false
+			return "", false
 		}
 	}
 	s.limiter.Succeed(sess.UserName)
-	return true
+	return factor, true
 }
 
 func (s *Server) handleBeginPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
@@ -345,13 +350,14 @@ func (s *Server) handleBeginPasskeyRegistration(w http.ResponseWriter, r *http.R
 		s.fail(w, r, http.StatusBadRequest, fmt.Sprintf("give the passkey a name of 1 to %d characters", maxCredentialName), nil)
 		return
 	}
-	if !s.checkOwnLogin(w, r, "profile.passkey_add", in.CurrentPassword, in.Code) {
+	factor, ok := s.checkOwnLogin(w, r, "profile.passkey_add", in.CurrentPassword, in.Code)
+	if !ok {
 		return
 	}
 	sess := currentSession(r)
 	var creation *protocol.CredentialCreation
 	now := s.now()
-	token, err := s.store.BeginPasskeyRegistration(r.Context(), sess.UserID, in.Name, now, now.Add(passkeyCeremonyTTL),
+	token, err := s.store.BeginPasskeyRegistration(r.Context(), sess.UserID, in.Name, factor, now, now.Add(passkeyCeremonyTTL),
 		func(handle []byte, existing [][]byte) ([]byte, error) {
 			user := &passkeyUser{handle: handle, name: sess.UserName}
 			for _, raw := range existing {

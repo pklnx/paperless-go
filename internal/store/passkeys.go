@@ -25,7 +25,12 @@ const MaxPasskeys = 10
 
 // MaxOpenLoginCeremonies bounds the logins in progress: starting one needs
 // no session, so this keeps anybody from filling the table.
-const MaxOpenLoginCeremonies = 1000
+// MaxOpenLoginCeremoniesPerClient bounds them per client, so that one
+// client cannot use up the total and lock everybody out of passkey logins.
+const (
+	MaxOpenLoginCeremonies          = 1000
+	MaxOpenLoginCeremoniesPerClient = 20
+)
 
 // Passkey errors.
 var (
@@ -36,7 +41,10 @@ var (
 	ErrPasskeyInvalid    = errors.New("store: passkey not accepted")
 	ErrCeremonyExpired   = errors.New("store: passkey ceremony expired or invalid")
 	ErrTooManyCeremonies = errors.New("store: too many passkey logins in progress")
-	ErrUserLocked        = errors.New("store: this user is locked")
+	// ErrTooManyClientCeremonies: this client has too many logins in
+	// progress.
+	ErrTooManyClientCeremonies = errors.New("store: too many passkey logins in progress from this client")
+	ErrUserLocked              = errors.New("store: this user is locked")
 )
 
 // Ceremony kinds.
@@ -80,11 +88,13 @@ func (s *Store) PasskeyCounts(ctx context.Context) (map[int64]int64, error) {
 	return out, nil
 }
 
-// BeginPasskeyRegistration starts adding a passkey called name at now.
+// BeginPasskeyRegistration starts adding a passkey called name at now;
+// factor is the second factor that confirmed it (FactorTOTP,
+// FactorRecoveryCode, or "" without 2FA), recorded when it finishes.
 // begin gets the user's WebAuthn handle (created on the first registration)
 // and the credential records of the existing passkeys, and returns the
 // session data to keep. The result is the token for the client.
-func (s *Store) BeginPasskeyRegistration(ctx context.Context, userID int64, name string, now, expires time.Time,
+func (s *Store) BeginPasskeyRegistration(ctx context.Context, userID int64, name, factor string, now, expires time.Time,
 	begin func(handle []byte, credentials [][]byte) ([]byte, error)) (string, error) {
 	token, hash, err := auth.NewSessionToken()
 	if err != nil {
@@ -124,7 +134,7 @@ func (s *Store) BeginPasskeyRegistration(ctx context.Context, userID int64, name
 			return err
 		}
 		return q.CreateWebAuthnCeremony(ctx, db.CreateWebAuthnCeremonyParams{
-			ID: hash, Kind: ceremonyRegister, UserID: &userID, Name: &name, Data: data, Now: now, ExpiresAt: expires,
+			ID: hash, Kind: ceremonyRegister, UserID: &userID, Name: &name, Factor: nullString(factor), Data: data, Now: now, ExpiresAt: expires,
 		})
 	})
 	if err != nil {
@@ -148,7 +158,8 @@ func (s *Store) takeCeremony(ctx context.Context, token, kind string, now time.T
 // finish gets the handle and the session data and returns the new
 // credential's ID and record. The limit is checked again under the user's
 // lock, so concurrent registrations cannot exceed it. It returns the
-// passkey's name; the pending audit entry gets it as a detail.
+// passkey's name; the pending audit entry gets it and the confirming
+// factor as details.
 func (s *Store) FinishPasskeyRegistration(ctx context.Context, userID int64, token string, now time.Time,
 	finish func(handle, data []byte) (credentialID, credential []byte, err error)) (string, error) {
 	c, err := s.takeCeremony(ctx, token, ceremonyRegister, now)
@@ -182,6 +193,9 @@ func (s *Store) FinishPasskeyRegistration(ctx context.Context, userID int64, tok
 		}
 		if e := auditFrom(ctx); e != nil {
 			e.Detail("name", *c.Name)
+			if c.Factor != nil {
+				e.Detail("factor", *c.Factor)
+			}
 		}
 		err = q.InsertPasskey(ctx, db.InsertPasskeyParams{UserID: userID, CredentialID: id, Name: *c.Name, Credential: cred, Now: now})
 		var pgErr *pgconn.PgError
@@ -200,20 +214,33 @@ func (s *Store) FinishPasskeyRegistration(ctx context.Context, userID int64, tok
 }
 
 // BeginPasskeyLogin stores the session data of a login without a user name
-// at now and returns the token for the client.
-func (s *Store) BeginPasskeyLogin(ctx context.Context, data []byte, now, expires time.Time) (string, error) {
-	n, err := s.q.CountOpenLoginCeremonies(ctx, now)
-	if err != nil {
-		return "", err
-	}
-	if n >= MaxOpenLoginCeremonies {
-		return "", ErrTooManyCeremonies
-	}
+// at now for the client clientKey (its address; IPv6 grouped by /64) and
+// returns the token for the client. Both caps are checked under a lock in
+// the same transaction as the insert, so concurrent requests cannot exceed
+// them.
+func (s *Store) BeginPasskeyLogin(ctx context.Context, clientKey string, data []byte, now, expires time.Time) (string, error) {
 	token, hash, err := auth.NewSessionToken()
 	if err != nil {
 		return "", err
 	}
-	err = s.q.CreateWebAuthnCeremony(ctx, db.CreateWebAuthnCeremonyParams{ID: hash, Kind: ceremonyLogin, Data: data, Now: now, ExpiresAt: expires})
+	err = s.inTx(ctx, func(q *db.Queries) error {
+		if err := q.LockLoginCeremonies(ctx); err != nil {
+			return err
+		}
+		n, err := q.CountOpenLoginCeremonies(ctx, db.CountOpenLoginCeremoniesParams{ClientKey: clientKey, Now: now})
+		if err != nil {
+			return err
+		}
+		switch {
+		case n.Total >= MaxOpenLoginCeremonies:
+			return ErrTooManyCeremonies
+		case n.Client >= MaxOpenLoginCeremoniesPerClient:
+			return ErrTooManyClientCeremonies
+		}
+		return q.CreateWebAuthnCeremony(ctx, db.CreateWebAuthnCeremonyParams{
+			ID: hash, Kind: ceremonyLogin, Data: data, ClientKey: &clientKey, Now: now, ExpiresAt: expires,
+		})
+	})
 	if err != nil {
 		return "", err
 	}

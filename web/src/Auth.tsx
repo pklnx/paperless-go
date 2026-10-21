@@ -138,9 +138,13 @@ function LoginPage({ done, passkeyOrigin }: { done: (user: User) => void; passke
   const pending = useRef<AbortController | null>(null);
   const doneRef = useRef(done);
   doneRef.current = done;
+  // A page left open longer than a ceremony lasts: its autofill offer
+  // expired. That restarts the offer once, not again and again.
+  const expiredRetried = useRef(false);
 
   const passkeyLogin = useCallback(async (autofill: boolean): Promise<void> => {
     pending.current?.abort();
+    if (!autofill) expiredRetried.current = false;
     const ctrl = new AbortController();
     pending.current = ctrl;
     let token: string;
@@ -172,7 +176,12 @@ function LoginPage({ done, passkeyOrigin }: { done: (user: User) => void; passke
       if (unknown) await forgetPasskey(unknown.rpId, unknown.credentialId);
       setError(passkeyError(err));
       setBusy(false);
-      // Offer the autofill again for the next try.
+      // An expired ceremony (the page was open too long) gets one fresh
+      // offer; other failures offer the autofill again for the next try.
+      if (err instanceof ApiError && err.status === 401 && err.message.includes("expired")) {
+        if (expiredRetried.current) return;
+        expiredRetried.current = true;
+      }
       if (await autofillSupported()) void passkeyLogin(true);
     }
   }, []);

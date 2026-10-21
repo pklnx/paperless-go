@@ -11,14 +11,27 @@ import (
 )
 
 const countOpenLoginCeremonies = `-- name: CountOpenLoginCeremonies :one
-SELECT count(*) FROM webauthn_ceremonies WHERE kind = 'login' AND expires_at > $1
+SELECT count(*) AS total,
+       count(*) FILTER (WHERE client_key = $1::text) AS client
+FROM webauthn_ceremonies WHERE kind = 'login' AND expires_at > $2
 `
 
-func (q *Queries) CountOpenLoginCeremonies(ctx context.Context, now time.Time) (int64, error) {
-	row := q.db.QueryRow(ctx, countOpenLoginCeremonies, now)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
+type CountOpenLoginCeremoniesParams struct {
+	ClientKey string
+	Now       time.Time
+}
+
+type CountOpenLoginCeremoniesRow struct {
+	Total  int64
+	Client int64
+}
+
+// All open logins, and those of one client.
+func (q *Queries) CountOpenLoginCeremonies(ctx context.Context, arg CountOpenLoginCeremoniesParams) (CountOpenLoginCeremoniesRow, error) {
+	row := q.db.QueryRow(ctx, countOpenLoginCeremonies, arg.ClientKey, arg.Now)
+	var i CountOpenLoginCeremoniesRow
+	err := row.Scan(&i.Total, &i.Client)
+	return i, err
 }
 
 const countPasskeys = `-- name: CountPasskeys :one
@@ -62,8 +75,8 @@ func (q *Queries) CountPasskeysByUser(ctx context.Context) ([]CountPasskeysByUse
 }
 
 const createWebAuthnCeremony = `-- name: CreateWebAuthnCeremony :exec
-INSERT INTO webauthn_ceremonies (id, kind, user_id, name, data, created_at, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO webauthn_ceremonies (id, kind, user_id, name, factor, data, client_key, created_at, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 `
 
 type CreateWebAuthnCeremonyParams struct {
@@ -71,7 +84,9 @@ type CreateWebAuthnCeremonyParams struct {
 	Kind      string
 	UserID    *int64
 	Name      *string
+	Factor    *string
 	Data      []byte
+	ClientKey *string
 	Now       time.Time
 	ExpiresAt time.Time
 }
@@ -82,7 +97,9 @@ func (q *Queries) CreateWebAuthnCeremony(ctx context.Context, arg CreateWebAuthn
 		arg.Kind,
 		arg.UserID,
 		arg.Name,
+		arg.Factor,
 		arg.Data,
+		arg.ClientKey,
 		arg.Now,
 		arg.ExpiresAt,
 	)
@@ -199,6 +216,17 @@ func (q *Queries) ListPasskeys(ctx context.Context, userID int64) ([]Passkey, er
 	return items, nil
 }
 
+const lockLoginCeremonies = `-- name: LockLoginCeremonies :exec
+SELECT pg_advisory_xact_lock(hashtext('webauthn_login_ceremonies'))
+`
+
+// Serializes starting logins until the transaction ends, so that the caps
+// below hold under concurrent requests.
+func (q *Queries) LockLoginCeremonies(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockLoginCeremonies)
+	return err
+}
+
 const lockPasskey = `-- name: LockPasskey :one
 SELECT id, user_id, credential_id, name, credential, created_at, last_used_at FROM passkeys WHERE credential_id = $1 FOR UPDATE
 `
@@ -247,7 +275,7 @@ func (q *Queries) SetWebAuthnHandle(ctx context.Context, arg SetWebAuthnHandlePa
 
 const takeWebAuthnCeremony = `-- name: TakeWebAuthnCeremony :one
 DELETE FROM webauthn_ceremonies WHERE id = $1 AND kind = $2 AND expires_at > $3
-RETURNING id, kind, user_id, name, data, created_at, expires_at
+RETURNING id, kind, user_id, name, factor, data, client_key, created_at, expires_at
 `
 
 type TakeWebAuthnCeremonyParams struct {
@@ -265,7 +293,9 @@ func (q *Queries) TakeWebAuthnCeremony(ctx context.Context, arg TakeWebAuthnCere
 		&i.Kind,
 		&i.UserID,
 		&i.Name,
+		&i.Factor,
 		&i.Data,
+		&i.ClientKey,
 		&i.CreatedAt,
 		&i.ExpiresAt,
 	)

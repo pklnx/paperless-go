@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { App } from "./App";
 import { firstAdminCommand } from "./Auth";
 import { t } from "./i18n";
@@ -299,5 +299,33 @@ describe("passkey login", () => {
     fireEvent.click(await screen.findByRole("button", { name: t.passkeySignIn }));
     expect((await screen.findByRole("alert")).textContent).toBe(t.passkeyCancelled);
     expect(requests.some((r) => r.url === "/api/session/passkey/finish")).toBe(false);
+  });
+
+  it("renews an expired autofill offer once", async () => {
+    const signalUnknownCredential = vi.fn(async () => {});
+    vi.stubGlobal(
+      "PublicKeyCredential",
+      Object.assign(function PublicKeyCredential() {}, { signalUnknownCredential, isConditionalMediationAvailable: async () => true }),
+    );
+    // Each conditional request answers at once, as if the user picked the
+    // passkey after the ceremony expired.
+    // A third request never answers, so that a loop would stop there.
+    const get = vi.fn((_options: CredentialRequestOptions) => (get.mock.calls.length <= 2 ? Promise.resolve(assertion) : new Promise(() => {})));
+    Object.defineProperty(navigator, "credentials", { value: { get, create: vi.fn() }, configurable: true });
+    stubServer((_, url) => {
+      if (url === "/api/session/passkey/begin") return ceremony;
+      if (url === "/api/session/passkey/finish") return { status: 401, body: { error: "the passkey login has expired; try again" } };
+      return offered();
+    });
+    render(<App />);
+    expect((await screen.findByRole("alert")).textContent).toBe(t.passkeyExpired);
+    await waitFor(() => expect(requests.filter((r) => r.url === "/api/session/passkey/finish")).toHaveLength(2));
+    // The first offer and one renewal, both conditional; then no more.
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    // Let the second failure's handling finish: no third offer follows.
+    await act(async () => {});
+    expect(get).toHaveBeenCalledTimes(2);
+    for (const [options] of get.mock.calls) expect((options as CredentialRequestOptions).mediation).toBe("conditional");
+    expect(requests.filter((r) => r.url === "/api/session/passkey/begin")).toHaveLength(2);
   });
 });

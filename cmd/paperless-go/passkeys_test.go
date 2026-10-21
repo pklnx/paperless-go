@@ -16,7 +16,7 @@ func addFakePasskey(t *testing.T, st *store.Store, userID int64, name string) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now()
-	token, err := st.BeginPasskeyRegistration(ctx, userID, name, now, now.Add(time.Minute),
+	token, err := st.BeginPasskeyRegistration(ctx, userID, name, "", now, now.Add(time.Minute),
 		func(_ []byte, _ [][]byte) ([]byte, error) { return []byte(`{}`), nil })
 	if err != nil {
 		t.Fatal(err)

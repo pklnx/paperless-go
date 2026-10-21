@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -12,7 +13,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"sync"
 	"testing"
@@ -296,13 +299,20 @@ func TestPasskeyLoginFailuresCountPerAddress(t *testing.T) {
 	f.expect("POST", "/api/session/passkey/begin", nil, 429)
 }
 
+// The begin limit counts every request, also those the open-login cap
+// refuses (which come first: the cap is lower).
 func TestPasskeyBeginRateLimit(t *testing.T) {
 	f := newPasskeyFixture(t)
-	for range passkeyBeginLimit {
+	for range store.MaxOpenLoginCeremoniesPerClient {
 		f.beginPasskeyLogin()
 	}
+	for range passkeyBeginLimit - store.MaxOpenLoginCeremoniesPerClient {
+		if out := f.expect("POST", "/api/session/passkey/begin", nil, 429); out["error"] != errTooManyOpenPasskey {
+			t.Fatalf("cap: %v", out)
+		}
+	}
 	resp, out := f.do("POST", "/api/session/passkey/begin", nil)
-	if resp.StatusCode != 429 || resp.Header.Get("Retry-After") == "" {
+	if resp.StatusCode != 429 || resp.Header.Get("Retry-After") == "" || out["error"] != errTooManyPasskey {
 		t.Fatalf("status %d: %v", resp.StatusCode, out)
 	}
 }
@@ -531,10 +541,13 @@ func TestPublicURLHostAllowed(t *testing.T) {
 func TestPasskeyBeginRateLimitWindow(t *testing.T) {
 	f := newPasskeyFixture(t)
 	for range passkeyBeginLimit {
-		f.beginPasskeyLogin()
+		f.do("POST", "/api/session/passkey/begin", nil)
 	}
-	f.expect("POST", "/api/session/passkey/begin", nil, 429)
-	f.clock.Advance(passkeyBeginWindow)
+	if out := f.expect("POST", "/api/session/passkey/begin", nil, 429); out["error"] != errTooManyPasskey {
+		t.Fatalf("rate limit: %v", out)
+	}
+	// The next window, once the open logins expired too.
+	f.clock.Advance(max(passkeyBeginWindow, passkeyCeremonyTTL))
 	f.beginPasskeyLogin()
 }
 
@@ -651,4 +664,86 @@ func TestPasskeyChangesFailClosed(t *testing.T) {
 	}
 	// A login needs its entry too.
 	f.as().passkeyLogin(k, 503)
+}
+
+// doFrom sends a request as the client address client, behind the
+// fixture's trusted proxy.
+func (f *authFixture) doFrom(client, method, path string, body any) (*http.Response, map[string]any) {
+	f.t.Helper()
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(method, f.srv.URL+path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", f.srv.URL)
+	req.Header.Set("X-Forwarded-For", client)
+	resp, err := f.client.Do(req)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	out := map[string]any{}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp, out
+}
+
+// One client cannot hold more than its share of open passkey logins, so it
+// cannot lock everybody else out; addresses in one IPv6 /64 share it.
+func TestPasskeyLoginCapPerClient(t *testing.T) {
+	f := newAuthFixtureOpts(t, Options{PublicURL: testPublicURL, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}})
+	begin := func(client string) int {
+		resp, _ := f.doFrom(client, "POST", "/api/session/passkey/begin", nil)
+		return resp.StatusCode
+	}
+	for i := range store.MaxOpenLoginCeremoniesPerClient {
+		if code := begin(fmt.Sprintf("2001:db8:0:1::%x", i+1)); code != 200 {
+			t.Fatalf("begin %d: %d", i, code)
+		}
+	}
+	resp, _ := f.doFrom("2001:db8:0:1::ffff", "POST", "/api/session/passkey/begin", nil)
+	if resp.StatusCode != 429 || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("same /64 over its share: %d", resp.StatusCode)
+	}
+	if code := begin("2001:db8:0:2::1"); code != 200 {
+		t.Fatalf("other /64: %d", code)
+	}
+	if code := begin("198.51.100.7"); code != 200 {
+		t.Fatalf("IPv4 client: %d", code)
+	}
+	// The ceremonies expire, and the client gets new ones.
+	f.clock.Advance(passkeyCeremonyTTL)
+	if code := begin("2001:db8:0:1::1"); code != 200 {
+		t.Fatalf("after expiry: %d", code)
+	}
+}
+
+// profile.passkey_add records the second factor that confirmed it.
+func TestAuditPasskeyAddFactor(t *testing.T) {
+	f := newPasskeyFixture(t)
+	u := f.addUser("alice", "correct horse battery", false)
+	secret, recovery := f.enableTOTP(u)
+	f.loginOK("alice", "correct horse battery")
+	last := func() map[string]any {
+		t.Helper()
+		e := auditLog(t, f.st)
+		r := e[len(e)-1]
+		if r.Action != "profile.passkey_add" {
+			t.Fatalf("last entry: %+v", r)
+		}
+		return details(t, r)
+	}
+	f.addPasskey(newSoftKey(t), "Phone", "correct horse battery", f.code(secret))
+	if d := last(); d["factor"] != "totp" || d["name"] != "Phone" {
+		t.Errorf("with TOTP: %v", d)
+	}
+	f.addPasskey(newSoftKey(t), "Key", "correct horse battery", recovery[0])
+	if d := last(); d["factor"] != "recovery_code" {
+		t.Errorf("with a recovery code: %v", d)
+	}
+	// Without 2FA only the password confirms it: no factor.
+	b := f.as()
+	f.addUser("bob", "correct horse battery", false)
+	b.loginOK("bob", "correct horse battery")
+	b.addPasskey(newSoftKey(t), "Phone", "correct horse battery", "")
+	if d := last(); d["factor"] != nil {
+		t.Errorf("without 2FA: %v", d)
+	}
 }

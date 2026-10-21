@@ -28,7 +28,7 @@ func noBegin(_ []byte, _ [][]byte) ([]byte, error) { return []byte(`{}`), nil }
 func registerFake(t *testing.T, st *store.Store, userID int64, name, id string, now time.Time) error {
 	t.Helper()
 	ctx := context.Background()
-	token, err := st.BeginPasskeyRegistration(ctx, userID, name, now, now.Add(time.Minute), noBegin)
+	token, err := st.BeginPasskeyRegistration(ctx, userID, name, "", now, now.Add(time.Minute), noBegin)
 	if err != nil {
 		return err
 	}
@@ -69,7 +69,7 @@ func TestPasskeyCeremonies(t *testing.T) {
 
 	// A registration token is single use and bound to its user, also when
 	// the check fails.
-	token, err := st.BeginPasskeyRegistration(ctx, alice.ID, "Key", now, now.Add(time.Minute), noBegin)
+	token, err := st.BeginPasskeyRegistration(ctx, alice.ID, "Key", "", now, now.Add(time.Minute), noBegin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestPasskeyCeremonies(t *testing.T) {
 
 	// Ceremonies expire on the caller's clock, and the cleanup removes
 	// them (the refused one and a new one).
-	token, err = st.BeginPasskeyLogin(ctx, []byte(`{}`), now, now.Add(time.Minute))
+	token, err = st.BeginPasskeyLogin(ctx, "192.0.2.1", []byte(`{}`), now, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestPasskeyCeremonies(t *testing.T) {
 	if _, err := st.CompletePasskeyLogin(ctx, token, []byte("cred-1"), later, verify, newSessionHash(t), later.Add(time.Hour), ""); !errors.Is(err, store.ErrCeremonyExpired) {
 		t.Fatalf("expired: %v", err)
 	}
-	if _, err := st.BeginPasskeyLogin(ctx, []byte(`{}`), now, now.Add(time.Minute)); err != nil {
+	if _, err := st.BeginPasskeyLogin(ctx, "192.0.2.1", []byte(`{}`), now, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := st.DeleteExpiredWebAuthnCeremonies(ctx, now); err != nil || n != 0 {
@@ -103,7 +103,7 @@ func TestPasskeyCeremonies(t *testing.T) {
 	}
 
 	// A login token works once, even after a failed check.
-	token, err = st.BeginPasskeyLogin(ctx, []byte(`{}`), now, now.Add(time.Minute))
+	token, err = st.BeginPasskeyLogin(ctx, "192.0.2.1", []byte(`{}`), now, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestPasskeyCeremonies(t *testing.T) {
 	}
 
 	// An unknown passkey.
-	token, err = st.BeginPasskeyLogin(ctx, []byte(`{}`), now, now.Add(time.Minute))
+	token, err = st.BeginPasskeyLogin(ctx, "192.0.2.1", []byte(`{}`), now, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestPasskeyCeremonies(t *testing.T) {
 	}
 
 	// A good login creates the session and records the use on the clock.
-	token, err = st.BeginPasskeyLogin(ctx, []byte(`{}`), now, now.Add(time.Minute))
+	token, err = st.BeginPasskeyLogin(ctx, "192.0.2.1", []byte(`{}`), now, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestPasskeyLoginLockedUser(t *testing.T) {
 	if err := st.SetUserLocked(ctx, alice.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	token, err := st.BeginPasskeyLogin(ctx, []byte(`{}`), now, now.Add(time.Minute))
+	token, err := st.BeginPasskeyLogin(ctx, "192.0.2.1", []byte(`{}`), now, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestPasskeyLoginLockedUser(t *testing.T) {
 		t.Fatalf("locked: %v", err)
 	}
 	// Nor can a locked user finish a registration.
-	token, err = st.BeginPasskeyRegistration(ctx, alice.ID, "Key", now, now.Add(time.Minute), noBegin)
+	token, err = st.BeginPasskeyRegistration(ctx, alice.ID, "Key", "", now, now.Add(time.Minute), noBegin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestPasskeyLoginsSerialized(t *testing.T) {
 		return json.Marshal(fakeCred{Count: 1})
 	}
 	login := func() error {
-		token, err := st.BeginPasskeyLogin(ctx, []byte(`{}`), now, now.Add(time.Minute))
+		token, err := st.BeginPasskeyLogin(ctx, "192.0.2.1", []byte(`{}`), now, now.Add(time.Minute))
 		if err != nil {
 			return err
 		}
@@ -263,7 +263,7 @@ func TestPasskeyLimitSerialized(t *testing.T) {
 	tokens := make([]string, 2)
 	for i := range tokens {
 		var err error
-		if tokens[i], err = st.BeginPasskeyRegistration(ctx, alice.ID, fmt.Sprintf("New %d", i), now, now.Add(time.Minute), noBegin); err != nil {
+		if tokens[i], err = st.BeginPasskeyRegistration(ctx, alice.ID, fmt.Sprintf("New %d", i), "", now, now.Add(time.Minute), noBegin); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -370,7 +370,7 @@ func TestDeleteUserWithPasskeys(t *testing.T) {
 	if err := registerFake(t, st, kim.ID, "Phone", "cred-1", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.BeginPasskeyRegistration(ctx, kim.ID, "Key", now, now.Add(time.Minute), noBegin); err != nil {
+	if _, err := st.BeginPasskeyRegistration(ctx, kim.ID, "Key", "", now, now.Add(time.Minute), noBegin); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.DeleteUser(ctx, kim.ID); err != nil {
@@ -382,17 +382,79 @@ func TestPasskeyLoginCeremonyCap(t *testing.T) {
 	st := storetest.New(t)
 	ctx := context.Background()
 	now := time.Now()
+	begin := func(client string, at time.Time) error {
+		_, err := st.BeginPasskeyLogin(ctx, client, []byte(`{}`), at, at.Add(time.Minute))
+		return err
+	}
+	// The total, spread over clients that stay within their share.
+	per := store.MaxOpenLoginCeremoniesPerClient
 	for i := range store.MaxOpenLoginCeremonies {
-		if _, err := st.BeginPasskeyLogin(ctx, []byte(`{}`), now, now.Add(time.Minute)); err != nil {
+		if err := begin(fmt.Sprintf("client-%d", i/per), now); err != nil {
 			t.Fatalf("ceremony %d: %v", i, err)
 		}
 	}
-	if _, err := st.BeginPasskeyLogin(ctx, []byte(`{}`), now, now.Add(time.Minute)); !errors.Is(err, store.ErrTooManyCeremonies) {
+	if err := begin("someone-new", now); !errors.Is(err, store.ErrTooManyCeremonies) {
 		t.Fatalf("over the cap: %v", err)
 	}
 	// Expired ones do not count.
 	later := now.Add(time.Minute)
-	if _, err := st.BeginPasskeyLogin(ctx, []byte(`{}`), later, later.Add(time.Minute)); err != nil {
+	if err := begin("someone-new", later); err != nil {
 		t.Fatalf("after expiry: %v", err)
+	}
+}
+
+// One client cannot take more than its share; another one still can.
+func TestPasskeyLoginCeremonyCapPerClient(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	now := time.Now()
+	begin := func(client string, at time.Time) error {
+		_, err := st.BeginPasskeyLogin(ctx, client, []byte(`{}`), at, at.Add(time.Minute))
+		return err
+	}
+	for i := range store.MaxOpenLoginCeremoniesPerClient {
+		if err := begin("2001:db8::/64", now); err != nil {
+			t.Fatalf("ceremony %d: %v", i, err)
+		}
+	}
+	if err := begin("2001:db8::/64", now); !errors.Is(err, store.ErrTooManyClientCeremonies) {
+		t.Fatalf("over the client's share: %v", err)
+	}
+	if err := begin("192.0.2.1", now); err != nil {
+		t.Fatalf("another client: %v", err)
+	}
+	if err := begin("2001:db8::/64", now.Add(time.Minute)); err != nil {
+		t.Fatalf("after expiry: %v", err)
+	}
+}
+
+// Concurrent begins from one client stop exactly at its share: the check
+// and the insert run under one lock.
+func TestPasskeyLoginCeremonyCapConcurrent(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	now := time.Now()
+	const n = 40
+	errs := make(chan error, n)
+	start := make(chan struct{})
+	for range n {
+		go func() {
+			<-start
+			_, err := st.BeginPasskeyLogin(ctx, "192.0.2.7", []byte(`{}`), now, now.Add(time.Minute))
+			errs <- err
+		}()
+	}
+	close(start)
+	ok := 0
+	for range n {
+		switch err := <-errs; {
+		case err == nil:
+			ok++
+		case !errors.Is(err, store.ErrTooManyClientCeremonies):
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if ok != store.MaxOpenLoginCeremoniesPerClient {
+		t.Fatalf("%d ceremonies, want %d", ok, store.MaxOpenLoginCeremoniesPerClient)
 	}
 }

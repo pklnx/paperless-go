@@ -39,7 +39,8 @@ from the internet.
   same answer and take the same time.
 - **Failed logins are limited**: from the 5th failure within 15 minutes a
   user name is blocked for 1 minute, doubling up to 15 minutes; 20 failures
-  from one address block it for 15 minutes. Behind a reverse proxy, set
+  from one address block it for 15 minutes. IPv6 clients count per `/64`
+  (the block a host or network usually gets), IPv4 clients per address. Behind a reverse proxy, set
   `PAPERLESS_GO_TRUSTED_PROXIES` so the limits count per client.
 - **Sessions** end after 7 days without use and after 30 days at the latest.
   The cookie is `HttpOnly` and `SameSite=Strict`; over HTTPS (also behind a
@@ -104,16 +105,19 @@ from the internet.
   admin whose 2FA is not set up (after a reset) still gets only the 2FA
   setup.
 - **Adding one needs the same as a login**: the current password and, with
-  2FA on, a current TOTP or recovery code. Otherwise a taken-over session
+  2FA on, a current TOTP or recovery code (recorded as the entry's
+  `factor`). Otherwise a taken-over session
   plus a phished password would skip TOTP for good. Wrong passwords and
   codes count towards the login limits and are logged as
   `profile.2fa_failed`. A user has at most 10 passkeys.
 - **Ceremonies** (a registration or login in progress) last 5 minutes on
   the server clock, are used up by the first answer, also a wrong one, and
   only their token's hash is stored. Starting a login needs no session, so
-  it is limited to 30 per minute and address, and to 1000 open logins in
-  total; failed passkey logins count towards the address limit of the
-  login limits. Concurrent logins with one passkey are serialized, so a
+  it is limited to 30 per minute and address, to 20 open logins per
+  address and to 1000 open logins in total, so one client cannot use up
+  the total for everybody (IPv6 per `/64`, as for the login limits);
+  failed passkey logins count towards the address limit of the login
+  limits. Concurrent logins with one passkey are serialized, so a
   replayed answer with the same sign count fails.
 - **Removing.** A user removes a passkey on the profile page; that ends
   their other sessions. An admin removes all of a user's passkeys on the

@@ -340,7 +340,8 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   a refusal by the database itself (`23001` from PostgreSQL 18, `23503`
   before) gives the same error. The last unlocked admin stays.
 - **Client address.** The login limits count per user name and per client
-  address; `X-Forwarded-For` counts only from `PAPERLESS_GO_TRUSTED_PROXIES`.
+  address (IPv6 per `/64`; logs and the audit log keep the full address);
+  `X-Forwarded-For` counts only from `PAPERLESS_GO_TRUSTED_PROXIES`.
 - **Two-factor login** (`internal/auth/totp.go`, `internal/store/two_factor.go`,
   `internal/web/two_factor.go`). Admins always need it,
   `PAPERLESS_GO_REQUIRE_2FA` extends it to everyone. A user who needs it but
@@ -369,7 +370,8 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   (`/api/profile/passkeys/begin|finish`) checks password and second factor
   first and locks the user row (limit 10, unique name per user); the login
   (`/api/session/passkey/begin|finish`, `accessLogin`, discoverable, user
-  verification required) locks user, then passkey row, rejects a sign
+  verification required; at most 20 open logins per client and 1000 in
+  all, checked under an advisory lock in the insert's transaction) locks user, then passkey row, rejects a sign
   count that did not increase, and stores the new count, the session and
   `auth.login` in one transaction. The session it creates is restricted
   like a password login's. Removing one passkey ends the user's other
@@ -415,8 +417,8 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   `user.password_reset`, `user.password_set` (CLI), `user.2fa_reset` (web
   and CLI), `profile.password_change`, `profile.2fa_enable`,
   `profile.2fa_disable`, `profile.recovery_codes` (with the `factor` that
-  confirmed it), `profile.passkey_add`, `profile.passkey_remove` (with the
-  passkey's `name`), `user.passkeys_removed` (`count`; web and CLI),
+  confirmed it), `profile.passkey_add` (also with the confirming `factor`
+  when 2FA is on), `profile.passkey_remove` (with the passkey's `name`), `user.passkeys_removed` (`count`; web and CLI),
   `audit.export` (CLI, written before the export starts).
   A two-factor login records `method: 2fa` and its `factor` (`totp`,
   `recovery_code` with `recoveryCodesLeft`); a wrong code gives

@@ -150,16 +150,36 @@ func replaceRecoveryCodes(ctx context.Context, q *db.Queries, id int64, codes []
 // pending audit entry gets the factor used and, for a recovery code, how
 // many are left.
 func checkSecondFactor(ctx context.Context, q *db.Queries, u db.User, code string, now time.Time, sealer *crypto.Sealer, key []byte) error {
+	factor, err := useSecondFactor(ctx, q, u, code, now, sealer, key)
+	if err != nil {
+		return err
+	}
+	if e := auditFrom(ctx); e != nil {
+		e.Detail("factor", factor)
+		if factor == FactorRecoveryCode {
+			left, err := q.CountUnusedRecoveryCodes(ctx, u.ID)
+			if err != nil {
+				return err
+			}
+			e.Detail("recoveryCodesLeft", left)
+		}
+	}
+	return nil
+}
+
+// useSecondFactor is checkSecondFactor without the audit details; it
+// returns the factor used (FactorTOTP or FactorRecoveryCode).
+func useSecondFactor(ctx context.Context, q *db.Queries, u db.User, code string, now time.Time, sealer *crypto.Sealer, key []byte) (string, error) {
 	if u.LockedAt != nil || !u.TwoFactorEnabled || len(u.TwoFactorSecret) == 0 {
-		return ErrTwoFactorInvalid
+		return "", ErrTwoFactorInvalid
 	}
 	secret, err := sealer.Open(u.TwoFactorSecret, secretContext(u.ID))
 	if err != nil {
-		return err
+		return "", err
 	}
 	counter, ok, err := auth.ValidateTOTP(string(secret), code, now)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if ok {
 		// Replay protection: each time step is accepted once, and never an
@@ -167,45 +187,38 @@ func checkSecondFactor(ctx context.Context, q *db.Queries, u db.User, code strin
 		last := int64(counter) //nolint:gosec // time steps fit easily
 		n, err := q.AcceptTwoFactorCounter(ctx, db.AcceptTwoFactorCounterParams{ID: u.ID, TwoFactorLastCounter: &last})
 		if err != nil {
-			return err
+			return "", err
 		}
 		if n != 1 {
-			return ErrTwoFactorInvalid
+			return "", ErrTwoFactorInvalid
 		}
-		if e := auditFrom(ctx); e != nil {
-			e.Detail("factor", FactorTOTP)
-		}
-		return nil
+		return FactorTOTP, nil
 	}
 	n, err := q.ConsumeRecoveryCode(ctx, db.ConsumeRecoveryCodeParams{Now: now, UserID: u.ID, CodeHash: auth.RecoveryCodeHash(key, code)})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if n != 1 {
-		return ErrTwoFactorInvalid
+		return "", ErrTwoFactorInvalid
 	}
-	if e := auditFrom(ctx); e != nil {
-		left, err := q.CountUnusedRecoveryCodes(ctx, u.ID)
-		if err != nil {
-			return err
-		}
-		e.Detail("factor", FactorRecoveryCode)
-		e.Detail("recoveryCodesLeft", left)
-	}
-	return nil
+	return FactorRecoveryCode, nil
 }
 
 // VerifyTwoFactorCode checks a TOTP or recovery code of a user with 2FA on
 // at now and records its use, as at a login: a code confirms one action
-// only. A wrong code gives ErrTwoFactorInvalid.
-func (s *Store) VerifyTwoFactorCode(ctx context.Context, id int64, code string, now time.Time, sealer *crypto.Sealer, key []byte) error {
-	return s.inTx(ctx, func(q *db.Queries) error {
+// only. It returns the factor used; a wrong code gives
+// ErrTwoFactorInvalid.
+func (s *Store) VerifyTwoFactorCode(ctx context.Context, id int64, code string, now time.Time, sealer *crypto.Sealer, key []byte) (string, error) {
+	var factor string
+	err := s.inTx(ctx, func(q *db.Queries) error {
 		u, err := lockUserRow(ctx, q, id)
 		if err != nil {
 			return err
 		}
-		return checkSecondFactor(ctx, q, u, code, now, sealer, key)
+		factor, err = useSecondFactor(ctx, q, u, code, now, sealer, key)
+		return err
 	})
+	return factor, err
 }
 
 // ResetTwoFactor turns 2FA off for a user (by an admin or the CLI), removes

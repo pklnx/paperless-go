@@ -26,13 +26,20 @@ CREATE TABLE webauthn_ceremonies (
     kind       TEXT        NOT NULL CHECK (kind IN ('register', 'login')),
     user_id    BIGINT      REFERENCES users (id) ON DELETE CASCADE,
     name       TEXT,
+    -- The second factor that confirmed a registration (totp,
+    -- recovery_code), for its audit entry; NULL without 2FA.
+    factor     TEXT CHECK (factor IN ('totp', 'recovery_code')),
     data       JSONB       NOT NULL,
+    -- The client of a login (its address, IPv6 grouped by /64), for the
+    -- per-client cap on open logins.
+    client_key TEXT,
     created_at TIMESTAMPTZ NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     CHECK ((kind = 'register') = (user_id IS NOT NULL AND name IS NOT NULL))
 );
 CREATE INDEX webauthn_ceremonies_user_idx ON webauthn_ceremonies (user_id);
 CREATE INDEX webauthn_ceremonies_expires_idx ON webauthn_ceremonies (expires_at);
+CREATE INDEX webauthn_ceremonies_client_idx ON webauthn_ceremonies (client_key) WHERE kind = 'login';
 
 -- +goose Down
 -- Rolling back removes every passkey: users log in with their password.
