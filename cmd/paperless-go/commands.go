@@ -1,0 +1,183 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"text/tabwriter"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/pklnx/paperless-go/internal/config"
+	"github.com/pklnx/paperless-go/internal/store"
+	"github.com/pklnx/paperless-go/internal/web"
+)
+
+type app struct {
+	cfg   *config.Config
+	store *store.Store
+}
+
+func openApp(ctx context.Context) (*app, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	st, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	return &app{cfg: cfg, store: st}, nil
+}
+
+func (a *app) close() { a.store.Close() }
+
+func newMigrateCmd() *cobra.Command {
+	runUp := func(cmd *cobra.Command, _ []string) error {
+		a, err := openApp(cmd.Context())
+		if err != nil {
+			return err
+		}
+		defer a.close()
+		applied, err := a.store.Migrate(cmd.Context())
+		if err != nil {
+			return err
+		}
+		if len(applied) == 0 {
+			fmt.Fprintln(cmd.OutOrStdout(), "database schema is up to date")
+		}
+		for _, m := range applied {
+			fmt.Fprintln(cmd.OutOrStdout(), "applied", m)
+		}
+		return nil
+	}
+	cmd := &cobra.Command{
+		Use:   "migrate",
+		Short: "Manage database schema migrations (default: apply all pending)",
+		Args:  cobra.NoArgs,
+		RunE:  runUp,
+	}
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "up",
+			Short: "Apply all pending migrations",
+			Args:  cobra.NoArgs,
+			RunE:  runUp,
+		},
+		newMigrateDownCmd(),
+		newMigrateStatusCmd(),
+	)
+	return cmd
+}
+
+func newMigrateDownCmd() *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "down",
+		Short: "Roll back the most recent migration (may delete data)",
+		Long: `Roll back the most recently applied migration.
+
+Rolling back usually drops tables or columns and the data in them. Document
+files on disk are not touched. Back up the database first. Intended for
+development; in production, prefer restoring a backup.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !yes {
+				return errors.New("refusing to roll back without --yes (this may delete data)")
+			}
+			a, err := openApp(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer a.close()
+			rolledBack, err := a.store.MigrateDown(cmd.Context())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "rolled back", rolledBack)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "confirm that data may be deleted")
+	return cmd
+}
+
+func newMigrateStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show applied and pending migrations",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			a, err := openApp(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer a.close()
+			statuses, err := a.store.MigrationStatus(cmd.Context())
+			if err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "MIGRATION\tSTATE\tAPPLIED AT")
+			for _, st := range statuses {
+				state, at := "pending", "-"
+				if st.Applied {
+					state, at = "applied", st.AppliedAt.Local().Format(time.DateTime)
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\n", st.Path, state, at)
+			}
+			return w.Flush()
+		},
+	}
+}
+
+func newServeCmd() *cobra.Command {
+	var listen string
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Run the web server (UI and JSON API)",
+		Long: `Run the web server: the UI and the JSON API.
+
+Requests are only accepted with a Host header listed in
+` + config.EnvAllowedHosts + ` (default: localhost, 127.0.0.1, ::1), which blocks DNS
+rebinding; state-changing requests must come from the same origin. Use HTTPS
+(a reverse proxy or tailscale serve) when the server is reachable from a
+network.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			a, err := openApp(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer a.close()
+			if err := checkDataDir(a.cfg.DataDir); err != nil {
+				return err
+			}
+			if err := checkSchema(cmd.Context(), a.store); err != nil {
+				return err
+			}
+			log := newLogger(a.cfg.LogLevel)
+			srv := web.New(a.store, log, web.Options{AllowedHosts: a.cfg.AllowedHosts})
+			log.Info("listening", "addr", listen, "version", version)
+			return srv.ListenAndServe(cmd.Context(), listen)
+		},
+	}
+	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:8080", "address to listen on")
+	return cmd
+}
+
+// checkSchema refuses to serve a database with pending migrations: the
+// handlers would fail on missing tables.
+func checkSchema(ctx context.Context, st *store.Store) error {
+	statuses, err := st.MigrationStatus(ctx)
+	if err != nil {
+		return err
+	}
+	for _, s := range statuses {
+		if !s.Applied {
+			return fmt.Errorf("the database schema is not up to date (%s is pending): run %s migrate", s.Path, commandName())
+		}
+	}
+	return nil
+}

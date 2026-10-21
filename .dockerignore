@@ -1,0 +1,12 @@
+.git
+.github
+data
+.env
+*.test
+*.out
+/bin/
+web/node_modules
+internal/web/ui/dist
+docs/node_modules
+docs/.vitepress/cache
+docs/.vitepress/dist

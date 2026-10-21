@@ -1,0 +1,164 @@
+@import "tailwindcss";
+
+/* Dark mode is class-based (html.dark): it follows the system until the user
+   picks a theme with the toggle (see theme.ts). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Semantic colors (the design system's tokens): components use bg-surface-sunken,
+   text-ink-muted, border-line … and the .dark block below switches all of them,
+   so no component needs its own dark: color variant. */
+@theme {
+  --color-bg: #ffffff; /* page, list, reading pane */
+  --color-surface-sunken: var(--color-zinc-50); /* sidebar */
+  --color-surface-hover: var(--color-zinc-100); /* hover and pressed rows, tags, code */
+  --color-surface-raised: #ffffff; /* sheets and dialogs over the page */
+  --color-field: #ffffff; /* text inputs */
+  --color-line: var(--color-zinc-200); /* dividers */
+  --color-line-control: oklch(62% 0.015 286); /* borders of inputs and secondary buttons, 3:1 */
+  --color-ink: var(--color-zinc-900);
+  --color-ink-muted: var(--color-zinc-600); /* dates, snippets, labels, 4.5:1 on surface-hover */
+  --color-accent: var(--color-blue-600); /* the one primary action */
+  --color-accent-hover: var(--color-blue-700);
+  --color-on-accent: #ffffff;
+  --color-accent-ink: var(--color-blue-600); /* links and text buttons */
+  --color-accent-soft: var(--color-blue-50); /* selection */
+  --color-accent-soft-ink: var(--color-blue-700);
+  --color-focus: var(--color-blue-600);
+  --color-ok: var(--color-green-700);
+  --color-danger: var(--color-red-700);
+  --color-danger-soft: var(--color-red-50);
+  --color-danger-line: var(--color-red-300);
+  --color-danger-solid: var(--color-red-600); /* destructive primary button, white text */
+  --color-danger-solid-hover: var(--color-red-700);
+  --color-warning: var(--color-amber-700);
+  --color-warning-soft: var(--color-amber-50);
+  --color-warning-line: var(--color-amber-300);
+  --color-tag-warning: var(--color-amber-100); 
+  --color-tag-warning-ink: var(--color-amber-900);
+  --color-highlight: var(--color-yellow-200); /* search matches */
+  --color-paper: #ffffff; /* document pages keep a white background in both themes */
+  --color-scrim: rgb(0 0 0 / 0.3);
+}
+
+.dark {
+  --color-bg: var(--color-zinc-950);
+  --color-surface-sunken: var(--color-zinc-900);
+  --color-surface-hover: var(--color-zinc-800);
+  --color-surface-raised: var(--color-zinc-900);
+  --color-field: var(--color-zinc-900);
+  --color-line: var(--color-zinc-800);
+  --color-line-control: var(--color-zinc-500);
+  --color-ink: var(--color-zinc-100);
+  --color-ink-muted: var(--color-zinc-400);
+  --color-accent-ink: var(--color-blue-400);
+  --color-accent-soft: var(--color-blue-950);
+  --color-accent-soft-ink: var(--color-blue-200);
+  --color-focus: var(--color-blue-400);
+  --color-ok: var(--color-green-400);
+  --color-danger: var(--color-red-400);
+  --color-danger-soft: oklch(25.8% 0.092 26.042 / 0.4);
+  --color-danger-line: var(--color-red-900);
+  --color-warning: var(--color-amber-500);
+  --color-warning-soft: oklch(27.9% 0.077 45.635 / 0.4);
+  --color-warning-line: var(--color-amber-700);
+  --color-tag-warning: oklch(41.4% 0.112 45.904 / 0.4);
+  --color-tag-warning-ink: var(--color-amber-200);
+  --color-highlight: oklch(55.4% 0.135 66.442 / 0.6);
+  --color-scrim: rgb(0 0 0 / 0.55);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* The page reaches under notch and home indicator (viewport-fit=cover in
+   index.html); the app keeps its content clear of them. 0 elsewhere. */
+#root {
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+body {
+  @apply bg-bg text-ink antialiased;
+}
+
+/* One focus ring for everything, keyboard only (inputs show it on any focus). */
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline-offset: 0;
+}
+
+/* Safari ignores padding and height on native selects (22px next to 34px
+   fields), so selects drop the native look and draw their own arrow; then the
+   field classes size them like text inputs in every browser. Unlayered, so the
+   room for the arrow wins over the px-* utilities. */
+select:not([multiple], [size]) {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2371717b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-position: right 0.5rem center;
+  background-repeat: no-repeat;
+  background-size: 1rem;
+  padding-right: 2rem;
+}
+
+/* Below 16px iOS Safari zooms into the page when a field gets focus. Unlayered,
+   so it wins over the text-sm/text-xs utilities of the fields. */
+@media (max-width: 767px) {
+  input:not([type="checkbox"], [type="radio"]),
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
+/* Motion: colors ease on hover and press; sheets slide up on phones and
+   fade in on larger screens. Nothing moves with reduced motion. */
+@layer base {
+  button,
+  a,
+  [role="tab"] {
+    transition-property: color, background-color, border-color, opacity;
+    transition-duration: 150ms;
+    transition-timing-function: ease-out;
+  }
+}
+dialog.sheet[open] {
+  animation: sheet-up 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+dialog.sheet[open]::backdrop {
+  animation: fade-in 200ms ease-out;
+}
+@media (min-width: 48rem) {
+  dialog.sheet[open] {
+    animation-name: sheet-in;
+  }
+}
+@keyframes sheet-up {
+  from {
+    translate: 0 100%;
+  }
+}
+@keyframes sheet-in {
+  from {
+    opacity: 0;
+    scale: 0.97;
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::backdrop {
+    animation: none !important;
+    transition: none !important;
+  }
+}

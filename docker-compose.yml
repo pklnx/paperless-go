@@ -1,0 +1,75 @@
+# Usage (see README):
+#   cp .env.example .env              # then set POSTGRES_PASSWORD
+#   ./pgo migrate                     # wrapper around `docker compose run`
+#   docker compose up -d web          # web UI on http://localhost:8080 (image built by ./pgo)
+#
+# Both images are multi-arch (amd64 and arm64, e.g. Apple Silicon).
+
+name: paperless-go
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      # PostgreSQL 18+ images keep data in a versioned subdirectory
+      # (/var/lib/postgresql/<major>/docker), so the volume is mounted one
+      # level up. Major upgrades need pg_upgrade or dump/restore.
+      - pgdata:/var/lib/postgresql
+    ports:
+      # Only reachable from this machine; remove if not needed.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperless -d paperless"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Web server (UI and JSON API). Reachable from this machine only unless
+  # WEB_BIND is set; see docs/reference/security.md.
+  # Start or update with: ./pgo migrate && docker compose up -d web
+  web:
+    build:
+      context: .
+      args:
+        VERSION: ${PAPERLESS_GO_VERSION:-dev} # set by ./pgo from `git describe`
+    image: ${PAPERLESS_GO_IMAGE:-paperless-go:local}
+    restart: unless-stopped
+    command: ["serve", "--listen", ":8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PAPERLESS_GO_DATABASE_URL: postgres://paperless:${POSTGRES_PASSWORD}@postgres:5432/paperless?sslmode=disable
+      PAPERLESS_GO_LOG_LEVEL: ${PAPERLESS_GO_LOG_LEVEL:-info}
+      PAPERLESS_GO_ALLOWED_HOSTS: ${PAPERLESS_GO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+    volumes:
+      - ${DATA_DIR:-./data}:/data
+    ports:
+      # WEB_BIND=0.0.0.0 (or a LAN or Tailscale address) opens it to a network.
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:8080"
+
+  paperless-go:
+    build:
+      context: .
+      args:
+        VERSION: ${PAPERLESS_GO_VERSION:-dev} # set by ./pgo from `git describe`
+    image: ${PAPERLESS_GO_IMAGE:-paperless-go:local}
+    # One-shot CLI: not started by `docker compose up`, use `docker compose run`.
+    profiles: ["cli"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PAPERLESS_GO_DATABASE_URL: postgres://paperless:${POSTGRES_PASSWORD}@postgres:5432/paperless?sslmode=disable
+      PAPERLESS_GO_LOG_LEVEL: ${PAPERLESS_GO_LOG_LEVEL:-info}
+    volumes:
+      # Document files. A bind mount keeps them visible on the host for backups.
+      - ${DATA_DIR:-./data}:/data
+
+volumes:
+  pgdata:

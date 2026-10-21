@@ -1,0 +1,46 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+  - package-ecosystem: npm # pnpm lockfile in web/
+    directory: /web
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+    groups:
+      web-dependencies:
+        patterns: ["*"]
+  - package-ecosystem: npm # pnpm lockfile in docs/ (VitePress)
+    directory: /docs
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+    groups:
+      docs-dependencies:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+    ignore:
+      # A PostgreSQL major upgrade needs pg_upgrade or dump/restore of the
+      # data volume, so it is done deliberately, not through Dependabot.
+      - dependency-name: postgres
+        update-types: ["version-update:semver-major"]
