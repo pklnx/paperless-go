@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Environment variable names.
@@ -23,6 +26,23 @@ const (
 	// EnvOperator names who runs a command, for the audit log (not
 	// verified). ./pgo sets it to the host user.
 	EnvOperator = "PAPERLESS_GO_OPERATOR"
+	// EnvOCRWorkers is how many documents serve processes at once; 0 turns
+	// processing in serve off.
+	EnvOCRWorkers = "PAPERLESS_GO_OCR_WORKERS"
+	// EnvOCRLanguages are the Tesseract languages, joined with "+".
+	EnvOCRLanguages = "PAPERLESS_GO_OCR_LANGUAGES"
+	// EnvOCRTimeout limits each processing attempt (a Go duration).
+	EnvOCRTimeout = "PAPERLESS_GO_OCR_TIMEOUT"
+)
+
+// Processing defaults.
+const (
+	DefaultOCRWorkers   = 1
+	DefaultOCRLanguages = "deu+eng"
+	DefaultOCRTimeout   = 30 * time.Minute
+	// MaxOCRWorkers bounds PAPERLESS_GO_OCR_WORKERS: each worker runs its
+	// tools on every CPU.
+	MaxOCRWorkers = 16
 )
 
 // Config holds the application configuration.
@@ -36,6 +56,12 @@ type Config struct {
 	// TrustedProxies may name the client in X-Forwarded-For, for the login
 	// limits.
 	TrustedProxies []netip.Prefix
+	// OCRWorkers is how many documents serve processes at once (0: none).
+	OCRWorkers int
+	// OCRLanguages are Tesseract language codes joined with "+".
+	OCRLanguages string
+	// OCRTimeout limits each processing attempt.
+	OCRTimeout time.Duration
 }
 
 // DataDirFromEnv returns the data directory, ./data unless set.
@@ -68,7 +94,57 @@ func Load() (*Config, error) {
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
+	if cfg.OCRWorkers, err = parseWorkers(os.Getenv(EnvOCRWorkers)); err != nil {
+		return nil, err
+	}
+	if cfg.OCRLanguages, err = ParseLanguages(os.Getenv(EnvOCRLanguages)); err != nil {
+		return nil, err
+	}
+	if cfg.OCRTimeout, err = parseTimeout(os.Getenv(EnvOCRTimeout)); err != nil {
+		return nil, err
+	}
 	return cfg, nil
+}
+
+func parseWorkers(v string) (int, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return DefaultOCRWorkers, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 || n > MaxOCRWorkers {
+		return 0, fmt.Errorf("%s: want a number from 0 to %d, got %q", EnvOCRWorkers, MaxOCRWorkers, v)
+	}
+	return n, nil
+}
+
+// languages matches Tesseract languages (deu, eng, chi_sim, deu_latf) joined with +.
+var languages = regexp.MustCompile(`^[a-z][a-z0-9_]{1,31}(\+[a-z][a-z0-9_]{1,31})*$`)
+
+// ParseLanguages checks a list of Tesseract languages joined with "+",
+// such as deu+eng; empty means DefaultOCRLanguages. Whether Tesseract has
+// them is checked when serve starts.
+func ParseLanguages(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return DefaultOCRLanguages, nil
+	}
+	if !languages.MatchString(v) {
+		return "", fmt.Errorf("%s: want Tesseract languages joined with +, such as deu+eng, got %q", EnvOCRLanguages, v)
+	}
+	return v, nil
+}
+
+func parseTimeout(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return DefaultOCRTimeout, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < time.Minute {
+		return 0, fmt.Errorf("%s: want a duration of at least 1m, such as 30m or 2h, got %q", EnvOCRTimeout, v)
+	}
+	return d, nil
 }
 
 // ParseNetworks reads a comma-separated list of CIDR networks and single

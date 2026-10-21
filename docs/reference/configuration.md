@@ -24,3 +24,6 @@ Compose, set them in `.env`; `docker-compose.yml` passes them on.
 | `PAPERLESS_GO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Host names accepted in the `Host` header, comma-separated, without port. See [DNS rebinding](./security#dns-rebinding). |
 | `PAPERLESS_GO_TRUSTED_PROXIES` | (none) | Reverse proxies whose `X-Forwarded-For` names the client, as CIDR networks or addresses, comma-separated (for example `172.16.0.0/12`). The login limits then count per client instead of per proxy. Without it, the header is ignored. |
 | `PAPERLESS_GO_OPERATOR` | (none) | Who runs a command, recorded in the [audit log](../guide/audit-log) (not verified). `./pgo` sets it to the host user. |
+| `PAPERLESS_GO_OCR_WORKERS` | `1` | How many documents `serve` processes at once (0 to 16). Each runs its tools on every CPU. `0` turns processing in `serve` off; `process` still works. |
+| `PAPERLESS_GO_OCR_LANGUAGES` | `deu+eng` | Tesseract languages, joined with `+`. `serve` and `process` refuse to start when Tesseract lacks one; the image has `deu`, `eng` and `osd`. |
+| `PAPERLESS_GO_OCR_TIMEOUT` | `30m` | Limit of each processing attempt (at least `1m`, for example `2h`). An attempt that takes longer is stopped and retried. |

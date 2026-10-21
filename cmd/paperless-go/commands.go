@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -149,7 +150,10 @@ Requests are only accepted with a Host header listed in
 ` + config.EnvAllowedHosts + ` (default: localhost, 127.0.0.1, ::1), which blocks DNS
 rebinding; state-changing requests must come from the same origin. Use HTTPS
 (a reverse proxy or tailscale serve) when the server is reachable from a
-network.`,
+network.
+
+It also processes queued documents in the background (` + config.EnvOCRWorkers + `
+at a time, default 1; 0 turns it off).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			a, err := openApp(cmd.Context())
@@ -165,9 +169,27 @@ network.`,
 			}
 			log := newLogger(a.cfg.LogLevel)
 			warnWithoutUsers(cmd.Context(), a.store, log)
+			ctx, cancel := context.WithCancel(cmd.Context())
+			defer cancel()
+			var worker sync.WaitGroup
+			if a.cfg.OCRWorkers > 0 {
+				w, closeWorker, err := newWorker(ctx, a, log, a.cfg.OCRWorkers)
+				if err != nil {
+					return err
+				}
+				defer closeWorker()
+				log.Info("processing documents", "workers", a.cfg.OCRWorkers, "languages", a.cfg.OCRLanguages)
+				worker.Go(func() { w.Run(ctx) })
+			} else {
+				log.Warn("document processing is off", "env", config.EnvOCRWorkers)
+			}
 			srv := web.New(a.store, log, web.Options{AllowedHosts: a.cfg.AllowedHosts, TrustedProxies: a.cfg.TrustedProxies})
 			log.Info("listening", "addr", listen, "version", version)
-			return srv.ListenAndServe(cmd.Context(), listen)
+			err = srv.ListenAndServe(ctx, listen)
+			// Running jobs are given back before the process ends.
+			cancel()
+			worker.Wait()
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:8080", "address to listen on")

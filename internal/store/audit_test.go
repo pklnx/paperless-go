@@ -250,10 +250,16 @@ func TestAuditMigrationDown(t *testing.T) {
 	if err := st.Audit(ctx, store.AuditEntry{Actor: store.ActorCLI, Action: "user.add"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.MigrateDownTo(ctx, 5); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.MigrateDown(ctx); err == nil || !strings.Contains(err.Error(), "audit log has entries") {
 		t.Fatalf("down with entries: %v", err)
 	}
 	empty := storetest.New(t)
+	if err := empty.MigrateDownTo(ctx, 5); err != nil {
+		t.Fatal(err)
+	}
 	if m, err := empty.MigrateDown(ctx); err != nil || m != "00005_audit_log.sql" {
 		t.Fatalf("down without entries: %q, %v", m, err)
 	}

@@ -17,6 +17,7 @@ change or delete entries.
 | `user.password_set` | `user set-password` sets a password on the command line. |
 | `profile.password_change` | A user changes their own password. |
 | `audit.export` | `audit export` writes the log out. |
+| `document.reprocess` | `reprocess` queues documents for processing again (with the selection and how many it queued). |
 
 Each entry has the time, the user (by the name they had then), the client
 address and browser in the web UI, the user an admin action was about, and

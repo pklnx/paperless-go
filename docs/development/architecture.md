@@ -29,6 +29,7 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 | `internal/auth` | Argon2id password hashes, session tokens, the failed-login limiter and a rate limit, all with an injectable clock. |
 | `internal/config` | Configuration from `PAPERLESS_GO_*` environment variables. |
 | `internal/blobstore` | Content-addressed document files: named by their SHA-256 without extension (`documents/ab/cd/<sha256>`), published and removed durably (see [Blob durability](#blob-durability)). |
+| `internal/process` | The processing queue's worker: claims jobs, runs the tools (`Runner`) in a work directory, stores text, page count and archive PDF (see [Processing](#processing)). |
 | `internal/store` | PostgreSQL access: migrations (goose, embedded), queries (sqlc, generated into `internal/store/db`). |
 | `internal/store/storetest` | A throwaway, migrated database per test. |
 | `internal/web` | HTTP server: the route table with each route's access, login and sessions, user management, the Host and same-origin checks, `/healthz`. |
@@ -54,6 +55,7 @@ app and the server through the app's archive folder format:
 | `Correspondent`, `DocumentType`: name, matchText, matchMode | `correspondents`, `document_types` |
 | `Deadline`: kind, date, label, origin, isDone, addedToCalendarAt, addedToRemindersAt, createdAt, modifiedAt | `deadlines`, several per document |
 | `SavedView`: name, symbol, sortIndex, createdAt, filterJSON | `saved_views`, with the filter as a `JSONB` object |
+| — | `jobs` (`00007_jobs.sql`; see [Processing](#processing)); `documents.thumbnail_sha256`, `documents.processing_note` |
 
 UUIDs as keys (not serials) keep imported and exported records stable across
 the app and the server.
@@ -176,6 +178,72 @@ needs a disposable VM or a fault-injecting block device, power cuts at the
 publication and removal boundaries, a restart, and a check that every
 acknowledged blob is still there and every acknowledged removal is still gone.
 
+## Processing
+
+A queue in PostgreSQL turns stored documents into searchable ones
+(`internal/process`, `internal/store/jobs.go`, migration `00007_jobs.sql`).
+
+- **Queue.** `jobs` has one row per attempt series of a document
+  (`kind` `process`; `state` `queued`, `running`, `done`, `failed`;
+  `attempts`, `max_attempts` 3, `run_after`, `lease_token`,
+  `locked_until`, `last_error`, `finished_at`) and cascades with the
+  document. A partial unique index allows one queued or running job per
+  document, so enqueueing is idempotent. `CreateDocument` queues a document
+  without an archive PDF in its own transaction, which also sends
+  `pg_notify('paperless_go_jobs')`; the migration queued every document
+  without one.
+- **Claim and lease.** A worker claims the oldest due job with
+  `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED)`, counts the
+  attempt and leases it for 5 minutes under a random token; a heartbeat
+  renews it every third of that. The reaper (every minute) ends attempts
+  whose lease expired: they count, so a job that keeps crashing its worker
+  fails after the third. Every write of a result or an end checks the
+  token, so a stale worker cannot overwrite anything. Times come from the
+  worker's clock (tests inject one); a new job is due by the database's
+  clock too.
+- **Retries.** A failed attempt runs again after 1, then 5 minutes; the
+  third failure fails the job. Errors a retry cannot fix (a damaged PDF,
+  one that needs a password to open, an unsupported type, an original whose
+  content no longer matches its hash) fail at once. `last_error` is a fixed
+  message from a mapping of exit statuses; tool output (the last 64 KiB of
+  standard error) goes only to the log. `PAPERLESS_GO_OCR_TIMEOUT` limits
+  each attempt. At shutdown, running jobs are given back without counting.
+  Done jobs are deleted after 7 days, and a document's older finished jobs
+  when a new one is done; a failed job stays as the document's status.
+- **Worker.** `serve` runs `PAPERLESS_GO_OCR_WORKERS` workers as goroutines;
+  `process` runs the same code in the foreground. Idle workers wake on a
+  notification, received by `LISTEN` on a connection outside the pool, and
+  poll every minute for retries and missed notifications.
+- **Tools.** `Runner` runs each tool with `exec.CommandContext` in its own
+  process group (SIGTERM to the group on cancel, killed 10 s later), with a
+  minimal environment (PATH, a UTF-8 locale, HOME and TMPDIR in the job's
+  directory) and fixed file names as arguments. Each process has a
+  directory `work/proc-*` in the data directory, locked with `flock`; a
+  starting process removes the directories nobody holds a lock on. Each
+  attempt copies the original there (checking its SHA-256) and removes it
+  afterwards.
+- **Pipeline.** `pdfinfo` gives the page count and whether the PDF is
+  encrypted, `pdftotext -enc UTF-8` the text, pages separated by form
+  feeds. Text is stored without NUL bytes and with invalid UTF-8 replaced.
+  A page with fewer than 15 characters (white space does not count) needs
+  OCR. With text on every page, the original is the archive and
+  `text_source` is `PDF-Text`. A PDF that opens without a password but is
+  encrypted (an owner password) is not changed: the original is the
+  archive, with a `processing_note`; so is one that forbids copying text.
+  OCR (`text_source` `Tesseract`, the server's own value next to the app's)
+  and image conversion come with part 3; until then such documents fail
+  with a message that says so.
+- **Text rule.** The result replaces `extracted_text` and `text_source` only
+  when the text is empty or came from processing (`PDF-Text`,
+  `Tesseract`), so text imported from the app (`Mistral OCR`) or edited
+  stays; an edit must set another `text_source`. `modified_at` is not
+  touched.
+- **Tests.** Unit tests use a fake `Runner`, the test database and an
+  injected clock. The tests with the real tools have the build tag `tools`
+  and run in the Dockerfile's `toolstest` stage as UID 65532 (CI job
+  `toolstest`); they generate every PDF and encrypt with pikepdf, which
+  comes with ocrmypdf.
+
 ## Web server
 
 `serve` refuses to start while migrations are pending or the data directory
@@ -268,8 +336,9 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
 The runtime image is `debian:trixie-slim`, pinned by the digest of its
 multi-arch index (Dependabot proposes updates). CI caches image layers in
 the GitHub Actions cache; the release build always rebuilds the runtime
-stage (`no-cache-filters: runtime`), so each release carries the current
-Debian security updates of the OCR tools. The build stages stay on
+stages (`no-cache-filters: runtime-base,runtime`: the packages are in
+`runtime-base`, which the `toolstest` stage shares), so each release
+carries the current Debian security updates of the OCR tools. The build stages stay on
 Alpine: the web UI is built with Node, and the Go binary is cross-compiled
 with `CGO_ENABLED=0`, so it needs no system library and the arm64 image
 builds without emulation. Debian replaced the earlier distroless base because
