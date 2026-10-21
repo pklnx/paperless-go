@@ -91,7 +91,7 @@ func TestSavedViewRoundTrip(t *testing.T) {
 		t.Errorf("updated = %+v, filter %s", up, up.Filter)
 	}
 
-	for _, bad := range []string{`[]`, `"x"`, `null`, `1`, `{"a":`, ` [ {} ] `} {
+	for _, bad := range []string{`[]`, `"x"`, `null`, `1`, `{"a":`, ` [ {} ] `, `{"a":"\u0000"}`, `{"a\u0000":1}`, `{"a":[{"b":"x\u0000"}]}`} {
 		if _, err := st.CreateSavedView(ctx, alice, store.SavedViewInput{Name: "bad", Filter: json.RawMessage(bad)}); !errors.Is(err, store.ErrInvalidFilter) {
 			t.Errorf("create with filter %s: %v, want ErrInvalidFilter", bad, err)
 		}

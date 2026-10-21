@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/pklnx/paperless-go/internal/store/db"
@@ -49,7 +50,8 @@ func savedViewFromDB(r db.SavedView) *SavedView {
 	}
 }
 
-// filterJSON checks that a filter is a JSON object; empty means {}.
+// filterJSON checks that a filter is a JSON object that PostgreSQL's jsonb
+// accepts; empty means {}.
 func filterJSON(f json.RawMessage) ([]byte, error) {
 	t := bytes.TrimSpace(f)
 	if len(t) == 0 {
@@ -58,7 +60,33 @@ func filterJSON(f json.RawMessage) ([]byte, error) {
 	if t[0] != '{' || !json.Valid(t) {
 		return nil, ErrInvalidFilter
 	}
+	// jsonb refuses U+0000 in strings and keys (SQLSTATE 22P05).
+	var v any
+	if err := json.Unmarshal(t, &v); err != nil || hasNUL(v) {
+		return nil, ErrInvalidFilter
+	}
 	return t, nil
+}
+
+// hasNUL reports whether a decoded JSON value holds U+0000 in a string or key.
+func hasNUL(v any) bool {
+	switch v := v.(type) {
+	case string:
+		return strings.ContainsRune(v, 0)
+	case []any:
+		for _, e := range v {
+			if hasNUL(e) {
+				return true
+			}
+		}
+	case map[string]any:
+		for k, e := range v {
+			if strings.ContainsRune(k, 0) || hasNUL(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CreateSavedView adds a saved view owned by the scope's user. A filter
