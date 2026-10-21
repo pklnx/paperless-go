@@ -25,7 +25,8 @@ describe("messages", () => {
       for (const key of Object.keys(en) as (keyof typeof en)[]) {
         const v = m[key];
         if (typeof v === "string") expect(v, `${l}.${key}`).not.toBe("");
-        if (typeof v === "function") expect(v("dark"), `${l}.${key}`).not.toBe("");
+        // Every text function takes one argument: a name, a number or a theme.
+        if (typeof v === "function") expect((v as (arg: never) => string)("dark" as never), `${l}.${key}`).not.toBe("");
       }
     }
   });

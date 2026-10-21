@@ -114,6 +114,20 @@ if [ "$status" != 403 ]; then
 	exit 1
 fi
 
+echo "== login"
+status=$(curl -s -o /dev/null -w '%{http_code}' "$base/api/users")
+if [ "$status" != 401 ]; then
+	echo "expected 401 from the API without a login, got $status" >&2
+	exit 1
+fi
+echo "correct horse battery" | ./pgo user add smoke --admin --password-stdin | tee "$work/out"
+expect "$work/out" 'admin "smoke" created'
+curl -fsS -c "$work/cookies" -H 'Content-Type: application/json' -H "Origin: $base" \
+	-d '{"username":"smoke","password":"correct horse battery"}' "$base/api/session" > "$work/out"
+expect "$work/out" '"name":"smoke"'
+curl -fsS -b "$work/cookies" "$base/api/users" > "$work/out"
+expect "$work/out" '"self":true'
+
 echo "== health without database"
 docker compose --progress quiet stop postgres
 status=$(curl -s -o /dev/null -w '%{http_code}' "$base/healthz")

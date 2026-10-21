@@ -1,17 +1,17 @@
 # Security
 
-::: warning No login yet
-This version has no user accounts. Anyone who can reach the web UI can use
-it. Keep the default: the web UI is published on `127.0.0.1` only. Login,
-passkeys, TOTP and API keys follow (see the
-[roadmap](../development/roadmap)).
+::: warning Keep it on this computer for now
+Every page and API call except the health check and the UI code needs a
+login, but there is no second factor (TOTP, passkeys) yet. Keep the default:
+the web UI is published on `127.0.0.1` only. Two-factor login, passkeys and
+API keys follow (see the [roadmap](../development/roadmap)).
 :::
 
 ## What is protected how
 
 | What | Protection |
 |---|---|
-| Web UI and API | Reachable from this computer only (`WEB_BIND=127.0.0.1`). Host check and same-origin check below. |
+| Web UI and API | Login with user name and password (below). Reachable from this computer only (`WEB_BIND=127.0.0.1`). Host check and same-origin check below. |
 | Database | Published on `127.0.0.1` only; password in `.env`. |
 | Document files | Plain files in the data directory, readable for the container user (UID 65532). Use an encrypted disk. |
 | Backups | `./pgo backup` writes the dump with mode `0600`. |
@@ -19,11 +19,34 @@ passkeys, TOTP and API keys follow (see the
 ## Network access
 
 Docker Compose publishes the web UI on `127.0.0.1`, so only this computer can
-reach it. Until user accounts exist, keep it that way. With accounts, the
-same rules as in mail-archive will apply: HTTPS through `tailscale serve` or
+reach it. Until two-factor login exists, keep it that way. Then the same
+rules as in mail-archive will apply: HTTPS through `tailscale serve` or
 a reverse proxy, every host name in `PAPERLESS_GO_ALLOWED_HOSTS`, and the
 port published only as far as needed with `WEB_BIND`. Never forward the port
 from the internet.
+
+## Login
+
+- **Everything needs a login** except `/healthz`, the UI page `/` and its
+  code under `/assets/`; none of them contain data. A new endpoint needs a
+  session unless the route table says otherwise.
+- **Passwords** need at least 12 characters and are stored as Argon2id
+  hashes (64 MiB, 3 passes). A wrong user name and a wrong password get the
+  same answer and take the same time.
+- **Failed logins are limited**: from the 5th failure within 15 minutes a
+  user name is blocked for 1 minute, doubling up to 15 minutes; 20 failures
+  from one address block it for 15 minutes. Behind a reverse proxy, set
+  `PAPERLESS_GO_TRUSTED_PROXIES` so the limits count per client.
+- **Sessions** end after 7 days without use and after 30 days at the latest.
+  The cookie is `HttpOnly` and `SameSite=Strict`; over HTTPS (also behind a
+  proxy that sends `X-Forwarded-Proto: https`) it is `__Host-` prefixed and
+  `Secure`. The database stores only a hash of the token. A new password,
+  a lock or removing the user ends all their sessions.
+- **Generated passwords** (a new user or a reset in the web UI, `user
+  reset-password`) are shown once and must be replaced at the first login.
+- **Admins** manage users and see every user's documents; users see only
+  their own. The last admin who can log in cannot be demoted, locked or
+  removed.
 
 ## Browser protections
 

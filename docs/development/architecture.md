@@ -25,12 +25,13 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 
 | Path | Purpose |
 |---|---|
-| `cmd/paperless-go` | Command line (cobra): `migrate`, `serve`, `prepare-data` (hidden, run by `./pgo migrate`). |
+| `cmd/paperless-go` | Command line (cobra): `migrate`, `serve`, `user`, `prepare-data` (hidden, run by `./pgo migrate`). |
+| `internal/auth` | Argon2id password hashes, session tokens, the failed-login limiter and a rate limit, all with an injectable clock. |
 | `internal/config` | Configuration from `PAPERLESS_GO_*` environment variables. |
 | `internal/blobstore` | Content-addressed document files: named by their SHA-256 without extension (`documents/ab/cd/<sha256>`), published and removed durably (see [Blob durability](#blob-durability)). |
 | `internal/store` | PostgreSQL access: migrations (goose, embedded), queries (sqlc, generated into `internal/store/db`). |
 | `internal/store/storetest` | A throwaway, migrated database per test. |
-| `internal/web` | HTTP server: routes, the Host and same-origin checks, `/healthz`. |
+| `internal/web` | HTTP server: the route table with each route's access, login and sessions, user management, the Host and same-origin checks, `/healthz`. |
 | `internal/web/ui` | Embeds the built web UI (`web/` → `internal/web/ui/dist`) and serves it with a strict CSP. |
 | `web` | React UI (TypeScript, Vite, Tailwind CSS). |
 | `docs` | This site (VitePress). |
@@ -46,7 +47,7 @@ app and the server through the app's archive folder format:
 
 | App (SwiftData) | Server table |
 |---|---|
-| — | `users` (`BIGSERIAL` id, name, is_admin; minimal until users and login add the rest) |
+| — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`), `sessions` |
 | `Document`: id (UUID), title, documentDate, createdAt, modifiedAt, notes, isFavorite, isInbox, archiveSerialNumber, pageCount, fileSize, extractedText, source, originalFileName, textSource, contentHash | `documents`, with the UUID as primary key; the original file (`original_sha256`, size, MIME type) and the archive PDF (`archive_sha256`, size) |
 | `Tag`: name, colorHex, symbol, parent, matchText, matchMode | `tags`, `document_tags` (nested through `parent_id`) |
 | `Correspondent`, `DocumentType`: name, matchText, matchMode | `correspondents`, `document_types` |
@@ -180,8 +181,43 @@ acknowledged blob is still there and every acknowledged removal is still gone.
 is not writable. Every request passes `protect` (`internal/web/middleware.go`):
 the `Host` must be allowed (DNS rebinding), and state-changing requests need
 a same-origin `Origin` (or `Sec-Fetch-Site: same-origin`) and a JSON body
-(CSRF). Unknown `/api/` paths answer `404` in JSON. `/healthz` pings the
+(CSRF). Then `authenticate` checks the login (see [Login](#login)). Unknown
+`/api/` paths answer `404` in JSON after the login. `/healthz` pings the
 database and answers `503` when it does not answer.
+
+## Login
+
+Ported from mail-archive (`internal/auth`, the auth parts of `internal/web`
+and `internal/store`, `cmd/paperless-go/users.go`).
+
+- **Route table.** `internal/web/routes.go` lists every route with its
+  `access`: `accessPublic` (`GET /healthz`, `GET /{$}`, `GET /assets/`),
+  `accessLogin` (`/api/session`: read, log in, log out) or `accessSession`.
+  The zero value is `accessSession`, so a route that forgets it gets the
+  strictest rule, and so does every path without a route (the JSON `404`
+  under `/api/` comes only after the login). `authenticate` enforces the
+  table; a test walks it and expects `401` without a session.
+- **Sessions.** The cookie `paperless_go_session` (`__Host-` prefixed over
+  HTTPS) holds a random token; `sessions` stores its SHA-256 with the user,
+  creation, last use and absolute expiry. Sessions end after 7 days unused
+  and after 30 days; `serve` deletes ended ones hourly. Every time a
+  session check uses comes from the server clock, so tests move a clock
+  instead of waiting.
+- **Must change password.** A generated password (admin creates or resets a
+  user) restricts the session to `PUT /api/profile/password`; everything
+  else answers `403` with `passwordChangeRequired`.
+- **Scope.** `requestScope` (`internal/web/auth.go`) is the one place that
+  turns the request's principal into a `store.Scope`: the session's user,
+  with `All` for admins. Handlers that touch documents or metadata take
+  their scope from it.
+- **Removing users.** Auth tables reference `users` with `ON DELETE
+  CASCADE`, owned data with `ON DELETE RESTRICT`. `DeleteUser` counts the
+  owned rows per table (documents, which cover their deadlines, tags,
+  correspondents, document types, saved views) and refuses with the counts;
+  a refusal by the database itself (`23001` from PostgreSQL 18, `23503`
+  before) gives the same error. The last unlocked admin stays.
+- **Client address.** The login limits count per user name and per client
+  address; `X-Forwarded-For` counts only from `PAPERLESS_GO_TRUSTED_PROXIES`.
 
 ## Container
 

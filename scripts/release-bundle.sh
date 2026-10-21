@@ -61,6 +61,7 @@ First start:
   cp .env.example .env     # set POSTGRES_PASSWORD
   ./pgo migrate            # also makes data/ writable for the container
   docker compose up -d web # http://localhost:8080
+  ./pgo user add NAME --admin   # the first admin, then log in
 
 Upgrade: back up first, then extract the newer paperless-go.tar.gz in the
 directory above this one, so that it replaces these files and keeps .env
