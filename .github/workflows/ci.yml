@@ -83,6 +83,10 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: false
+          # Layer cache in the GitHub Actions cache: the apt layer is rebuilt when
+          # its packages or the base image digest (Dependabot) change.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   compose:
     # End-to-end test of docker-compose.yml, the image and the ./pgo wrapper.

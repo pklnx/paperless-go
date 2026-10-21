@@ -65,6 +65,10 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: ${{ !inputs.dry_run }}
+          # Layer cache in the GitHub Actions cache: the apt layer is rebuilt when
+          # its packages or the base image digest (Dependabot) change.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: ${{ steps.version.outputs.tags }}
           build-args: VERSION=${{ steps.version.outputs.version }}
           provenance: mode=max

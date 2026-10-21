@@ -221,7 +221,25 @@ and `internal/store`, `cmd/paperless-go/users.go`).
 
 ## Container
 
-The image is distroless and runs as UID 65532; `./pgo migrate` makes a fresh
-data directory writable for it (`prepare-data`). OCR needs OCRmyPDF,
-Tesseract and Ghostscript, so the OCR step of the roadmap moves the image to a
-Debian base; that change gets its own plan.
+The runtime image is `debian:trixie-slim`, pinned by the digest of its
+multi-arch index (Dependabot proposes updates). The build stages stay on
+Alpine: the web UI is built with Node, and the Go binary is cross-compiled
+with `CGO_ENABLED=0`, so it needs no system library and the arm64 image
+builds without emulation. Debian replaced the earlier distroless base because
+OCR needs external programs, installed with `--no-install-recommends`:
+
+| Package | For |
+|---|---|
+| `ocrmypdf` (16.x in trixie), with Tesseract and Ghostscript | The text layer of scans |
+| `tesseract-ocr-deu`, `-eng`, `-osd` | German and English, page orientation |
+| `poppler-utils` | `pdfinfo`, `pdftotext` (text per page), `pdftoppm` (thumbnails) |
+| `img2pdf` | JPEG and PNG to PDF without re-encoding |
+| `libheif-examples`, `libheif-plugin-libde265` | `heif-dec` (HEIC to PNG; trixie keeps `heif-convert` as a link to it) and its HEVC decoder plugin, which is not installed without recommended packages |
+| `ca-certificates` | TLS to optional external services |
+
+The image is about 145 MB compressed per architecture (about 540 MB
+unpacked, measured for amd64). It runs as `nonroot`, UID and GID 65532, as
+the distroless image did, so existing data directories keep working;
+`./pgo migrate` makes a fresh data directory writable for it
+(`prepare-data`, run with `--user 0:0`, which re-executes itself with the
+numeric UID). The compose smoke test checks the tools as that user.
