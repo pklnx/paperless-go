@@ -34,19 +34,20 @@ func TestMapErr(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := mapErr(tc.err)
-			switch want := tc.want.(type) {
-			case *ValidationError:
+			var want *ValidationError
+			switch {
+			case errors.As(tc.want, &want):
 				var v *ValidationError
 				if !errors.As(got, &v) || *v != *want || !errors.Is(got, ErrInvalid) {
 					t.Errorf("mapErr = %#v, want %#v", got, want)
 				}
-			case nil:
-				if got != tc.err {
+			case tc.want == nil:
+				if !errors.Is(got, tc.err) || got.Error() != tc.err.Error() {
 					t.Errorf("mapErr = %v, want it unchanged", got)
 				}
 			default:
-				if !errors.Is(got, want) {
-					t.Errorf("mapErr = %v, want %v", got, want)
+				if !errors.Is(got, tc.want) {
+					t.Errorf("mapErr = %v, want %v", got, tc.want)
 				}
 			}
 		})
