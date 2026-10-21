@@ -261,3 +261,21 @@ func TestDeleteParentTagNameConflict(t *testing.T) {
 		t.Errorf("Work/tax moved: %+v", got)
 	}
 }
+
+// The tag being deleted is a root itself; a child with its name does not
+// collide with it, so the error must name the child that really collides.
+func TestDeleteParentTagNameConflictNamesRealChild(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	r := mustTag(t, st, alice, "R", nil)
+	mustTag(t, st, alice, "R", r)
+	zed := mustTag(t, st, alice, "Zed", r)
+	mustTag(t, st, alice, "Zed", nil)
+
+	err := st.DeleteTag(ctx, alice, r.ID)
+	var conflict *store.TagNameConflictError
+	if !errors.As(err, &conflict) || conflict.ChildID != zed.ID {
+		t.Fatalf("delete R: %v, want TagNameConflictError for child Zed %s", err, zed.ID)
+	}
+}

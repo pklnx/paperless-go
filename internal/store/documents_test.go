@@ -221,6 +221,7 @@ func TestOwnerMismatch(t *testing.T) {
 	}
 	missing := "00000000-0000-4000-8000-000000000000"
 	ad := mustDoc(t, st, alice, newDoc("alice doc"))
+	aliceTag := mustTag(t, st, alice, "Alice", nil)
 
 	withCorr := newDoc("c")
 	withCorr.CorrespondentID = &bc.ID
@@ -245,6 +246,7 @@ func TestOwnerMismatch(t *testing.T) {
 		"admin sets other owner's tag":      st.SetDocumentTags(ctx, admin, ad.ID, []string{bt.ID}),
 		"tag under other's parent":          second(st.CreateTag(ctx, alice, store.TagInput{Name: "Sub", ParentID: &bt.ID})),
 		"tag under missing parent":          second(st.CreateTag(ctx, alice, store.TagInput{Name: "Sub", ParentID: &missing})),
+		"admin moves tag under other's tag": second(st.UpdateTag(ctx, admin, aliceTag.ID, store.TagInput{Name: "Alice", ParentID: &bt.ID})),
 	} {
 		if !errors.Is(err, store.ErrOwnerMismatch) {
 			t.Errorf("%s: %v, want ErrOwnerMismatch", name, err)

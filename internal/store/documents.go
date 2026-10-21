@@ -29,7 +29,7 @@ type Document struct {
 	ModifiedAt          time.Time
 	Notes               string
 	IsFavorite          bool
-	IsInbox             bool
+	IsInbox             bool // false unless set; uploads set it (the column defaults to true)
 	ArchiveSerialNumber *int32
 	PageCount           int32
 	ExtractedText       string

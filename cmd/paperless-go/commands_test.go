@@ -54,6 +54,9 @@ func TestMigrateCommands(t *testing.T) {
 	}
 
 	rolledBack := strings.TrimSpace(strings.TrimPrefix(out, "rolled back "))
+	if !strings.HasSuffix(rolledBack, ".sql") {
+		t.Fatalf("migrate down --yes named no migration: %q", out)
+	}
 	out, err = run(t, url, "migrate", "up")
 	if err != nil || !strings.Contains(out, "applied "+rolledBack) {
 		t.Fatalf("migrate up: %q, %v", out, err)

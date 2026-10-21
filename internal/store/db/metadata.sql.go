@@ -370,6 +370,7 @@ WHERE child.parent_id = $1
   AND EXISTS (
       SELECT 1 FROM tags root
       WHERE root.owner_id = child.owner_id AND root.parent_id IS NULL
+        AND root.id <> $1 -- the tag being deleted is gone by then
         AND lower(root.name) = lower(child.name)
   )
 ORDER BY lower(child.name), child.id
