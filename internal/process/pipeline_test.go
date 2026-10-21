@@ -73,7 +73,7 @@ func poppler(p pdf) func(context.Context, Command) ([]byte, error) {
 	}
 }
 
-func runPipeline(t *testing.T, p pdf, mime string) (Result, error, *fakeRunner) {
+func runPipeline(t *testing.T, p pdf, mime string) (Result, *fakeRunner, error) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "original")
@@ -82,13 +82,13 @@ func runPipeline(t *testing.T, p pdf, mime string) (Result, error, *fakeRunner) 
 	}
 	f := &fakeRunner{handle: poppler(p)}
 	res, err := (&Pipeline{Runner: f}).Run(context.Background(), Input{Dir: dir, Path: path, MIME: mime})
-	return res, err, f
+	return res, f, err
 }
 
 const longText = "Rechnung Nr. 4711 vom 1. Oktober"
 
 func TestPipelineTextOnEveryPage(t *testing.T) {
-	res, err, f := runPipeline(t, pdf{pages: []string{longText, "Seite 2: " + longText}}, "application/pdf")
+	res, f, err := runPipeline(t, pdf{pages: []string{longText, "Seite 2: " + longText}}, "application/pdf")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestPipelineTextOnEveryPage(t *testing.T) {
 }
 
 func TestPipelineArguments(t *testing.T) {
-	_, _, f := runPipeline(t, pdf{pages: []string{longText}}, "application/pdf")
+	_, f, _ := runPipeline(t, pdf{pages: []string{longText}}, "application/pdf")
 	if len(f.calls) != 2 {
 		t.Fatalf("calls: %+v", f.calls)
 	}
@@ -122,7 +122,7 @@ func TestPipelineNeedsOCR(t *testing.T) {
 	// One page without text is enough, even if the others have some; a
 	// page with a little text (a scanner's header) needs OCR too.
 	for _, pages := range [][]string{{longText, ""}, {"Page 1 of 2", longText}} {
-		_, err, _ := runPipeline(t, pdf{pages: pages}, "application/pdf")
+		_, _, err := runPipeline(t, pdf{pages: pages}, "application/pdf")
 		var pe *PermanentError
 		if !errors.As(err, &pe) || pe.Msg != msgOCRLater {
 			t.Errorf("pages %q: %v", pages, err)
@@ -133,7 +133,7 @@ func TestPipelineNeedsOCR(t *testing.T) {
 func TestPipelineOwnerPassword(t *testing.T) {
 	// Opens without a password but may not be changed: no OCR, the
 	// original stays the archive, with a note.
-	res, err, _ := runPipeline(t, pdf{pages: []string{longText, ""}, encrypted: true}, "application/pdf")
+	res, _, err := runPipeline(t, pdf{pages: []string{longText, ""}, encrypted: true}, "application/pdf")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,14 +141,14 @@ func TestPipelineOwnerPassword(t *testing.T) {
 		t.Fatalf("result %+v", res)
 	}
 	// With text on every page it is an ordinary PDF.
-	res, err, _ = runPipeline(t, pdf{pages: []string{longText}, encrypted: true}, "application/pdf")
+	res, _, err = runPipeline(t, pdf{pages: []string{longText}, encrypted: true}, "application/pdf")
 	if err != nil || res.Note != "" || res.TextSource != store.TextSourcePDF {
 		t.Fatalf("encrypted PDF with text: %+v, %v", res, err)
 	}
 }
 
 func TestPipelineCopyForbidden(t *testing.T) {
-	res, err, _ := runPipeline(t, pdf{pages: []string{""}, text: &ToolError{Tool: "pdftotext", ExitCode: 3}}, "application/pdf")
+	res, _, err := runPipeline(t, pdf{pages: []string{""}, text: &ToolError{Tool: "pdftotext", ExitCode: 3}}, "application/pdf")
 	if err != nil || res.Note != msgNoCopy || res.Text != "" || res.TextSource != "" || res.PageCount != 1 {
 		t.Fatalf("result %+v, %v", res, err)
 	}
@@ -161,7 +161,7 @@ func TestPipelineUnreadablePDF(t *testing.T) {
 		{pages: []string{longText}, text: &ToolError{Tool: "pdftotext", ExitCode: 1, Stderr: stderr}},
 		{pages: nil}, // no pages
 	} {
-		_, err, _ := runPipeline(t, p, "application/pdf")
+		_, _, err := runPipeline(t, p, "application/pdf")
 		var pe *PermanentError
 		if !errors.As(err, &pe) {
 			t.Fatalf("%+v: %v is not permanent", p, err)
@@ -173,7 +173,7 @@ func TestPipelineUnreadablePDF(t *testing.T) {
 }
 
 func TestPipelineTransientToolError(t *testing.T) {
-	_, err, _ := runPipeline(t, pdf{info: &ToolError{Tool: "pdfinfo", ExitCode: 99, Stderr: "secret"}}, "application/pdf")
+	_, _, err := runPipeline(t, pdf{info: &ToolError{Tool: "pdfinfo", ExitCode: 99, Stderr: "secret"}}, "application/pdf")
 	var pe *PermanentError
 	if err == nil || errors.As(err, &pe) {
 		t.Fatalf("exit status 99: %v", err)
@@ -188,7 +188,7 @@ func TestPipelineOtherTypes(t *testing.T) {
 		"image/jpeg": msgImagesLater, "image/png": msgImagesLater, "image/heic": msgImagesLater,
 		"image/heif": msgImagesLater, "text/plain": msgUnsupported, "": msgUnsupported,
 	} {
-		_, err, f := runPipeline(t, pdf{}, mime)
+		_, f, err := runPipeline(t, pdf{}, mime)
 		var pe *PermanentError
 		if !errors.As(err, &pe) || pe.Msg != want {
 			t.Errorf("%q: %v", mime, err)

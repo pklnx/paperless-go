@@ -50,7 +50,7 @@ const (
 	msgOCRLater    = "This PDF has pages without text, and this version cannot run OCR yet; run reprocess --failed after the update."
 	// msgOwnerPassword is the note on a PDF that opens without a password
 	// but forbids changes: OCR would have to change it.
-	msgOwnerPassword = "The PDF is protected by an owner password, so pages without text were not OCRed."
+	msgOwnerPassword = "The PDF is protected by an owner password, so pages without text were not OCRed." //nolint:gosec // a message, not a credential
 	msgNoCopy        = "The PDF does not allow copying its text, so no text was extracted."
 )
 

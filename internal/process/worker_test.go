@@ -225,7 +225,8 @@ func TestWorkerDamagedOriginal(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 	d := e.doc(t, "%PDF original")
-	path := filepath.Join(e.blobs.Root(), filepath.FromSlash(blobstore.RelPath(d.OriginalSHA256)))
+	h := d.OriginalSHA256
+	path := filepath.Join(e.blobs.Root(), "documents", h[0:2], h[2:4], h)
 	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatal(err)
 	}

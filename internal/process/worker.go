@@ -294,7 +294,7 @@ func (w *Worker) copyOriginal(hash, path string) error {
 	if !blobstore.IsHash(hash) {
 		return permanent(msgDamagedOriginal)
 	}
-	src, err := w.Blobs.Open(blobstore.RelPath(hash))
+	src, err := w.Blobs.OpenHash(hash)
 	if err != nil {
 		return fmt.Errorf("open original: %w", err)
 	}
