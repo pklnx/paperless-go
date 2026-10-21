@@ -3,12 +3,13 @@
 State of the work for the next session. Update before a session ends.
 
 ## Open PRs
-- Users, documents, tags, correspondents and document types (#14, part 2 of #2): being implemented.
+- Users, passwords, sessions and login UI (#16, part 1 of #3): being implemented (migration 00004).
 
 ## Next tickets
-- #2 document model: part 1 (#13) merged; part 2 (#14) in progress; part 3 (#15) after #14.
-- #3 users and login: plan revision 2 posted, waiting for the plan review (`plan-review`). Parts #16 to #20; #16 needs #14.
-- Backlog: #4 to #12 (roadmap steps 3 to 11), #21 (transfer a user's data; conflict rules are a maintainer decision).
+- #2 document model: done (#22, #24, #25).
+- #3 users and login: `ready`. #16 in progress; then #17 (audit log), #18 (TOTP, breaking), #19 (passkeys), #20 (API keys, security docs).
+- #4 (upload) and #5 (processing, OCR): plans being written.
+- Backlog: #6 to #12 (roadmap steps 5 to 11), #21 (transfer a user's data; conflict rules are a maintainer decision).
 
 ## Maintainer decisions (2026-10-21)
 - Owner per document; tags, correspondents, document types and saved views per owner.
@@ -17,10 +18,14 @@ State of the work for the next session. Update before a session ends.
 - `serve` refuses to start without `PAPERLESS_GO_SECRET_KEY` once TOTP exists.
 - Planners create sub-issues when a plan has parts. 2-3 agents may run at a time.
 - Work only on paperless-go (not mail-archive).
+- Saved-view names may repeat per owner (as in the app).
 
 ## Done (2026-10-21)
 - #1: foundation (Go binary, migrations, web server, UI shell, Compose, CI, Action, docs, releases).
 - #22: content-addressed blob storage (#13).
+- #23: process docs (sub-issues), handover.
+- #24: users, documents, tags, correspondents, document types (#14).
+- #25: deadlines and saved views (#15).
 - Pages enabled (https://pklnx.github.io/paperless-go/), `ANTHROPIC_API_KEY` set.
 
 ## Manual checks for the maintainer
