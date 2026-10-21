@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pklnx/paperless-go/internal/auth"
+	"github.com/pklnx/paperless-go/internal/crypto"
 	"github.com/pklnx/paperless-go/internal/store"
 )
 
@@ -35,6 +36,10 @@ type Server struct {
 	limiter      *auth.Limiter
 	// trustedProxies may name the client in X-Forwarded-For.
 	trustedProxies []netip.Prefix
+	// sealer and secretKey protect TOTP secrets and recovery codes.
+	sealer     *crypto.Sealer
+	secretKey  []byte
+	require2FA bool
 }
 
 // Options configure a Server.
@@ -53,6 +58,14 @@ type Options struct {
 	// Pinger answers the health check; nil means the store. Tests use it
 	// to simulate a database that is down.
 	Pinger Pinger
+	// Sealer seals TOTP secrets and SecretKey keys the recovery code
+	// hashes (both from PAPERLESS_GO_SECRET_KEY). Without them the 2FA
+	// endpoints answer 503; serve refuses to start without the key.
+	Sealer    *crypto.Sealer
+	SecretKey []byte
+	// Require2FA makes 2FA required for every user, not only admins
+	// (PAPERLESS_GO_REQUIRE_2FA).
+	Require2FA bool
 }
 
 // New creates a Server.
@@ -83,7 +96,7 @@ func New(st *store.Store, log *slog.Logger, opts Options) *Server {
 	}
 	return &Server{
 		store: st, db: pinger, log: log, allowedHosts: hosts, hasher: hasher, now: now, limiter: limiter,
-		trustedProxies: opts.TrustedProxies,
+		trustedProxies: opts.TrustedProxies, sealer: opts.Sealer, secretKey: opts.SecretKey, require2FA: opts.Require2FA,
 	}
 }
 
@@ -149,13 +162,15 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 const auditMonthsAhead = 3
 
 // housekeeping runs at start and then every hour until ctx ends: it creates
-// the audit log partitions ahead and deletes expired sessions.
+// the audit log partitions ahead and deletes expired sessions and 2FA
+// login challenges.
 func (s *Server) housekeeping(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
 		s.ensureAuditPartitions(ctx)
 		s.deleteExpiredSessions(ctx)
+		s.deleteExpiredTwoFactorChallenges(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -182,6 +197,16 @@ func (s *Server) deleteExpiredSessions(ctx context.Context) {
 		s.log.Warn("delete expired sessions", "err", err)
 	case n > 0:
 		s.log.Debug("deleted expired sessions", "count", n)
+	}
+}
+
+func (s *Server) deleteExpiredTwoFactorChallenges(ctx context.Context) {
+	n, err := s.store.DeleteExpiredTwoFactorChallenges(ctx, s.now())
+	switch {
+	case err != nil && ctx.Err() == nil:
+		s.log.Warn("delete expired two-factor challenges", "err", err)
+	case n > 0:
+		s.log.Debug("deleted expired two-factor challenges", "count", n)
 	}
 }
 

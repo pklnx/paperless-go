@@ -49,7 +49,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# No data directory: the first ./pgo migrate creates it, as on a real first start.
+# No data directory: the first ./pgo command (keygen) creates it as Docker
+# does, and ./pgo migrate makes it writable, as on a real first start.
 cat > .env <<ENV
 POSTGRES_PASSWORD=smoke-test
 DATA_DIR=$work/data
@@ -67,6 +68,12 @@ expect() { # expect <file> <extended regex>
 		exit 1
 	fi
 }
+
+echo "== keygen"
+./pgo keygen | tee "$work/out"
+key=$(tr -d '\r\n' < "$work/out")
+expect "$work/out" '^[A-Za-z0-9+/]{43}=$'
+echo "PAPERLESS_GO_SECRET_KEY=$key" >> .env
 
 echo "== migrate"
 ./pgo migrate | tee "$work/out"
@@ -144,6 +151,40 @@ echo "correct horse battery" | ./pgo user add smoke --admin --password-stdin | t
 expect "$work/out" 'admin "smoke" created'
 curl -fsS -c "$work/cookies" -H 'Content-Type: application/json' -H "Origin: $base" \
 	-d '{"username":"smoke","password":"correct horse battery"}' "$base/api/session" > "$work/out"
+expect "$work/out" '"name":"smoke"'
+# An admin without 2FA can only set it up.
+expect "$work/out" '"twoFactorRequired":true'
+status=$(curl -s -o "$work/out" -w '%{http_code}' -b "$work/cookies" "$base/api/users")
+if [ "$status" != 403 ]; then
+	echo "expected 403 before the 2FA setup, got $status" >&2
+	exit 1
+fi
+expect "$work/out" '"twoFactorSetupRequired":true'
+post() { # post <path> <json>: with the session cookie
+	curl -fsS -b "$work/cookies" -c "$work/cookies" -H 'Content-Type: application/json' -H "Origin: $base" -d "$2" "$base$1"
+}
+post /api/profile/2fa/setup '{}' > "$work/out"
+expect "$work/out" '"qrDataUrl":"data:image/png;base64,'
+secret=$(sed -n 's/.*"secret":"\([A-Z2-7]*\)".*/\1/p' "$work/out")
+# The current TOTP code (RFC 6238, SHA-1, 6 digits, 30 s).
+totp() {
+	python3 -I -c 'import base64,hmac,struct,sys,time
+k=base64.b32decode(sys.argv[1]+"="*(-len(sys.argv[1])%8))
+h=hmac.digest(k,struct.pack(">Q",int(time.time())//30),"sha1")
+o=h[-1]&15
+print("%06d"%((struct.unpack(">I",h[o:o+4])[0]&0x7fffffff)%1000000))' "$secret"
+}
+post /api/profile/2fa/confirm "{\"code\":\"$(totp)\"}" > "$work/out"
+expect "$work/out" '"recoveryCodes":\["[a-z0-9-]+"'
+recovery=$(sed -n 's/.*"recoveryCodes":\["\([a-z0-9-]*\)".*/\1/p' "$work/out")
+curl -fsS -b "$work/cookies" "$base/api/users" > "$work/out"
+expect "$work/out" '"twoFactorEnabled":true'
+expect "$work/out" '"self":true'
+# The next login needs the second factor; a recovery code works.
+curl -fsS -c "$work/cookies" -H 'Content-Type: application/json' -H "Origin: $base" \
+	-d '{"username":"smoke","password":"correct horse battery"}' "$base/api/session" > "$work/out"
+challenge=$(sed -n 's/.*"challenge":"\([^"]*\)".*/\1/p' "$work/out")
+post /api/session/2fa "{\"challenge\":\"$challenge\",\"code\":\"$recovery\"}" > "$work/out"
 expect "$work/out" '"name":"smoke"'
 curl -fsS -b "$work/cookies" "$base/api/users" > "$work/out"
 expect "$work/out" '"self":true'

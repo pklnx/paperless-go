@@ -14,6 +14,10 @@ Then copy the data directory with the tool you use for backups (Time Machine,
 restic, rsync). The dump is written with mode `0600` into a directory only
 you can read; keep it like the documents themselves.
 
+Keep `PAPERLESS_GO_SECRET_KEY` from `.env` too, ideally apart from the dump
+(a password manager): a restore with another key makes every two-factor
+login fail, and each user then needs `./pgo user reset-2fa NAME`.
+
 ### Restore
 
 Stop the web server, restore the data directory, then the dump:
@@ -46,6 +50,21 @@ pending.
 
 With a clone of the repository, `git pull` replaces the download, and
 `./pgo migrate` rebuilds the image.
+
+### Upgrade notes
+
+**Two-factor login (TOTP, #18).** The web server now refuses to start
+without `PAPERLESS_GO_SECRET_KEY`. Before you restart it:
+
+```sh
+./pgo keygen   # prints a key; add it to .env as PAPERLESS_GO_SECRET_KEY=...
+./pgo migrate
+docker compose up -d web
+```
+
+Admins set up two-factor login at their next login (nobody is locked out:
+the password still logs them in, to the setup). Rolling the migration back
+(`migrate down`) turns 2FA off for everybody.
 
 ### Versions
 

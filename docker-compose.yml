@@ -1,5 +1,6 @@
 # Usage (see README):
 #   cp .env.example .env              # then set POSTGRES_PASSWORD
+#   ./pgo keygen                      # put the key into .env as PAPERLESS_GO_SECRET_KEY
 #   ./pgo migrate                     # wrapper around `docker compose run`
 #   docker compose up -d web          # web UI on http://localhost:8080 (image built by ./pgo)
 #
@@ -48,6 +49,9 @@ services:
       PAPERLESS_GO_LOG_LEVEL: ${PAPERLESS_GO_LOG_LEVEL:-info}
       PAPERLESS_GO_ALLOWED_HOSTS: ${PAPERLESS_GO_ALLOWED_HOSTS:-localhost,127.0.0.1}
       PAPERLESS_GO_TRUSTED_PROXIES: ${PAPERLESS_GO_TRUSTED_PROXIES:-}
+      # Required: serve refuses to start without it (generate with ./pgo keygen).
+      PAPERLESS_GO_SECRET_KEY: ${PAPERLESS_GO_SECRET_KEY:-}
+      PAPERLESS_GO_REQUIRE_2FA: ${PAPERLESS_GO_REQUIRE_2FA:-false}
       PAPERLESS_GO_MAX_UPLOAD_SIZE: ${PAPERLESS_GO_MAX_UPLOAD_SIZE:-}
     volumes:
       - ${DATA_DIR:-./data}:/data

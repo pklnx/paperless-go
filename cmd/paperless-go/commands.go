@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pklnx/paperless-go/internal/config"
+	"github.com/pklnx/paperless-go/internal/crypto"
 	"github.com/pklnx/paperless-go/internal/store"
 	"github.com/pklnx/paperless-go/internal/web"
 )
@@ -134,6 +135,27 @@ func newMigrateStatusCmd() *cobra.Command {
 	}
 }
 
+func newKeygenCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "keygen",
+		Short: "Print a new random secret key for " + config.EnvSecretKey,
+		Long: `Print a new random 32-byte key, base64 encoded, for ` + config.EnvSecretKey + `.
+
+Generate it once and keep it: it encrypts the TOTP secrets and keys the
+recovery code hashes. A different key makes every two-factor login fail
+(reset them with "user reset-2fa").`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			key, err := crypto.GenerateKey()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), key)
+			return nil
+		},
+	}
+}
+
 func newServeCmd() *cobra.Command {
 	var listen string
 	cmd := &cobra.Command{
@@ -142,8 +164,14 @@ func newServeCmd() *cobra.Command {
 		Long: `Run the web server: the UI and the JSON API.
 
 Everything but the health check and the UI code needs a login; create the
-first admin with "user add NAME --admin". There is no two-factor login yet,
-so keep the server on 127.0.0.1 for now.
+first admin with "user add NAME --admin". Admins (and everybody with
+` + config.EnvRequire2FA + `=true) log in with a password and a TOTP code; they
+set it up at their first login. Keep the server on 127.0.0.1 until API keys
+and the security review are done (see the security docs).
+
+` + config.EnvSecretKey + ` is required: it encrypts the TOTP secrets.
+Generate it once with "keygen" and keep it with your backups; without it
+nobody with two-factor login can log in.
 
 Requests are only accepted with a Host header listed in
 ` + config.EnvAllowedHosts + ` (default: localhost, 127.0.0.1, ::1), which blocks DNS
@@ -157,6 +185,11 @@ network.`,
 				return err
 			}
 			defer a.close()
+			// Without the key nobody with 2FA could log in, admins included.
+			sealer, err := a.cfg.Sealer()
+			if err != nil {
+				return err
+			}
 			if err := checkDataDir(a.cfg.DataDir); err != nil {
 				return err
 			}
@@ -165,7 +198,10 @@ network.`,
 			}
 			log := newLogger(a.cfg.LogLevel)
 			warnWithoutUsers(cmd.Context(), a.store, log)
-			srv := web.New(a.store, log, web.Options{AllowedHosts: a.cfg.AllowedHosts, TrustedProxies: a.cfg.TrustedProxies})
+			srv := web.New(a.store, log, web.Options{
+				AllowedHosts: a.cfg.AllowedHosts, TrustedProxies: a.cfg.TrustedProxies,
+				Sealer: sealer, SecretKey: a.cfg.SecretKey, Require2FA: a.cfg.Require2FA,
+			})
 			log.Info("listening", "addr", listen, "version", version)
 			return srv.ListenAndServe(cmd.Context(), listen)
 		},

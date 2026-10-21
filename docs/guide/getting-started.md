@@ -5,8 +5,8 @@ the web server, and a one-shot container for commands.
 
 ::: warning Early development
 There are no documents and no OCR yet: after the login, the web UI shows
-that the server runs. Login has user name and password only, no second
-factor yet, so keep the web UI on `localhost` (the default). See the
+that the server runs. Keep the web UI on `localhost` (the default) until
+passkeys, API keys and the security review are done. See the
 [roadmap](../development/roadmap).
 :::
 
@@ -43,7 +43,16 @@ and a `README.txt`. Its `docker-compose.yml` uses the image of that release,
 `ghcr.io/pklnx/paperless-go:<version>`; nothing is built. See
 [Versions](./operations#versions) for the version numbers.
 
-Edit `.env` and set `POSTGRES_PASSWORD` to any long random password.
+Edit `.env` and set `POSTGRES_PASSWORD` to any long random password. Then
+generate the secret key that encrypts the two-factor secrets, and put the
+line it prints into `.env` as `PAPERLESS_GO_SECRET_KEY=...`:
+
+```sh
+./pgo keygen
+```
+
+The web server refuses to start without it. Keep the key with your backups
+and never change it (see [Secret key](../reference/security#secret-key)).
 
 Then create the database schema and start the web server. The first `./pgo`
 command downloads the images:
@@ -60,7 +69,11 @@ characters):
 ./pgo user add NAME --admin
 ```
 
-Open <http://localhost:8080> and log in. Admins add more users on the
+Open <http://localhost:8080> and log in. Admins must set up two-factor
+login first: scan the QR code with an authenticator app (any TOTP app, for
+example the one built into your password manager), enter the code and save
+the recovery codes it shows once. Every later login asks for a code. Admins
+add more users on the
 **Users** page or with `./pgo user add`; see [Command line](../reference/cli#users).
 
 ::: tip The `./pgo` wrapper

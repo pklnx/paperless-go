@@ -10,6 +10,7 @@ const user = (name: string, extra: Partial<ManagedUser> = {}): ManagedUser => ({
   admin: false,
   locked: false,
   mustChangePassword: false,
+  twoFactorEnabled: false,
   owned: none,
   createdAt: "2026-10-21T10:00:00Z",
   lastLoginAt: null,
@@ -56,6 +57,17 @@ describe("UsersPage", () => {
     expect(requests.find((r) => r.method === "PATCH")).toEqual({ method: "PATCH", url: "/api/users/lee", body: { locked: false } });
     fireEvent.click(within(rows[2]!).getByRole("button", { name: t.removeUser }));
     await vi.waitFor(() => expect(requests.some((r) => r.method === "DELETE" && r.url === "/api/users/lee")).toBe(true));
+  });
+
+  it("shows 2FA and resets it after confirmation", async () => {
+    stubServer([user("admin", { admin: true, self: true, twoFactorEnabled: true }), user("kim", { twoFactorEnabled: true }), user("lee")]);
+    render(<UsersPage />);
+    const rows = await screen.findAllByRole("listitem");
+    expect(within(rows[1]!).getByText(t.twoFactorShortOn)).toBeTruthy();
+    expect(within(rows[2]!).getByText(t.twoFactorShortOff)).toBeTruthy();
+    expect(within(rows[2]!).queryByRole("button", { name: t.twoFactorReset })).toBeNull();
+    fireEvent.click(within(rows[1]!).getByRole("button", { name: t.twoFactorReset }));
+    await vi.waitFor(() => expect(requests.some((r) => r.method === "POST" && r.url === "/api/users/kim/2fa/reset")).toBe(true));
   });
 
   it("adds a user and shows the generated password once", async () => {
