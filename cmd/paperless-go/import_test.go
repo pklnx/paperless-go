@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"image"
 	"image/png"
@@ -248,5 +249,58 @@ func TestImportSizeLimit(t *testing.T) {
 	}
 	if n := docCount(t, st, alice.ID); n != 1 {
 		t.Errorf("documents = %d, want 1", n)
+	}
+}
+
+// cancelAfter cancels the run once its output contains n "imported" lines.
+type cancelAfter struct {
+	bytes.Buffer
+	n      int
+	cancel context.CancelFunc
+}
+
+func (w *cancelAfter) Write(p []byte) (int, error) {
+	n, err := w.Buffer.Write(p)
+	if strings.Count(w.String(), ": imported\n") >= w.n {
+		w.cancel()
+	}
+	return n, err
+}
+
+// An interrupted run still records the documents it imported.
+func TestImportInterruptedKeepsAuditEntry(t *testing.T) {
+	st, url := importEnv(t)
+	alice := storetest.User(t, st, "alice", false)
+	dir := t.TempDir()
+	writeFile(t, dir, "a.pdf", tinyPDF("a"))
+	writeFile(t, dir, "b.pdf", tinyPDF("b"))
+	writeFile(t, dir, "c.pdf", tinyPDF("c"))
+
+	t.Setenv(config.EnvDatabaseURL, url)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := &cancelAfter{n: 1, cancel: cancel}
+	cmd := newRootCmd()
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"import", dir})
+	if err := cmd.ExecuteContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("interrupted run: %v\n%s", err, out.String())
+	}
+	if n := docCount(t, st, alice.ID); n != 1 {
+		t.Fatalf("%d documents after the interrupt, want 1", n)
+	}
+	var found bool
+	for _, r := range auditLog(t, st) {
+		if r.Action == "document.import" {
+			found = true
+			var d map[string]any
+			if err := json.Unmarshal(r.Details, &d); err != nil || d["interrupted"] != true || d["imported"] != float64(1) {
+				t.Errorf("details %s", r.Details)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no document.import entry for the interrupted run")
 	}
 }

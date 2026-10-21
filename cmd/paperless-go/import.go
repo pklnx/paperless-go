@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -99,22 +100,29 @@ func runImport(cmd *cobra.Command, path, userName string, dryRun bool) error {
 		verb = "would import"
 	}
 	fmt.Fprintf(imp.out, "%s: %d, duplicates: %d, failed: %d\n", verb, t.imported, t.duplicates, t.failed)
-	if walkErr != nil {
-		return walkErr
-	}
 
 	if !dryRun && t.imported > 0 {
 		// One summary entry per run, written after the documents (the
 		// documents are written one by one, each in its own transaction).
+		// An interrupted run still records what it imported, so the entry
+		// does not use the cancelled context.
 		e := cliEntry(cmd, "document.import")
 		e.SetTarget(store.TargetUser, strconv.FormatInt(owner.ID, 10), owner.Name)
 		e.Detail("path", path)
 		e.Detail("imported", t.imported)
 		e.Detail("duplicates", t.duplicates)
 		e.Detail("failed", t.failed)
-		if err := a.store.Audit(cmd.Context(), *e); err != nil {
+		if walkErr != nil {
+			e.Detail("interrupted", true)
+		}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 10*time.Second)
+		defer cancel()
+		if err := a.store.Audit(ctx, *e); err != nil {
 			return fmt.Errorf("%w; the documents were imported", err)
 		}
+	}
+	if walkErr != nil {
+		return walkErr
 	}
 	if t.failed > 0 {
 		return &exitError{code: 1, msg: fmt.Sprintf("%d of %d files failed", t.failed, t.imported+t.duplicates+t.failed)}
