@@ -15,7 +15,8 @@ SELECT u.id,
        (SELECT count(*) FROM documents d WHERE d.owner_id = u.id)::bigint AS documents,
        (SELECT count(*) FROM tags t WHERE t.owner_id = u.id)::bigint AS tags,
        (SELECT count(*) FROM correspondents c WHERE c.owner_id = u.id)::bigint AS correspondents,
-       (SELECT count(*) FROM document_types dt WHERE dt.owner_id = u.id)::bigint AS document_types
+       (SELECT count(*) FROM document_types dt WHERE dt.owner_id = u.id)::bigint AS document_types,
+       (SELECT count(*) FROM saved_views sv WHERE sv.owner_id = u.id)::bigint AS saved_views
 FROM users u
 `
 
@@ -25,10 +26,12 @@ type CountOwnedRowsRow struct {
 	Tags           int64
 	Correspondents int64
 	DocumentTypes  int64
+	SavedViews     int64
 }
 
 // The rows each user owns, per table. Any of them keeps the user from
-// being removed (ON DELETE RESTRICT).
+// being removed (ON DELETE RESTRICT). Deadlines hang off documents, so the
+// documents count covers them.
 func (q *Queries) CountOwnedRows(ctx context.Context) ([]CountOwnedRowsRow, error) {
 	rows, err := q.db.Query(ctx, countOwnedRows)
 	if err != nil {
@@ -44,6 +47,7 @@ func (q *Queries) CountOwnedRows(ctx context.Context) ([]CountOwnedRowsRow, erro
 			&i.Tags,
 			&i.Correspondents,
 			&i.DocumentTypes,
+			&i.SavedViews,
 		); err != nil {
 			return nil, err
 		}

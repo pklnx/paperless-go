@@ -33,6 +33,7 @@ type ownedJSON struct {
 	Tags           int64 `json:"tags"`
 	Correspondents int64 `json:"correspondents"`
 	DocumentTypes  int64 `json:"documentTypes"`
+	SavedViews     int64 `json:"savedViews"`
 }
 
 // requireAdmin rejects requests from users who are not admins.
@@ -63,7 +64,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		o := owned[u.ID]
 		out = append(out, adminUserJSON{
 			Name: u.Name, Admin: u.IsAdmin, Locked: u.LockedAt != nil, MustChangePassword: u.MustChangePassword,
-			Owned:     ownedJSON{Documents: o.Documents, Tags: o.Tags, Correspondents: o.Correspondents, DocumentTypes: o.DocumentTypes},
+			Owned:     ownedJSON{Documents: o.Documents, Tags: o.Tags, Correspondents: o.Correspondents, DocumentTypes: o.DocumentTypes, SavedViews: o.SavedViews},
 			CreatedAt: u.CreatedAt, LastLoginAt: u.LastLoginAt, Self: u.ID == userID(r),
 		})
 	}

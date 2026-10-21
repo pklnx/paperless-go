@@ -16,18 +16,19 @@ import (
 // ErrLastAdmin is returned when a change would leave no unlocked admin.
 var ErrLastAdmin = errors.New("store: this is the last admin who can log in")
 
-// ErrOwnsRows is returned when a user who still owns documents or metadata
-// would be removed. The error is an *OwnsRowsError with the counts.
+// ErrOwnsRows is returned when a user who still owns documents, metadata or
+// saved views would be removed. The error is an *OwnsRowsError with the counts.
 var ErrOwnsRows = errors.New("store: the user still owns documents or metadata")
 
-// OwnedRows counts the rows a user owns, per table.
+// OwnedRows counts the rows a user owns, per table. Deadlines belong to
+// documents and are not counted on their own.
 type OwnedRows struct {
-	Documents, Tags, Correspondents, DocumentTypes int64
+	Documents, Tags, Correspondents, DocumentTypes, SavedViews int64
 }
 
 // Total is the number of owned rows.
 func (o OwnedRows) Total() int64 {
-	return o.Documents + o.Tags + o.Correspondents + o.DocumentTypes
+	return o.Documents + o.Tags + o.Correspondents + o.DocumentTypes + o.SavedViews
 }
 
 // String lists the non-zero counts, like "3 documents, 1 tag".
@@ -41,6 +42,7 @@ func (o OwnedRows) String() string {
 		{o.Tags, "tag", "tags"},
 		{o.Correspondents, "correspondent", "correspondents"},
 		{o.DocumentTypes, "document type", "document types"},
+		{o.SavedViews, "saved view", "saved views"},
 	} {
 		switch {
 		case c.n == 1:
@@ -160,7 +162,7 @@ func ownedRowCounts(ctx context.Context, q *db.Queries) (map[int64]OwnedRows, er
 	}
 	out := make(map[int64]OwnedRows, len(rows))
 	for _, r := range rows {
-		out[r.ID] = OwnedRows{Documents: r.Documents, Tags: r.Tags, Correspondents: r.Correspondents, DocumentTypes: r.DocumentTypes}
+		out[r.ID] = OwnedRows{Documents: r.Documents, Tags: r.Tags, Correspondents: r.Correspondents, DocumentTypes: r.DocumentTypes, SavedViews: r.SavedViews}
 	}
 	return out, nil
 }

@@ -156,20 +156,28 @@ func TestDeleteUserOwnsRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	view, err := st.CreateSavedView(ctx, kimScope, store.SavedViewInput{Name: "Inbox"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A deadline hangs off a document: the documents count covers it.
+	if _, err := st.AddDeadline(ctx, kimScope, doc.ID, store.DeadlineInput{Date: now}); err != nil {
+		t.Fatal(err)
+	}
 
 	err = st.DeleteUser(ctx, kim.ID)
 	var owns *store.OwnsRowsError
 	if !errors.As(err, &owns) || !errors.Is(err, store.ErrOwnsRows) {
 		t.Fatalf("delete an owner: %v", err)
 	}
-	if want := (store.OwnedRows{Documents: 2, Tags: 1, Correspondents: 1, DocumentTypes: 1}); owns.Counts != want {
+	if want := (store.OwnedRows{Documents: 2, Tags: 1, Correspondents: 1, DocumentTypes: 1, SavedViews: 1}); owns.Counts != want {
 		t.Fatalf("counts %+v, want %+v", owns.Counts, want)
 	}
-	if got := owns.Error(); !strings.Contains(got, "2 documents, 1 tag, 1 correspondent, 1 document type") {
+	if got := owns.Error(); !strings.Contains(got, "2 documents, 1 tag, 1 correspondent, 1 document type, 1 saved view") {
 		t.Fatalf("message %q", got)
 	}
 	counts, err := st.OwnedRowCounts(ctx)
-	if err != nil || counts[kim.ID].Total() != 5 {
+	if err != nil || counts[kim.ID].Total() != 6 {
 		t.Fatalf("OwnedRowCounts: %v, %v", counts, err)
 	}
 
@@ -178,6 +186,7 @@ func TestDeleteUserOwnsRows(t *testing.T) {
 		st.DeleteTag(ctx, kimScope, tag.ID),
 		st.DeleteCorrespondent(ctx, kimScope, corr.ID),
 		st.DeleteDocumentType(ctx, kimScope, typ.ID),
+		st.DeleteSavedView(ctx, kimScope, view.ID),
 	} {
 		if del != nil {
 			t.Fatal(del)

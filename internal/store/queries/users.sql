@@ -46,12 +46,14 @@ DELETE FROM users WHERE id = $1;
 
 -- name: CountOwnedRows :many
 -- The rows each user owns, per table. Any of them keeps the user from
--- being removed (ON DELETE RESTRICT).
+-- being removed (ON DELETE RESTRICT). Deadlines hang off documents, so the
+-- documents count covers them.
 SELECT u.id,
        (SELECT count(*) FROM documents d WHERE d.owner_id = u.id)::bigint AS documents,
        (SELECT count(*) FROM tags t WHERE t.owner_id = u.id)::bigint AS tags,
        (SELECT count(*) FROM correspondents c WHERE c.owner_id = u.id)::bigint AS correspondents,
-       (SELECT count(*) FROM document_types dt WHERE dt.owner_id = u.id)::bigint AS document_types
+       (SELECT count(*) FROM document_types dt WHERE dt.owner_id = u.id)::bigint AS document_types,
+       (SELECT count(*) FROM saved_views sv WHERE sv.owner_id = u.id)::bigint AS saved_views
 FROM users u;
 
 -- name: CreateSession :exec

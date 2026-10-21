@@ -145,7 +145,7 @@ func TestDeleteUserWithDocuments(t *testing.T) {
 	f.loginOK("admin", "correct horse battery")
 	list := f.expect("GET", "/api/users", nil, 200)
 	users, _ := list["users"].([]any)
-	if len(users) != 3 || toJSON(users[2].(map[string]any)["owned"]) != `{"correspondents":0,"documentTypes":0,"documents":0,"tags":1}` {
+	if len(users) != 3 || toJSON(users[2].(map[string]any)["owned"]) != `{"correspondents":0,"documentTypes":0,"documents":0,"savedViews":0,"tags":1}` {
 		t.Fatalf("list: %v", list)
 	}
 	if out := f.expect("DELETE", "/api/users/kim", nil, 409); out["error"] != `"kim" still owns 1 tag; delete them first` {

@@ -345,10 +345,11 @@ func newUserAdminCmd(admin bool) *cobra.Command {
 func newUserRemoveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "remove NAME",
-		Short: "Delete a user who owns no documents or metadata",
+		Short: "Delete a user who owns no documents, metadata or saved views",
 		Long: `Delete a user and their logins. A user who still owns documents, tags,
-correspondents or document types cannot be removed: the command names how
-many of each. Delete them first, or lock the user instead.`,
+correspondents, document types or saved views cannot be removed: the
+command names how many of each. Delete them first, or lock the user
+instead.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, u, err := loadUser(cmd, args[0])
