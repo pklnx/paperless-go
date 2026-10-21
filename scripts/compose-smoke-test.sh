@@ -106,6 +106,7 @@ docker compose --progress quiet run --rm --no-deps -T --entrypoint sh paperless-
 expect "$work/out" '^uid 65532$'
 expect "$work/out" '^deu$'
 expect "$work/out" '^eng$'
+expect "$work/out" '^osd$' # --rotate-pages needs it
 expect "$work/out" '^ocrmypdf [0-9]+\.'
 expect "$work/out" '/heif-dec$'
 expect "$work/out" '^- libde265 '

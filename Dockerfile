@@ -40,7 +40,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 # Dependabot (docker ecosystem) proposes updates. --no-install-recommends keeps
 # it small, so libheif's HEVC decoder plugin is named explicitly: without it,
 # heif-dec (trixie also ships the old name heif-convert) cannot read HEIC.
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
     ca-certificates \

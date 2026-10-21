@@ -222,7 +222,10 @@ and `internal/store`, `cmd/paperless-go/users.go`).
 ## Container
 
 The runtime image is `debian:trixie-slim`, pinned by the digest of its
-multi-arch index (Dependabot proposes updates). The build stages stay on
+multi-arch index (Dependabot proposes updates). CI caches image layers in
+the GitHub Actions cache; the release build always rebuilds the runtime
+stage (`no-cache-filters: runtime`), so each release carries the current
+Debian security updates of the OCR tools. The build stages stay on
 Alpine: the web UI is built with Node, and the Go binary is cross-compiled
 with `CGO_ENABLED=0`, so it needs no system library and the arm64 image
 builds without emulation. Debian replaced the earlier distroless base because
