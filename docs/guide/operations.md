@@ -66,6 +66,9 @@ Set `PAPERLESS_GO_IMAGE` in `.env` to use another tag or your own build;
 pinning an exact version is safer than `latest`, because migrations only run
 with `./pgo migrate`. The images carry a provenance attestation and an SBOM.
 
+The image is based on Debian and contains OCRmyPDF with Tesseract (German
+and English), Poppler, img2pdf and libheif; it is about 145 MB to download.
+
 Pull requests that change the database schema carry the label
 `db-migration`. Back up the database before you upgrade past one of them.
 `./pgo migrate status` lists applied and pending migrations.

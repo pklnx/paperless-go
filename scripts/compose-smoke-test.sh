@@ -91,6 +91,26 @@ echo "== version"
 ./pgo --version | tee "$work/out"
 expect "$work/out" "^paperless-go version "
 
+# The OCR tools in the image, as the container user.
+echo "== OCR tools"
+docker compose --progress quiet run --rm --no-deps -T --entrypoint sh paperless-go -c '
+	set -e
+	echo "uid $(id -u)"
+	tesseract --list-langs
+	echo "ocrmypdf $(ocrmypdf --version)"
+	for tool in pdfinfo pdftotext pdftoppm img2pdf heif-dec; do
+		command -v "$tool"
+	done
+	heif-dec --list-decoders
+' | tee "$work/out"
+expect "$work/out" '^uid 65532$'
+expect "$work/out" '^deu$'
+expect "$work/out" '^eng$'
+expect "$work/out" '^osd$' # --rotate-pages needs it
+expect "$work/out" '^ocrmypdf [0-9]+\.'
+expect "$work/out" '/heif-dec$'
+expect "$work/out" '^- libde265 '
+
 echo "== web, as in README.txt"
 docker compose --progress quiet up -d --wait web
 WEB_PORT=$(docker compose port web 8080 | sed 's/.*://')
