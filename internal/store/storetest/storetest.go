@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/pklnx/paperless-go/internal/auth"
 	"github.com/pklnx/paperless-go/internal/store"
 )
 
@@ -67,10 +68,23 @@ func NewWithURL(t *testing.T) (*store.Store, string) {
 	return st, u.String()
 }
 
-// User creates a user in st and fails the test on error.
+// Password is the password of users created by User.
+const Password = "correct horse battery"
+
+// Hasher hashes with tiny Argon2id parameters, which keeps tests fast. The
+// hashes have the same format as real ones.
+var Hasher = auth.NewHasher(auth.Params{Memory: 64, Time: 1, Threads: 1})
+
+// User creates a user in st whose password is Password and fails the test
+// on error.
 func User(t *testing.T, st *store.Store, name string, admin bool) *store.User {
 	t.Helper()
-	u, err := st.CreateUser(context.Background(), name, admin)
+	ctx := context.Background()
+	hash, err := Hasher.Hash(ctx, Password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := st.CreateUser(ctx, name, hash, admin)
 	if err != nil {
 		t.Fatalf("create user %q: %v", name, err)
 	}

@@ -4,12 +4,16 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
-	"github.com/pklnx/paperless-go/internal/web/ui"
+	"github.com/pklnx/paperless-go/internal/auth"
+	"github.com/pklnx/paperless-go/internal/store"
 )
 
 // DefaultAllowedHosts are the host names accepted without configuration.
@@ -22,9 +26,15 @@ type Pinger interface {
 
 // Server holds the dependencies of the HTTP handlers.
 type Server struct {
+	store        *store.Store
 	db           Pinger
 	log          *slog.Logger
 	allowedHosts []string
+	hasher       *auth.Hasher
+	now          func() time.Time
+	limiter      *auth.Limiter
+	// trustedProxies may name the client in X-Forwarded-For.
+	trustedProxies []netip.Prefix
 }
 
 // Options configure a Server.
@@ -32,10 +42,21 @@ type Options struct {
 	// AllowedHosts are host names (without port) accepted in the Host
 	// header; empty means DefaultAllowedHosts.
 	AllowedHosts []string
+	// Hasher verifies passwords; nil means auth.DefaultParams.
+	Hasher *auth.Hasher
+	// Now is the clock for sessions and login limits; nil means time.Now.
+	// Tests inject one.
+	Now func() time.Time
+	// TrustedProxies are reverse proxies whose X-Forwarded-For names the
+	// client (PAPERLESS_GO_TRUSTED_PROXIES), for the login limits.
+	TrustedProxies []netip.Prefix
+	// Pinger answers the health check; nil means the store. Tests use it
+	// to simulate a database that is down.
+	Pinger Pinger
 }
 
 // New creates a Server.
-func New(db Pinger, log *slog.Logger, opts Options) *Server {
+func New(st *store.Store, log *slog.Logger, opts Options) *Server {
 	allowed := opts.AllowedHosts
 	if len(allowed) == 0 {
 		allowed = DefaultAllowedHosts
@@ -46,21 +67,35 @@ func New(db Pinger, log *slog.Logger, opts Options) *Server {
 			hosts = append(hosts, h)
 		}
 	}
-	return &Server{db: db, log: log, allowedHosts: hosts}
+	hasher := opts.Hasher
+	if hasher == nil {
+		hasher = auth.NewHasher(auth.DefaultParams)
+	}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
+	limiter := auth.NewLimiter()
+	limiter.SetClock(now)
+	var pinger Pinger = st
+	if opts.Pinger != nil {
+		pinger = opts.Pinger
+	}
+	return &Server{
+		store: st, db: pinger, log: log, allowedHosts: hosts, hasher: hasher, now: now, limiter: limiter,
+		trustedProxies: opts.TrustedProxies,
+	}
 }
 
 // Handler returns the HTTP handler with all routes and protections.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.handleHealth)
-	// Unknown API paths answer in JSON, not with the UI.
-	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
-		s.fail(w, r, http.StatusNotFound, "not found", nil)
-	})
-	uiHandler := ui.Handler()
-	mux.Handle("GET /{$}", uiHandler)
-	mux.Handle("GET /assets/", uiHandler)
-	return s.protect(mux)
+	accessOf := make(map[string]access)
+	for _, rt := range s.routes() {
+		mux.Handle(rt.pattern, rt.handler)
+		accessOf[rt.pattern] = rt.access
+	}
+	return s.protect(s.authenticate(mux, accessOf))
 }
 
 // handleHealth answers 200 while the database answers, for container
@@ -79,6 +114,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
+// handleUnknownAPI answers paths under /api/ without a route in JSON, not
+// with the UI. It is session-only like every route without an access, so
+// without a login it answers 401 and does not reveal which paths exist.
+func (s *Server) handleUnknownAPI(w http.ResponseWriter, r *http.Request) {
+	s.fail(w, r, http.StatusNotFound, "not found", nil)
+}
+
 // ListenAndServe serves until ctx is cancelled, then shuts down gracefully.
 func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	srv := &http.Server{
@@ -91,6 +133,7 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
+	go s.housekeeping(ctx)
 	select {
 	case err := <-errc:
 		return err
@@ -98,6 +141,32 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
+	}
+}
+
+// housekeeping deletes expired sessions at start and then every hour until
+// ctx ends.
+func (s *Server) housekeeping(ctx context.Context) {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		s.deleteExpiredSessions(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func (s *Server) deleteExpiredSessions(ctx context.Context) {
+	now := s.now()
+	n, err := s.store.DeleteExpiredSessions(ctx, now, now.Add(-auth.IdleTimeout))
+	switch {
+	case err != nil && ctx.Err() == nil:
+		s.log.Warn("delete expired sessions", "err", err)
+	case n > 0:
+		s.log.Debug("deleted expired sessions", "count", n)
 	}
 }
 
@@ -120,4 +189,26 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, status int, msg st
 		s.log.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 	}
 	s.writeJSON(w, status, apiError{Error: msg})
+}
+
+func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		s.fail(w, r, http.StatusNotFound, "not found", err)
+		return
+	}
+	s.fail(w, r, http.StatusInternalServerError, "internal error", err)
+}
+
+// maxBody is far more than any JSON request of the API needs.
+const maxBody = 64 << 10
+
+// decode reads a JSON body into v and answers 400 if it cannot.
+func (s *Server) decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(io.LimitReader(r.Body, maxBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		s.fail(w, r, http.StatusBadRequest, "invalid request body: "+err.Error(), nil)
+		return false
+	}
+	return true
 }

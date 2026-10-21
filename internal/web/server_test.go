@@ -15,8 +15,10 @@ type fakeDB struct{ err error }
 
 func (f fakeDB) Ping(context.Context) error { return f.err }
 
+// newTestServer is a server without a database: only requests that need
+// neither a session nor a user reach a handler.
 func newTestServer(db Pinger, hosts ...string) http.Handler {
-	return New(db, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{AllowedHosts: hosts}).Handler()
+	return New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{AllowedHosts: hosts, Pinger: db}).Handler()
 }
 
 func serve(h http.Handler, r *http.Request) *httptest.ResponseRecorder {
@@ -95,8 +97,9 @@ func TestStateChangingRequests(t *testing.T) {
 		origin, fetchSite, mediaType string
 		want                         int
 	}{
-		{"same origin, JSON", "http://localhost:8080", "", "application/json", http.StatusNotFound},
-		{"same origin by Sec-Fetch-Site", "", "same-origin", "application/json; charset=utf-8", http.StatusNotFound},
+		// Passed the checks, refused by the login check.
+		{"same origin, JSON", "http://localhost:8080", "", "application/json", http.StatusUnauthorized},
+		{"same origin by Sec-Fetch-Site", "", "same-origin", "application/json; charset=utf-8", http.StatusUnauthorized},
 		{"other origin", "http://evil.example", "", "application/json", http.StatusForbidden},
 		{"other port", "http://localhost:9999", "", "application/json", http.StatusForbidden},
 		{"no origin", "", "", "application/json", http.StatusForbidden},
@@ -110,10 +113,12 @@ func TestStateChangingRequests(t *testing.T) {
 	}
 }
 
-func TestUnknownAPIPathIsJSON(t *testing.T) {
+// Without a login, an unknown API path answers 401 like every other
+// session route, so the answer does not reveal which paths exist.
+func TestUnknownAPIPathNeedsLogin(t *testing.T) {
 	rec := serve(newTestServer(fakeDB{}), httptest.NewRequest("GET", "http://localhost/api/documents", nil))
-	if rec.Code != http.StatusNotFound || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") ||
-		rec.Body.String() != "{\"error\":\"not found\"}\n" {
+	if rec.Code != http.StatusUnauthorized || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") ||
+		rec.Body.String() != "{\"error\":\"login required\"}\n" {
 		t.Errorf("unknown API path: %d %q %q", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
 	}
 }
@@ -128,7 +133,8 @@ func TestUIRoutes(t *testing.T) {
 	if rec.Header().Get("Content-Security-Policy") == "" {
 		t.Error("/: no Content-Security-Policy")
 	}
-	if rec := serve(h, httptest.NewRequest("GET", "http://localhost/somewhere", nil)); rec.Code != http.StatusNotFound {
-		t.Errorf("/somewhere: status %d, want 404", rec.Code)
+	// Other paths are session-only: 401 without a login.
+	if rec := serve(h, httptest.NewRequest("GET", "http://localhost/somewhere", nil)); rec.Code != http.StatusUnauthorized {
+		t.Errorf("/somewhere: status %d, want 401", rec.Code)
 	}
 }

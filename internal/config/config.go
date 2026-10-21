@@ -3,6 +3,8 @@ package config
 
 import (
 	"errors"
+	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 )
@@ -15,6 +17,9 @@ const (
 	// EnvAllowedHosts is a comma-separated list of host names the web server
 	// accepts in the Host header (protection against DNS rebinding).
 	EnvAllowedHosts = "PAPERLESS_GO_ALLOWED_HOSTS"
+	// EnvTrustedProxies lists the reverse proxies (CIDR or single addresses)
+	// whose X-Forwarded-For names the client; empty trusts none.
+	EnvTrustedProxies = "PAPERLESS_GO_TRUSTED_PROXIES"
 )
 
 // Config holds the application configuration.
@@ -25,6 +30,9 @@ type Config struct {
 	LogLevel string
 	// AllowedHosts for the web server; empty means the server's defaults.
 	AllowedHosts []string
+	// TrustedProxies may name the client in X-Forwarded-For, for the login
+	// limits.
+	TrustedProxies []netip.Prefix
 }
 
 // DataDirFromEnv returns the data directory, ./data unless set.
@@ -50,8 +58,43 @@ func Load() (*Config, error) {
 			cfg.AllowedHosts = append(cfg.AllowedHosts, h)
 		}
 	}
+	var err error
+	if cfg.TrustedProxies, err = ParseNetworks(EnvTrustedProxies, os.Getenv(EnvTrustedProxies)); err != nil {
+		return nil, err
+	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
 	return cfg, nil
+}
+
+// ParseNetworks reads a comma-separated list of CIDR networks and single
+// addresses; env names the variable in errors. IPv4-mapped IPv6 addresses
+// become IPv4.
+func ParseNetworks(env, v string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, n := range strings.Split(v, ",") {
+		if n = strings.TrimSpace(n); n == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(n)
+		if err != nil {
+			a, aerr := netip.ParseAddr(n)
+			if aerr != nil {
+				return nil, fmt.Errorf("%s: want CIDR networks or addresses like 172.16.0.0/12 or 192.0.2.10, got %q", env, n)
+			}
+			p = netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen())
+		}
+		out = append(out, netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-unmapBits(p)).Masked())
+	}
+	return out, nil
+}
+
+// unmapBits is how many prefix bits an IPv4-mapped IPv6 prefix loses when
+// it is turned into an IPv4 prefix.
+func unmapBits(p netip.Prefix) int {
+	if p.Addr().Is4In6() {
+		return 96
+	}
+	return 0
 }

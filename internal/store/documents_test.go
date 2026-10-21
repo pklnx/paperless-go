@@ -286,7 +286,7 @@ func TestCreateUser(t *testing.T) {
 	if u.ID <= 0 || u.Name != "alice" || !u.IsAdmin || u.CreatedAt.IsZero() {
 		t.Errorf("user = %+v", u)
 	}
-	if _, err := st.CreateUser(context.Background(), "alice", false); !errors.Is(err, store.ErrNameTaken) {
+	if _, err := st.CreateUser(context.Background(), "alice", "hash", false); !errors.Is(err, store.ErrNameTaken) {
 		t.Errorf("second alice: %v, want ErrNameTaken", err)
 	}
 	if _, err := st.CreateDocument(context.Background(), store.Scope{All: true}, newDoc("a")); err == nil {
