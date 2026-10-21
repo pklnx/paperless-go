@@ -1,0 +1,172 @@
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { ApiError, UNAUTHORIZED_EVENT, retryAfter, sessionApi, type SessionState, type User } from "./api";
+import { PasswordForm } from "./Profile";
+import { ThemeToggle } from "./ThemeToggle";
+import { t } from "./i18n";
+import logo from "./logo.svg";
+import { input, primary } from "./styles";
+
+/** How to create the first admin, shown while no user exists. */
+export const firstAdminCommand = "./pgo user add NAME --admin";
+
+type GateState = SessionState | { loading: true } | { error: string };
+
+interface Props {
+  /** Renders the app for a logged-in user. */
+  children: (user: User, logout: () => void) => ReactNode;
+}
+
+/**
+ * Shows the app only with a valid session. Without one it shows the login
+ * page, or how to create the first admin. Any 401 from the API (the session
+ * ended) brings the login page back.
+ */
+export function AuthGate({ children }: Props) {
+  const [state, setState] = useState<GateState>({ loading: true });
+
+  const check = useCallback(() => {
+    sessionApi.get().then(setState, (err: unknown) => setState({ error: err instanceof Error ? err.message : String(err) }));
+  }, []);
+
+  useEffect(() => {
+    check();
+    window.addEventListener(UNAUTHORIZED_EVENT, check);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, check);
+  }, [check]);
+
+  if ("loading" in state) return <Centered>{t.loading}</Centered>;
+  if ("error" in state) {
+    return (
+      <Centered>
+        <p className="text-danger">{t.failed(state.error)}</p>
+        <button type="button" className={`${primary} self-start`} onClick={check}>
+          {t.retry}
+        </button>
+      </Centered>
+    );
+  }
+  if (state.user) {
+    const logout = () => {
+      sessionApi.logout().finally(() => setState({ user: null, setupRequired: false }));
+    };
+    if (state.user.mustChangePassword) {
+      const user = state.user;
+      return (
+        <Centered>
+          <Brand />
+          <h2 className="font-semibold">{t.chooseOwnPassword}</h2>
+          <p>{t.chooseOwnPasswordText}</p>
+          <PasswordForm done={() => setState({ user: { ...user, mustChangePassword: false } })} />
+          <button type="button" className="self-start text-accent-ink hover:underline" onClick={logout}>
+            {t.logOut}
+          </button>
+        </Centered>
+      );
+    }
+    return children(state.user, logout);
+  }
+  if (state.setupRequired) return <SetupNotice check={check} />;
+  return <LoginPage done={(user) => setState({ user })} />;
+}
+
+function Centered({ children }: { children: ReactNode }) {
+  return (
+    <div className="relative flex min-h-full items-center justify-center p-4">
+      <div className="absolute top-3 right-3">
+        <ThemeToggle />
+      </div>
+      <div className="flex w-full max-w-sm flex-col gap-4 text-sm">{children}</div>
+    </div>
+  );
+}
+
+function Brand() {
+  return (
+    <div className="flex items-center gap-3">
+      <img src={logo} alt="" width={40} height={40} />
+      <h1 className="text-lg font-semibold">{t.appName}</h1>
+    </div>
+  );
+}
+
+function loginError(err: unknown): string {
+  const wait = retryAfter(err);
+  if (wait !== null) return t.tooManyAttempts(wait);
+  if (err instanceof ApiError && err.status === 401) return t.wrongLogin;
+  if (err instanceof ApiError && err.status === 403 && err.message.includes("locked")) return t.userLocked;
+  return t.failed(err instanceof Error ? err.message : String(err));
+}
+
+function LoginPage({ done }: { done: (user: User) => void }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      done(await sessionApi.login(username, password));
+    } catch (err) {
+      setError(loginError(err));
+      setPassword("");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Centered>
+      <Brand />
+      <form className="flex flex-col gap-3" onSubmit={submit}>
+        <label className="flex flex-col gap-1">
+          {t.userName}
+          <input
+            className={input}
+            required
+            autoFocus
+            autoCapitalize="none"
+            autoComplete="username"
+            spellCheck={false}
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          {t.fieldPassword}
+          <input
+            className={input}
+            type="password"
+            required
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </label>
+        {error && (
+          <p role="alert" className="text-danger">
+            {error}
+          </p>
+        )}
+        <button type="submit" className={`${primary} mt-1`} disabled={busy}>
+          {busy ? t.loggingIn : t.logIn}
+        </button>
+      </form>
+    </Centered>
+  );
+}
+
+function SetupNotice({ check }: { check: () => void }) {
+  return (
+    <Centered>
+      <Brand />
+      <h2 className="font-semibold">{t.setupTitle}</h2>
+      <p>{t.setupText}</p>
+      <pre className="overflow-x-auto rounded-md bg-surface-hover px-3 py-2">{firstAdminCommand}</pre>
+      <button type="button" className={`${primary} self-start`} onClick={check}>
+        {t.checkAgain}
+      </button>
+    </Centered>
+  );
+}

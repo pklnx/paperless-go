@@ -20,8 +20,9 @@ export in the app's archive folder format.
 
 Early development. This version is the foundation: one Go binary with the
 command line and the web server, PostgreSQL with migrations, the embedded web
-UI shell, Docker Compose, CI and releases. Documents, OCR, search and login
-follow step by step; see the
+UI shell, Docker Compose, CI, releases and login with user name and
+password. Documents, OCR, search and two-factor login follow step by step;
+see the
 [roadmap](https://pklnx.github.io/paperless-go/development/roadmap).
 
 ## Planned features
@@ -59,8 +60,9 @@ cp .env.example .env    # set POSTGRES_PASSWORD
 docker compose up -d web
 ```
 
-Open <http://localhost:8080>. The web UI is only reachable from your own
-computer, and must stay so until login exists; see
+Create the first admin with `./pgo user add NAME --admin`, then open
+<http://localhost:8080> and log in. The web UI is only reachable from your
+own computer, and must stay so until two-factor login exists; see
 [Security](https://pklnx.github.io/paperless-go/reference/security).
 
 More in the [getting started guide](https://pklnx.github.io/paperless-go/guide/getting-started).

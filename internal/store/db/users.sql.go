@@ -7,26 +7,440 @@ package db
 
 import (
 	"context"
+	"time"
 )
 
+const countOwnedRows = `-- name: CountOwnedRows :many
+SELECT u.id,
+       (SELECT count(*) FROM documents d WHERE d.owner_id = u.id)::bigint AS documents,
+       (SELECT count(*) FROM tags t WHERE t.owner_id = u.id)::bigint AS tags,
+       (SELECT count(*) FROM correspondents c WHERE c.owner_id = u.id)::bigint AS correspondents,
+       (SELECT count(*) FROM document_types dt WHERE dt.owner_id = u.id)::bigint AS document_types,
+       (SELECT count(*) FROM saved_views sv WHERE sv.owner_id = u.id)::bigint AS saved_views
+FROM users u
+`
+
+type CountOwnedRowsRow struct {
+	ID             int64
+	Documents      int64
+	Tags           int64
+	Correspondents int64
+	DocumentTypes  int64
+	SavedViews     int64
+}
+
+// The rows each user owns, per table. Any of them keeps the user from
+// being removed (ON DELETE RESTRICT). Deadlines hang off documents, so the
+// documents count covers them.
+func (q *Queries) CountOwnedRows(ctx context.Context) ([]CountOwnedRowsRow, error) {
+	rows, err := q.db.Query(ctx, countOwnedRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountOwnedRowsRow
+	for rows.Next() {
+		var i CountOwnedRowsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Documents,
+			&i.Tags,
+			&i.Correspondents,
+			&i.DocumentTypes,
+			&i.SavedViews,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countUsers = `-- name: CountUsers :one
+SELECT count(*) FROM users
+`
+
+func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countUsers)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const createSession = `-- name: CreateSession :exec
+INSERT INTO sessions (id, user_id, created_at, last_seen_at, expires_at, user_agent)
+VALUES ($1, $2, $3, $3, $4, $5)
+`
+
+type CreateSessionParams struct {
+	ID        []byte
+	UserID    int64
+	Now       time.Time
+	ExpiresAt time.Time
+	UserAgent string
+}
+
+func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) error {
+	_, err := q.db.Exec(ctx, createSession,
+		arg.ID,
+		arg.UserID,
+		arg.Now,
+		arg.ExpiresAt,
+		arg.UserAgent,
+	)
+	return err
+}
+
 const createUser = `-- name: CreateUser :one
-INSERT INTO users (name, is_admin) VALUES ($1, $2)
-RETURNING id, name, is_admin, created_at
+INSERT INTO users (name, password_hash, is_admin, must_change_password)
+VALUES ($1, $2, $3, $4)
+RETURNING id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at
 `
 
 type CreateUserParams struct {
-	Name    string
-	IsAdmin bool
+	Name               string
+	PasswordHash       string
+	IsAdmin            bool
+	MustChangePassword bool
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
-	row := q.db.QueryRow(ctx, createUser, arg.Name, arg.IsAdmin)
+	row := q.db.QueryRow(ctx, createUser,
+		arg.Name,
+		arg.PasswordHash,
+		arg.IsAdmin,
+		arg.MustChangePassword,
+	)
 	var i User
 	err := row.Scan(
 		&i.ID,
 		&i.Name,
 		&i.IsAdmin,
 		&i.CreatedAt,
+		&i.PasswordHash,
+		&i.MustChangePassword,
+		&i.LockedAt,
+		&i.PasswordChangedAt,
+		&i.LastLoginAt,
 	)
 	return i, err
+}
+
+const deleteExpiredSessions = `-- name: DeleteExpiredSessions :execrows
+DELETE FROM sessions WHERE expires_at <= $1 OR last_seen_at <= $2
+`
+
+type DeleteExpiredSessionsParams struct {
+	Now        time.Time
+	IdleCutoff time.Time
+}
+
+func (q *Queries) DeleteExpiredSessions(ctx context.Context, arg DeleteExpiredSessionsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredSessions, arg.Now, arg.IdleCutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteOtherSessions = `-- name: DeleteOtherSessions :exec
+DELETE FROM sessions WHERE user_id = $1 AND id <> $2
+`
+
+type DeleteOtherSessionsParams struct {
+	UserID int64
+	ID     []byte
+}
+
+// All sessions of a user except one.
+func (q *Queries) DeleteOtherSessions(ctx context.Context, arg DeleteOtherSessionsParams) error {
+	_, err := q.db.Exec(ctx, deleteOtherSessions, arg.UserID, arg.ID)
+	return err
+}
+
+const deleteSession = `-- name: DeleteSession :exec
+DELETE FROM sessions WHERE id = $1
+`
+
+func (q *Queries) DeleteSession(ctx context.Context, id []byte) error {
+	_, err := q.db.Exec(ctx, deleteSession, id)
+	return err
+}
+
+const deleteUser = `-- name: DeleteUser :execrows
+DELETE FROM users WHERE id = $1
+`
+
+func (q *Queries) DeleteUser(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteUser, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteUserSessions = `-- name: DeleteUserSessions :exec
+DELETE FROM sessions WHERE user_id = $1
+`
+
+func (q *Queries) DeleteUserSessions(ctx context.Context, userID int64) error {
+	_, err := q.db.Exec(ctx, deleteUserSessions, userID)
+	return err
+}
+
+const getSession = `-- name: GetSession :one
+SELECT s.id, s.last_seen_at, u.id AS user_id, u.name, u.is_admin, u.must_change_password
+FROM sessions s
+JOIN users u ON u.id = s.user_id
+WHERE s.id = $1
+  AND s.expires_at > $2
+  AND s.last_seen_at > $3
+  AND u.locked_at IS NULL
+`
+
+type GetSessionParams struct {
+	ID         []byte
+	Now        time.Time
+	IdleCutoff time.Time
+}
+
+type GetSessionRow struct {
+	ID                 []byte
+	LastSeenAt         time.Time
+	UserID             int64
+	Name               string
+	IsAdmin            bool
+	MustChangePassword bool
+}
+
+// A session is valid while it has not expired, was used after the idle
+// cutoff and its user is not locked.
+func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (GetSessionRow, error) {
+	row := q.db.QueryRow(ctx, getSession, arg.ID, arg.Now, arg.IdleCutoff)
+	var i GetSessionRow
+	err := row.Scan(
+		&i.ID,
+		&i.LastSeenAt,
+		&i.UserID,
+		&i.Name,
+		&i.IsAdmin,
+		&i.MustChangePassword,
+	)
+	return i, err
+}
+
+const getUserByID = `-- name: GetUserByID :one
+SELECT id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at FROM users WHERE id = $1
+`
+
+func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
+	row := q.db.QueryRow(ctx, getUserByID, id)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.IsAdmin,
+		&i.CreatedAt,
+		&i.PasswordHash,
+		&i.MustChangePassword,
+		&i.LockedAt,
+		&i.PasswordChangedAt,
+		&i.LastLoginAt,
+	)
+	return i, err
+}
+
+const getUserByName = `-- name: GetUserByName :one
+SELECT id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at FROM users WHERE name = $1
+`
+
+func (q *Queries) GetUserByName(ctx context.Context, name string) (User, error) {
+	row := q.db.QueryRow(ctx, getUserByName, name)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.IsAdmin,
+		&i.CreatedAt,
+		&i.PasswordHash,
+		&i.MustChangePassword,
+		&i.LockedAt,
+		&i.PasswordChangedAt,
+		&i.LastLoginAt,
+	)
+	return i, err
+}
+
+const listUsers = `-- name: ListUsers :many
+SELECT id, name, is_admin, created_at, password_hash, must_change_password, locked_at, password_changed_at, last_login_at FROM users ORDER BY name
+`
+
+func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
+	rows, err := q.db.Query(ctx, listUsers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []User
+	for rows.Next() {
+		var i User
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+			&i.PasswordHash,
+			&i.MustChangePassword,
+			&i.LockedAt,
+			&i.PasswordChangedAt,
+			&i.LastLoginAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockActiveAdmins = `-- name: LockActiveAdmins :many
+SELECT id FROM users WHERE is_admin AND locked_at IS NULL FOR UPDATE
+`
+
+// Locks the rows of all unlocked admins, so that two changes cannot remove
+// the last two admins at the same time.
+func (q *Queries) LockActiveAdmins(ctx context.Context) ([]int64, error) {
+	rows, err := q.db.Query(ctx, lockActiveAdmins)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockUser = `-- name: LockUser :one
+SELECT id FROM users WHERE id = $1 FOR UPDATE
+`
+
+// Locks a user's row for a change that must not race with a removal.
+func (q *Queries) LockUser(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRow(ctx, lockUser, id)
+	var id_2 int64
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
+const recordLogin = `-- name: RecordLogin :exec
+UPDATE users SET last_login_at = $1::timestamptz WHERE id = $2
+`
+
+type RecordLoginParams struct {
+	At time.Time
+	ID int64
+}
+
+func (q *Queries) RecordLogin(ctx context.Context, arg RecordLoginParams) error {
+	_, err := q.db.Exec(ctx, recordLogin, arg.At, arg.ID)
+	return err
+}
+
+const rehashUserPassword = `-- name: RehashUserPassword :execrows
+UPDATE users SET password_hash = $2 WHERE id = $1
+`
+
+type RehashUserPasswordParams struct {
+	ID           int64
+	PasswordHash string
+}
+
+// Replaces the hash with one of the same password (new parameters); unlike
+// SetUserPassword it keeps the sessions.
+func (q *Queries) RehashUserPassword(ctx context.Context, arg RehashUserPasswordParams) (int64, error) {
+	result, err := q.db.Exec(ctx, rehashUserPassword, arg.ID, arg.PasswordHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const setUserAdmin = `-- name: SetUserAdmin :execrows
+UPDATE users SET is_admin = $2 WHERE id = $1
+`
+
+type SetUserAdminParams struct {
+	ID      int64
+	IsAdmin bool
+}
+
+func (q *Queries) SetUserAdmin(ctx context.Context, arg SetUserAdminParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setUserAdmin, arg.ID, arg.IsAdmin)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const setUserLocked = `-- name: SetUserLocked :execrows
+UPDATE users SET locked_at = CASE WHEN $2::boolean THEN coalesce(locked_at, now()) END WHERE id = $1
+`
+
+type SetUserLockedParams struct {
+	ID     int64
+	Locked bool
+}
+
+func (q *Queries) SetUserLocked(ctx context.Context, arg SetUserLockedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setUserLocked, arg.ID, arg.Locked)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const setUserPassword = `-- name: SetUserPassword :execrows
+UPDATE users SET password_hash = $2, must_change_password = $3, password_changed_at = now() WHERE id = $1
+`
+
+type SetUserPasswordParams struct {
+	ID                 int64
+	PasswordHash       string
+	MustChangePassword bool
+}
+
+func (q *Queries) SetUserPassword(ctx context.Context, arg SetUserPasswordParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setUserPassword, arg.ID, arg.PasswordHash, arg.MustChangePassword)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const touchSession = `-- name: TouchSession :exec
+UPDATE sessions SET last_seen_at = $1 WHERE id = $2
+`
+
+type TouchSessionParams struct {
+	Now time.Time
+	ID  []byte
+}
+
+func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) error {
+	_, err := q.db.Exec(ctx, touchSession, arg.Now, arg.ID)
+	return err
 }

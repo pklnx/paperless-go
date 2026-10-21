@@ -4,9 +4,10 @@ paperless-go runs with Docker Compose: one container for PostgreSQL, one for
 the web server, and a one-shot container for commands.
 
 ::: warning Early development
-There are no documents, no OCR and no login yet: the web UI shows that the
-server runs. Keep the web UI on `localhost` (the default) until user accounts
-exist. See the [roadmap](../development/roadmap).
+There are no documents and no OCR yet: after the login, the web UI shows
+that the server runs. Login has user name and password only, no second
+factor yet, so keep the web UI on `localhost` (the default). See the
+[roadmap](../development/roadmap).
 :::
 
 ## Requirements
@@ -52,7 +53,15 @@ command downloads the images:
 docker compose up -d web
 ```
 
-Open <http://localhost:8080>.
+Create the first admin; the command asks for a password (at least 12
+characters):
+
+```sh
+./pgo user add NAME --admin
+```
+
+Open <http://localhost:8080> and log in. Admins add more users on the
+**Users** page or with `./pgo user add`; see [Command line](../reference/cli#users).
 
 ::: tip The `./pgo` wrapper
 `./pgo` runs `docker compose run --rm paperless-go …`. It starts PostgreSQL

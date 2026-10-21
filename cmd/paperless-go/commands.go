@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"text/tabwriter"
 	"time"
 
@@ -139,6 +140,10 @@ func newServeCmd() *cobra.Command {
 		Short: "Run the web server (UI and JSON API)",
 		Long: `Run the web server: the UI and the JSON API.
 
+Everything but the health check and the UI code needs a login; create the
+first admin with "user add NAME --admin". There is no two-factor login yet,
+so keep the server on 127.0.0.1 for now.
+
 Requests are only accepted with a Host header listed in
 ` + config.EnvAllowedHosts + ` (default: localhost, 127.0.0.1, ::1), which blocks DNS
 rebinding; state-changing requests must come from the same origin. Use HTTPS
@@ -158,13 +163,27 @@ network.`,
 				return err
 			}
 			log := newLogger(a.cfg.LogLevel)
-			srv := web.New(a.store, log, web.Options{AllowedHosts: a.cfg.AllowedHosts})
+			warnWithoutUsers(cmd.Context(), a.store, log)
+			srv := web.New(a.store, log, web.Options{AllowedHosts: a.cfg.AllowedHosts, TrustedProxies: a.cfg.TrustedProxies})
 			log.Info("listening", "addr", listen, "version", version)
 			return srv.ListenAndServe(cmd.Context(), listen)
 		},
 	}
 	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:8080", "address to listen on")
 	return cmd
+}
+
+// warnWithoutUsers logs how to create the first admin while no user
+// exists: until then nobody can log in.
+func warnWithoutUsers(ctx context.Context, st *store.Store, log *slog.Logger) {
+	n, err := st.CountUsers(ctx)
+	if err != nil {
+		log.Warn("count users", "err", err)
+		return
+	}
+	if n == 0 {
+		log.Warn("no users yet; create the first admin to log in", "command", commandName()+" user add NAME --admin")
+	}
 }
 
 // checkSchema refuses to serve a database with pending migrations, where the

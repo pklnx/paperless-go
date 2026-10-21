@@ -94,6 +94,15 @@ type SavedView struct {
 	ModifiedAt time.Time
 }
 
+type Session struct {
+	ID         []byte
+	UserID     int64
+	CreatedAt  time.Time
+	LastSeenAt time.Time
+	ExpiresAt  time.Time
+	UserAgent  string
+}
+
 type Tag struct {
 	ID         pgtype.UUID
 	OwnerID    int64
@@ -108,8 +117,13 @@ type Tag struct {
 }
 
 type User struct {
-	ID        int64
-	Name      string
-	IsAdmin   bool
-	CreatedAt time.Time
+	ID                 int64
+	Name               string
+	IsAdmin            bool
+	CreatedAt          time.Time
+	PasswordHash       string
+	MustChangePassword bool
+	LockedAt           *time.Time
+	PasswordChangedAt  time.Time
+	LastLoginAt        *time.Time
 }
