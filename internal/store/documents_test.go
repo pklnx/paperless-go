@@ -272,9 +272,11 @@ func TestDeleteUserWithRowsFails(t *testing.T) {
 	}
 	defer func() { _ = conn.Close(ctx) }()
 	_, err = conn.Exec(ctx, "DELETE FROM users WHERE id = $1", alice.ID)
+	// ON DELETE RESTRICT: PostgreSQL 18 reports restrict_violation (23001),
+	// older versions foreign_key_violation (23503).
 	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
-		t.Fatalf("delete user with documents: %v, want foreign key violation", err)
+	if !errors.As(err, &pgErr) || (pgErr.Code != "23001" && pgErr.Code != "23503") {
+		t.Fatalf("delete user with documents: %v, want a restrict or foreign key violation", err)
 	}
 }
 
