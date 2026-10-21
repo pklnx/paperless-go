@@ -60,7 +60,7 @@ describe("LogPage", () => {
     expect(await screen.findByText(t.auditAction("user.lock"))).toBeTruthy();
     expect(screen.getByText(new RegExp(t.logCLIBy("patrick").replace(/[()]/g, "\\$&")))).toBeTruthy();
     expect(screen.getByText(/bob/, { selector: "span" })).toBeTruthy();
-    expect(screen.getByText("“nobody”, password, unknown_user")).toBeTruthy();
+    expect(screen.getByText(`${t.logTriedName("nobody")}, ${t.auditCode("password")}, ${t.auditCode("unknown_user")}`)).toBeTruthy();
     expect(screen.getByText(t.logWho)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: t.logMore }));

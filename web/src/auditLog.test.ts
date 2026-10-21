@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { auditQuery, type AuditEntry } from "./api";
 import { commandOperator, defaultFilter, entryDetail, shortUserAgent, targetLabel } from "./auditLog";
+import { messagesFor } from "./i18n";
 
 const entry = (action: string, more: Partial<AuditEntry> = {}): AuditEntry => ({
   id: 1,
@@ -34,13 +35,19 @@ describe("entry texts", () => {
     expect(targetLabel(entry("auth.login"))).toBe("");
   });
 
-  it("shows a login's method, reason and tried name", () => {
-    expect(entryDetail(entry("auth.login_failed", { details: { method: "password", reason: "unknown_user", name: "bob" } }))).toBe(
-      "“bob”, password, unknown_user",
-    );
-    expect(entryDetail(entry("auth.login", { details: { method: "password" } }))).toBe("password");
-    expect(entryDetail(entry("user.add", { details: { admin: true } }))).toBe("admin");
-    expect(entryDetail(entry("user.add", { details: { admin: false } }))).toBe("");
+  it("shows a login's method, reason and tried name, translated", () => {
+    const en = messagesFor("en");
+    const de = messagesFor("de");
+    const failed = entry("auth.login_failed", { details: { method: "password", reason: "unknown_user", name: "bob" } });
+    expect(entryDetail(failed, en)).toBe("“bob”, password, unknown user");
+    expect(entryDetail(failed, de)).toBe("„bob“, Passwort, unbekannter Benutzer");
+    expect(entryDetail(entry("auth.login_failed", { details: { reason: "wrong_password" } }), de)).toBe("falsches Passwort");
+    expect(entryDetail(entry("auth.login_failed", { details: { reason: "locked" } }), en)).toBe("user locked");
+    expect(entryDetail(entry("auth.login", { details: { method: "password" } }), en)).toBe("password");
+    expect(entryDetail(entry("user.add", { details: { admin: true } }), de)).toBe("Admin");
+    expect(entryDetail(entry("user.add", { details: { admin: false } }), en)).toBe("");
+    // A code the UI does not know yet is shown as it is.
+    expect(entryDetail(entry("auth.login", { details: { method: "passkey" } }), de)).toBe("passkey");
   });
 
   it("names the operator of a command", () => {

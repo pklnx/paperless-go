@@ -90,7 +90,7 @@ func newAuditExportCmd() *cobra.Command {
 DATE is YYYY-MM-DD (midnight UTC) or RFC 3339. --until is exclusive; a plain
 date includes that day. --action takes a group (` + strings.Join(store.AuditGroups(), ", ") + `)
 or an action such as auth.login, and is repeatable. --user selects the
-entries of a current user.
+entries of a user, also of a removed one by the name the entries keep.
 
 The export itself is recorded as audit.export. FILE must not exist; it is
 written with mode 0600 and appears when it is complete. In CSV, a cell that
@@ -145,14 +145,17 @@ spreadsheets do not run it as a formula.`,
 			if userName != "" {
 				name := auth.NormalizeUserName(userName)
 				u, err := a.store.GetUserByName(cmd.Context(), name)
-				if errors.Is(err, store.ErrNotFound) {
-					return fmt.Errorf("user %q not found", name)
-				}
-				if err != nil {
+				switch {
+				case errors.Is(err, store.ErrNotFound):
+					// A deleted user's entries keep the name.
+					f.UserName = &name
+					e.Detail("user", name)
+				case err != nil:
 					return err
+				default:
+					f.UserID = &u.ID
+					e.SetTarget(store.TargetUser, strconv.FormatInt(u.ID, 10), u.Name)
 				}
-				f.UserID = &u.ID
-				e.SetTarget(store.TargetUser, strconv.FormatInt(u.ID, 10), u.Name)
 			}
 			// A command that cannot record the export does not export.
 			if err := a.store.Audit(cmd.Context(), *e); err != nil {

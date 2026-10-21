@@ -34,7 +34,8 @@ Removing a user keeps their entries.
 The **Log** page in the web UI shows your own entries, newest first, for the
 last 30 days by default; choose a period and a kind of action to see others.
 Admins see every user's entries and can narrow them to one user or to the
-command line.
+command line. A removed user's entries stay, under the name the user had, and
+the filter by name still finds them.
 
 Admins can export a period as CSV or JSON lines:
 

@@ -254,11 +254,18 @@ func TestAuditExportCommand(t *testing.T) {
 		{"--since", "yesterday", "--format", "csv"},
 		{"--since", today, "--until", "2020-01-01", "--format", "csv"},
 		{"--since", today, "--format", "csv", "--action", "nonsense"},
-		{"--since", today, "--format", "csv", "--user", "nobody"},
 	} {
 		if err := export(args...); err == nil {
 			t.Errorf("%v accepted", args)
 		}
+	}
+	// A removed user's entries keep the name, and --user still finds them.
+	if err := st.DeleteUser(ctx, anna.ID); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(t, url, "audit", "export", "--since", today, "--user", "anna", "--format", "jsonl"); err != nil ||
+		strings.Count(out, "\n") != 1 || !strings.Contains(out, `"auth.login_failed"`) {
+		t.Fatalf("removed anna: %q, %v", out, err)
 	}
 	// Every export that ran, also an empty one, is recorded.
 	var exports int
@@ -267,7 +274,7 @@ func TestAuditExportCommand(t *testing.T) {
 			exports++
 		}
 	}
-	if exports != 4 {
-		t.Errorf("%d audit.export entries, want 4", exports)
+	if exports != 5 {
+		t.Errorf("%d audit.export entries, want 5", exports)
 	}
 }

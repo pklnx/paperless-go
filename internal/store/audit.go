@@ -375,7 +375,9 @@ func AuditActionPatterns(filters []string) ([]string, error) {
 type AuditFilter struct {
 	Since, Until time.Time
 	UserID       *int64
-	Actions      []string // groups or actions; none means all
+	// UserName selects a deleted user's entries by the name they carry.
+	UserName *string
+	Actions  []string // groups or actions; none means all
 }
 
 // AuditRecord is a stored audit entry.
@@ -405,7 +407,7 @@ func (s *Store) ExportAudit(ctx context.Context, f AuditFilter, fn func(AuditRec
 	afterAt, afterID := f.Since, int64(0)
 	for {
 		rows, err := s.q.ExportAuditEntries(ctx, db.ExportAuditEntriesParams{
-			Since: f.Since, Until: f.Until, UserID: f.UserID, Patterns: patterns,
+			Since: f.Since, Until: f.Until, UserID: f.UserID, UserName: f.UserName, Patterns: patterns,
 			AfterAt: afterAt, AfterID: afterID, Lim: batch,
 		})
 		if err != nil {
@@ -437,8 +439,10 @@ type AuditPage struct {
 	// Viewer is the scope of who reads the log: without All, only the
 	// viewer's own entries (Viewer.UserID) are listed; with All (admins),
 	// every user's, optionally narrowed to UserID or Actor.
-	Viewer       Scope
-	UserID       *int64
+	Viewer Scope
+	UserID *int64
+	// UserName selects a deleted user's entries by the name they carry.
+	UserName     *string
 	Actor        string
 	Since, Until time.Time
 	Actions      []string // groups or actions; none means all
@@ -457,7 +461,7 @@ func (s *Store) ListAudit(ctx context.Context, p AuditPage) ([]AuditRecord, erro
 	var rows []db.ListAuditEntriesRow
 	if p.Viewer.All {
 		rows, err = s.q.ListAuditEntries(ctx, db.ListAuditEntriesParams{
-			Since: p.Since, Until: p.Until, UserID: p.UserID, Actor: nullString(p.Actor),
+			Since: p.Since, Until: p.Until, UserID: p.UserID, UserName: p.UserName, Actor: nullString(p.Actor),
 			Patterns: patterns, CursorAt: p.CursorAt, CursorID: p.CursorID, Lim: clampInt32(p.Limit),
 		})
 	} else {

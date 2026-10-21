@@ -1,4 +1,5 @@
 import type { AuditEntry, AuditFilter } from "./api";
+import { t, type Messages } from "./i18n";
 
 /** The action groups of the filter, as the API names them. */
 export const auditGroups = ["login", "users", "profile", "export"] as const;
@@ -17,11 +18,12 @@ export function targetLabel(e: AuditEntry): string {
 }
 
 /** The detail worth a glance: a login's method and reason, a failed login's name, the role of a new user. */
-export function entryDetail(e: AuditEntry): string {
+export function entryDetail(e: AuditEntry, m: Messages = t): string {
   const d = e.details;
   const str = (v: unknown) => (typeof v === "string" ? v : "");
-  if (e.action.startsWith("auth.")) return [str(d.name) && `“${str(d.name)}”`, str(d.method), str(d.reason)].filter(Boolean).join(", ");
-  if (e.action === "user.add" && d.admin === true) return "admin";
+  const code = (v: unknown) => (str(v) ? m.auditCode(str(v)) : "");
+  if (e.action.startsWith("auth.")) return [str(d.name) && m.logTriedName(str(d.name)), code(d.method), code(d.reason)].filter(Boolean).join(", ");
+  if (e.action === "user.add" && d.admin === true) return m.auditCode("admin");
   return "";
 }
 

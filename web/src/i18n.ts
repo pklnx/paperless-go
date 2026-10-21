@@ -89,7 +89,7 @@ const en = {
   // Log page
   log: "Log",
   logTitle: "Log",
-  logOwnNote: "Your logins, failed logins and logouts, and the changes to your login. Admins can see it too.",
+  logOwnNote: "Your logins, failed logins and logouts, and the changes you made to your password. Admins see these entries too.",
   logAdminNote: "Every user's logins, failed logins and logouts, and every change of users and passwords, also from the command line.",
   logFrom: "From",
   logTo: "To",
@@ -105,6 +105,10 @@ const en = {
   logCLI: "command line",
   logCLIBy: (who: string) => `command line (${who})`,
   logViaKey: (name: string) => `with API key “${name}”`,
+  logTriedName: (name: string) => `“${name}”`,
+  /** A code in an entry's details: a login method, the reason of a failed login, a role. */
+  auditCode: (c: string): string =>
+    ({ password: "password", wrong_password: "wrong password", unknown_user: "unknown user", locked: "user locked", admin: "admin" })[c] ?? c,
   auditAction: (a: string): string =>
     ({
       "auth.login": "Logged in",
@@ -207,7 +211,8 @@ const de: Messages = {
 
   log: "Protokoll",
   logTitle: "Protokoll",
-  logOwnNote: "Deine Anmeldungen, fehlgeschlagenen Anmeldungen und Abmeldungen und die Änderungen an deiner Anmeldung. Admins können es ebenfalls sehen.",
+  logOwnNote:
+    "Deine Anmeldungen, fehlgeschlagenen Anmeldungen und Abmeldungen und die Änderungen, die du an deinem Passwort vorgenommen hast. Admins sehen diese Einträge ebenfalls.",
   logAdminNote: "Die Anmeldungen, fehlgeschlagenen Anmeldungen und Abmeldungen aller Benutzer und jede Änderung an Benutzern und Passwörtern, auch über die Kommandozeile.",
   logFrom: "Von",
   logTo: "Bis",
@@ -223,6 +228,9 @@ const de: Messages = {
   logCLI: "Kommandozeile",
   logCLIBy: (who) => `Kommandozeile (${who})`,
   logViaKey: (name) => `mit API-Schlüssel „${name}“`,
+  logTriedName: (name) => `„${name}“`,
+  auditCode: (c) =>
+    ({ password: "Passwort", wrong_password: "falsches Passwort", unknown_user: "unbekannter Benutzer", locked: "Benutzer gesperrt", admin: "Admin" })[c] ?? c,
   auditAction: (a) =>
     ({
       "auth.login": "Angemeldet",

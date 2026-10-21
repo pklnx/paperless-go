@@ -306,7 +306,10 @@ func TestAuditPage(t *testing.T) {
 	if rows := auditEntries(t, f.expect("GET", "/api/audit?action=auth.login", nil, 200)); len(rows) != 2 {
 		t.Fatalf("exact action: %v", rows)
 	}
-	f.expect("GET", "/api/audit?user=nobody", nil, 404)
+	// A name without a user selects the entries carrying it: none here.
+	if rows := auditEntries(t, f.expect("GET", "/api/audit?user=nobody", nil, 200)); len(rows) != 0 {
+		t.Fatalf("user=nobody: %v", rows)
+	}
 
 	// Pages of 1 add up to everything, newest first, without repeats.
 	var ids []float64
@@ -345,6 +348,10 @@ func TestAuditPage(t *testing.T) {
 	}
 	if rows := auditEntries(t, f.expect("GET", "/api/audit", nil, 200)); len(rows) != 4 || rows[2]["user"] != "alice" {
 		t.Fatalf("after removing alice: %v", rows)
+	}
+	// and the filter by name still finds them.
+	if rows := auditEntries(t, f.expect("GET", "/api/audit?user=alice", nil, 200)); len(rows) != 2 || rows[0]["user"] != "alice" {
+		t.Fatalf("user=alice after removing her: %v", rows)
 	}
 }
 

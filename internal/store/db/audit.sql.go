@@ -53,16 +53,18 @@ FROM audit_log l
 LEFT JOIN audit_user_agents ua ON ua.id = l.user_agent_id
 WHERE l.at >= $1 AND l.at < $2
   AND ($3::bigint IS NULL OR l.user_id = $3)
-  AND l.action LIKE ANY ($4::text[])
-  AND (l.at, l.id) > ($5::timestamptz, $6::bigint)
+  AND ($4::text IS NULL OR l.user_name = $4)
+  AND l.action LIKE ANY ($5::text[])
+  AND (l.at, l.id) > ($6::timestamptz, $7::bigint)
 ORDER BY l.at, l.id
-LIMIT $7
+LIMIT $8
 `
 
 type ExportAuditEntriesParams struct {
 	Since    time.Time
 	Until    time.Time
 	UserID   *int64
+	UserName *string
 	Patterns []string
 	AfterAt  time.Time
 	AfterID  int64
@@ -87,12 +89,13 @@ type ExportAuditEntriesRow struct {
 }
 
 // One batch of the entries in [since, until) after (after_at, after_id), oldest
-// first, optionally of one user.
+// first, optionally of one user (by id, or by name for a deleted user).
 func (q *Queries) ExportAuditEntries(ctx context.Context, arg ExportAuditEntriesParams) ([]ExportAuditEntriesRow, error) {
 	rows, err := q.db.Query(ctx, exportAuditEntries,
 		arg.Since,
 		arg.Until,
 		arg.UserID,
+		arg.UserName,
 		arg.Patterns,
 		arg.AfterAt,
 		arg.AfterID,
@@ -179,17 +182,19 @@ FROM audit_log l
 LEFT JOIN audit_user_agents ua ON ua.id = l.user_agent_id
 WHERE l.at >= $1 AND l.at < $2
   AND ($3::bigint IS NULL OR l.user_id = $3)
-  AND ($4::text IS NULL OR l.actor = $4)
-  AND l.action LIKE ANY ($5::text[])
-  AND ($6::timestamptz IS NULL OR (l.at, l.id) < ($6, $7::bigint))
+  AND ($4::text IS NULL OR l.user_name = $4)
+  AND ($5::text IS NULL OR l.actor = $5)
+  AND l.action LIKE ANY ($6::text[])
+  AND ($7::timestamptz IS NULL OR (l.at, l.id) < ($7, $8::bigint))
 ORDER BY l.at DESC, l.id DESC
-LIMIT $8
+LIMIT $9
 `
 
 type ListAuditEntriesParams struct {
 	Since    time.Time
 	Until    time.Time
 	UserID   *int64
+	UserName *string
 	Actor    *string
 	Patterns []string
 	CursorAt *time.Time
@@ -214,12 +219,14 @@ type ListAuditEntriesRow struct {
 }
 
 // A page of every user's entries in [since, until), newest first, for
-// admins; optionally one user's or one actor's.
+// admins; optionally one user's (by id, or by name for a deleted user) or
+// one actor's.
 func (q *Queries) ListAuditEntries(ctx context.Context, arg ListAuditEntriesParams) ([]ListAuditEntriesRow, error) {
 	rows, err := q.db.Query(ctx, listAuditEntries,
 		arg.Since,
 		arg.Until,
 		arg.UserID,
+		arg.UserName,
 		arg.Actor,
 		arg.Patterns,
 		arg.CursorAt,

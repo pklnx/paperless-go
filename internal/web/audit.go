@@ -149,12 +149,17 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if userName != "" {
-		u, err := s.store.GetUserByName(r.Context(), auth.NormalizeUserName(userName))
-		if err != nil {
+		name := auth.NormalizeUserName(userName)
+		u, err := s.store.GetUserByName(r.Context(), name)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			p.UserName = &name // a deleted user's entries keep the name
+		case err != nil:
 			s.failStore(w, r, err)
 			return
+		default:
+			p.UserID = &u.ID
 		}
-		p.UserID = &u.ID
 	}
 	if c := q.Get("cursor"); c != "" {
 		at, id, err := decodeAuditCursor(c)

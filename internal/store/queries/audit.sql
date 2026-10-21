@@ -26,13 +26,14 @@ SELECT audit_log_ensure_partitions(@months_ahead::integer)::integer;
 
 -- name: ExportAuditEntries :many
 -- One batch of the entries in [since, until) after (after_at, after_id), oldest
--- first, optionally of one user.
+-- first, optionally of one user (by id, or by name for a deleted user).
 SELECT l.id, l.at, l.actor, l.user_id, l.user_name, l.api_key_id, l.api_key_name, l.action,
        l.target_type, l.target_id, l.target_name, l.client_ip, ua.user_agent, l.details
 FROM audit_log l
 LEFT JOIN audit_user_agents ua ON ua.id = l.user_agent_id
 WHERE l.at >= @since AND l.at < @until
   AND (sqlc.narg(user_id)::bigint IS NULL OR l.user_id = sqlc.narg(user_id))
+  AND (sqlc.narg(user_name)::text IS NULL OR l.user_name = sqlc.narg(user_name))
   AND l.action LIKE ANY (@patterns::text[])
   AND (l.at, l.id) > (@after_at::timestamptz, @after_id::bigint)
 ORDER BY l.at, l.id
@@ -40,13 +41,15 @@ LIMIT @lim;
 
 -- name: ListAuditEntries :many
 -- A page of every user's entries in [since, until), newest first, for
--- admins; optionally one user's or one actor's.
+-- admins; optionally one user's (by id, or by name for a deleted user) or
+-- one actor's.
 SELECT l.id, l.at, l.actor, l.user_id, l.user_name, l.api_key_name, l.action,
        l.target_type, l.target_id, l.target_name, l.client_ip, ua.user_agent, l.details
 FROM audit_log l
 LEFT JOIN audit_user_agents ua ON ua.id = l.user_agent_id
 WHERE l.at >= @since AND l.at < @until
   AND (sqlc.narg(user_id)::bigint IS NULL OR l.user_id = sqlc.narg(user_id))
+  AND (sqlc.narg(user_name)::text IS NULL OR l.user_name = sqlc.narg(user_name))
   AND (sqlc.narg(actor)::text IS NULL OR l.actor = sqlc.narg(actor))
   AND l.action LIKE ANY (@patterns::text[])
   AND (sqlc.narg(cursor_at)::timestamptz IS NULL OR (l.at, l.id) < (sqlc.narg(cursor_at), @cursor_id::bigint))
