@@ -54,6 +54,12 @@ describe("entry texts", () => {
     expect(entryDetail(entry("auth.login", { details: { method: "passkey" } }), de)).toBe("passkey");
   });
 
+  it("names the refused 2FA change and why", () => {
+    const failed = entry("profile.2fa_failed", { details: { attempted: "profile.2fa_disable", reason: "wrong_password" } });
+    expect(entryDetail(failed, messagesFor("en"))).toBe("Disabled 2FA, wrong password");
+    expect(entryDetail(failed, messagesFor("de"))).toBe(`${messagesFor("de").auditAction("profile.2fa_disable")}, falsches Passwort`);
+  });
+
   it("names the operator of a command", () => {
     expect(commandOperator(entry("user.add", { actor: "cli", details: { operator: "patrick", os_user: "nonroot" } }))).toBe("patrick");
     expect(commandOperator(entry("user.add", { actor: "cli", details: { os_user: "nonroot" } }))).toBe("nonroot");

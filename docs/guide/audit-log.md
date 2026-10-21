@@ -19,6 +19,7 @@ change or delete entries.
 | `profile.password_change` | A user changes their own password. |
 | `profile.2fa_enable`, `profile.2fa_disable` | A user turns their two-factor login on or off. |
 | `profile.recovery_codes` | A user creates new recovery codes. |
+| `profile.2fa_failed` | A wrong code or password when a user sets up, turns off or renews their two-factor login. |
 | `audit.export` | `audit export` writes the log out. |
 
 Each entry has the time, the user (by the name they had then), the client

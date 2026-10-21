@@ -29,6 +29,7 @@ export function entryDetail(e: AuditEntry, m: Messages = t): string {
   if (e.action.startsWith("auth."))
     return [str(d.name) && m.logTriedName(str(d.name)), code(d.method), code(d.factor), code(d.reason)].filter(Boolean).join(", ");
   if (e.action === "profile.2fa_disable" || e.action === "profile.recovery_codes") return code(d.factor);
+  if (e.action === "profile.2fa_failed") return [str(d.attempted) && m.auditAction(str(d.attempted)), code(d.reason)].filter(Boolean).join(", ");
   if (e.action === "user.add" && d.admin === true) return m.auditCode("admin");
   return "";
 }

@@ -358,7 +358,8 @@ func newUserReset2FACmd() *cobra.Command {
 are deleted, and the user is logged out everywhere. Use it when someone lost
 their authenticator and their recovery codes. It also works for the last
 admin. Admins (and everybody with ` + config.EnvRequire2FA + `=true) must set up
-2FA again at their next login.`,
+2FA again at their next login. Until then the password alone protects the
+account, so the user should log in and set it up right away.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, u, err := loadUser(cmd, args[0])

@@ -79,6 +79,12 @@ from the internet.
 - **Lost authenticator and codes.** Another admin resets it on the Users
   page, or anyone with shell access runs `./pgo user reset-2fa NAME`; this
   works for the last admin too. It logs the user out everywhere.
+- **Until 2FA is set up**, after a reset or for an admin from before 2FA
+  existed, the password alone protects the account, and whoever logs in
+  first registers their authenticator. Such a user should log in and set up
+  2FA right away. Every reset is in the audit log.
+- **Refused codes and passwords** when a logged-in user changes their own
+  2FA count towards the login limits and are logged as `profile.2fa_failed`.
 
 ## Secret key
 

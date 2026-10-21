@@ -380,6 +380,11 @@ func TestAuditTwoFactor(t *testing.T) {
 	f.loginOK("alice", alicePw)
 	var secret string
 	var recovery []string
+	one("wrong code to confirm", "profile.2fa_failed", alice,
+		map[string]any{"attempted": "profile.2fa_enable", "reason": "second_factor"}, func() {
+			f.expect("POST", "/api/profile/2fa/setup", nil, 200)
+			f.expect("POST", "/api/profile/2fa/confirm", map[string]string{"code": "000000"}, 401)
+		})
 	one("enable", "profile.2fa_enable", alice, nil, func() { secret, recovery = f.setUpTOTP() })
 	f.expect("DELETE", "/api/session", nil, 204)
 
@@ -393,6 +398,19 @@ func TestAuditTwoFactor(t *testing.T) {
 	one("login with a recovery code", "auth.login", alice,
 		map[string]any{"method": "2fa", "factor": "recovery_code", "recoveryCodesLeft": float64(auth.RecoveryCodeCount - 1)}, func() {
 			f.secondStep(f.passwordStep("alice", alicePw), recovery[0], 200)
+		})
+	// Refused codes and passwords in the profile are recorded too.
+	one("wrong code for new recovery codes", "profile.2fa_failed", alice,
+		map[string]any{"attempted": "profile.recovery_codes", "reason": "second_factor"}, func() {
+			f.expect("POST", "/api/profile/2fa/recovery-codes", map[string]string{"code": "000000"}, 401)
+		})
+	one("wrong password to disable", "profile.2fa_failed", alice,
+		map[string]any{"attempted": "profile.2fa_disable", "reason": "wrong_password"}, func() {
+			f.expect("DELETE", "/api/profile/2fa", map[string]string{"currentPassword": "wrong horse battery", "code": f.code(secret)}, 401)
+		})
+	one("wrong code to disable", "profile.2fa_failed", alice,
+		map[string]any{"attempted": "profile.2fa_disable", "reason": "second_factor"}, func() {
+			f.expect("DELETE", "/api/profile/2fa", map[string]string{"currentPassword": alicePw, "code": "000000"}, 401)
 		})
 	var fresh []any
 	one("new recovery codes", "profile.recovery_codes", alice, map[string]any{"factor": "totp"}, func() {

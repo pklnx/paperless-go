@@ -166,6 +166,7 @@ func (s *Server) handleConfirmTwoFactor(w http.ResponseWriter, r *http.Request) 
 	err = s.store.ConfirmTwoFactorSetup(withAudit(r, s.auditEntry(r, "profile.2fa_enable")), sess.UserID, auth.NormalizeTOTPCode(in.Code), s.now(), s.sealer, codes, s.secretKey)
 	if errors.Is(err, store.ErrTwoFactorInvalid) {
 		s.limiter.Fail(sess.UserName, s.clientAddr(r))
+		s.auditSecondFactorFailed(r, "profile.2fa_enable", reasonSecondFactor)
 		s.fail(w, r, http.StatusUnauthorized, errInvalidSecondFactor, nil)
 		return
 	}
@@ -254,12 +255,14 @@ func (s *Server) handleTwoFactorLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // secondFactorFailed answers a refused second factor of the logged-in user
-// (turning 2FA off, new recovery codes) and counts it for the login limits.
-func (s *Server) secondFactorFailed(w http.ResponseWriter, r *http.Request, err error) {
+// (turning 2FA off, new recovery codes: attempted names the change), counts
+// it for the login limits and records it.
+func (s *Server) secondFactorFailed(w http.ResponseWriter, r *http.Request, attempted string, err error) {
 	sess := currentSession(r)
 	switch {
 	case errors.Is(err, store.ErrTwoFactorInvalid):
 		s.limiter.Fail(sess.UserName, s.clientAddr(r))
+		s.auditSecondFactorFailed(r, attempted, reasonSecondFactor)
 		s.fail(w, r, http.StatusUnauthorized, errInvalidSecondFactor, nil)
 	case errors.Is(err, store.ErrConflict):
 		s.fail(w, r, http.StatusConflict, errTwoFactorChanged, nil)
@@ -301,13 +304,14 @@ func (s *Server) handleDisableTwoFactor(w http.ResponseWriter, r *http.Request) 
 	}
 	if !ok {
 		s.limiter.Fail(sess.UserName, s.clientAddr(r))
+		s.auditSecondFactorFailed(r, "profile.2fa_disable", reasonWrongPassword)
 		s.fail(w, r, http.StatusUnauthorized, "the current password is wrong", nil)
 		return
 	}
 	err = s.store.DisableOwnTwoFactor(withAudit(r, s.auditEntry(r, "profile.2fa_disable")), sess.UserID, auth.NormalizeTOTPCode(in.Code),
 		s.now(), s.sealer, s.secretKey, s.twoFactorRequired, auth.HashSessionToken(sessionToken(r)))
 	if err != nil {
-		s.secondFactorFailed(w, r, err)
+		s.secondFactorFailed(w, r, "profile.2fa_disable", err)
 		return
 	}
 	s.limiter.Succeed(sess.UserName)
@@ -335,7 +339,7 @@ func (s *Server) handleRegenerateRecoveryCodes(w http.ResponseWriter, r *http.Re
 	err = s.store.ReplaceRecoveryCodes(withAudit(r, s.auditEntry(r, "profile.recovery_codes")), sess.UserID, auth.NormalizeTOTPCode(in.Code),
 		s.now(), s.sealer, codes, s.secretKey)
 	if err != nil {
-		s.secondFactorFailed(w, r, err)
+		s.secondFactorFailed(w, r, "profile.recovery_codes", err)
 		return
 	}
 	s.limiter.Succeed(sess.UserName)
