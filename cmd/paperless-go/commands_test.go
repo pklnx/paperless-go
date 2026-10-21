@@ -53,8 +53,9 @@ func TestMigrateCommands(t *testing.T) {
 		t.Errorf("checkSchema with a pending migration: %v", err)
 	}
 
+	rolledBack := strings.TrimSpace(strings.TrimPrefix(out, "rolled back "))
 	out, err = run(t, url, "migrate", "up")
-	if err != nil || !strings.Contains(out, "applied 00001_initial.sql") {
+	if err != nil || !strings.Contains(out, "applied "+rolledBack) {
 		t.Fatalf("migrate up: %q, %v", out, err)
 	}
 }

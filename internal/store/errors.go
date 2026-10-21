@@ -1,0 +1,122 @@
+package store
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+var (
+	// ErrNotFound means the row does not exist or lies outside the scope.
+	// The two are not told apart, so a caller never learns that another
+	// user's row exists.
+	ErrNotFound = errors.New("store: not found")
+
+	// ErrDuplicate means the owner already has a document with the same
+	// original file. The error is a *DuplicateError naming that document.
+	ErrDuplicate = errors.New("store: duplicate document")
+
+	// ErrNameTaken means the owner already has a correspondent, document
+	// type or sibling tag with this name (ignoring case), or a user with
+	// this name exists.
+	ErrNameTaken = errors.New("store: name taken")
+
+	// ErrASNTaken means the owner already has a document with this
+	// archive serial number.
+	ErrASNTaken = errors.New("store: archive serial number taken")
+
+	// ErrTagCycle means the new parent would make a tag its own parent or
+	// its own ancestor.
+	ErrTagCycle = errors.New("store: tag cycle")
+
+	// ErrOwnerMismatch means a linked tag, parent tag, correspondent or
+	// document type is not one of the owner's own. It covers both "belongs
+	// to another owner" and "does not exist" on purpose: telling them apart
+	// would reveal that another user's row exists. Do not split it.
+	ErrOwnerMismatch = errors.New("store: linked row does not belong to the owner")
+
+	// ErrTagNameConflict means a tag cannot be deleted because one of its
+	// children would become a root tag with the name of an existing root
+	// tag. The error is a *TagNameConflictError naming that child. Nothing
+	// is renamed or merged.
+	ErrTagNameConflict = errors.New("store: a child tag would collide with a root tag")
+)
+
+// DuplicateError is returned by CreateDocument when the owner already has a
+// document with the same original file. errors.Is(err, ErrDuplicate) holds.
+type DuplicateError struct {
+	// ExistingID is the document that has the file. It is empty in the
+	// rare case that this document was deleted right after the collision.
+	ExistingID string
+}
+
+func (e *DuplicateError) Error() string {
+	return fmt.Sprintf("store: duplicate of document %s", e.ExistingID)
+}
+
+// Is makes errors.Is(err, ErrDuplicate) true.
+func (e *DuplicateError) Is(target error) bool { return target == ErrDuplicate }
+
+// TagNameConflictError is returned by DeleteTag when a child of the tag
+// would collide with a root tag of the same name. errors.Is(err,
+// ErrTagNameConflict) holds.
+type TagNameConflictError struct {
+	ChildID   string
+	ChildName string
+}
+
+func (e *TagNameConflictError) Error() string {
+	return fmt.Sprintf("store: child tag %q (%s) would collide with a root tag of the same name", e.ChildName, e.ChildID)
+}
+
+// Is makes errors.Is(err, ErrTagNameConflict) true.
+func (e *TagNameConflictError) Is(target error) bool { return target == ErrTagNameConflict }
+
+// errTagCycleCode is the SQLSTATE the tags_no_cycle trigger raises.
+const errTagCycleCode = "PGT01"
+
+// mapErr turns PostgreSQL errors into the store's errors. Errors it does not
+// know are returned unchanged.
+func mapErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return err
+	}
+	switch pgErr.Code {
+	case errTagCycleCode:
+		return ErrTagCycle
+	case "23514": // check_violation
+		if pgErr.ConstraintName == "tags_parent_not_self" {
+			return ErrTagCycle
+		}
+	case "23505": // unique_violation
+		switch pgErr.ConstraintName {
+		case "users_name_key", "correspondents_owner_name_key", "document_types_owner_name_key", "tags_owner_parent_name_key":
+			return ErrNameTaken
+		case "documents_owner_asn_key":
+			return ErrASNTaken
+		}
+	case "23503": // foreign_key_violation
+		switch pgErr.ConstraintName {
+		case "tags_parent_fkey", "documents_correspondent_fkey", "documents_document_type_fkey", "document_tags_tag_fkey":
+			return ErrOwnerMismatch
+		case "document_tags_document_fkey":
+			return ErrNotFound
+		}
+	}
+	return err
+}
+
+// isUniqueViolation reports whether err is a unique violation of constraint.
+func isUniqueViolation(err error, constraint string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == constraint
+}

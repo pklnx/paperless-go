@@ -11,11 +11,15 @@ decides the details, this page only the direction. Decisions already taken:
   OCR and classification are optional, with an API key.
 - Users and login as in mail-archive: several users, admins, password,
   passkeys, TOTP, API keys, audit log.
+- One owner per document; admins see everything. Tags, correspondents,
+  document types and saved views are per owner, with names unique per owner
+  (decided in step 1, see [Data model](./architecture#data-model)).
+- The original file is kept next to the archived PDF with its text layer.
 
 | # | Step | Content | Open questions for the plan |
 |---|---|---|---|
-| 1 | Document model and file storage | Tables for documents, correspondents, document types, nested tags, deadlines and saved views (UUID keys, see [Data model](./architecture#data-model)); content-addressed files with durable writes (mail-archive's blobstore); duplicates by SHA-256. | Keep the original file next to the archived PDF with its text layer? |
-| 2 | Users and login | Port users, sessions, Argon2id, TOTP, passkeys, API keys and the audit log from mail-archive. Before the server may leave `localhost`. | One shared archive for all users, or an owner per document? |
+| 1 | Document model and file storage | Tables for documents, correspondents, document types, nested tags, deadlines and saved views (UUID keys, see [Data model](./architecture#data-model)); content-addressed files with durable writes (mail-archive's blobstore); duplicates by SHA-256. | Decided: original kept, owner per document, metadata per owner. |
+| 2 | Users and login | Port users, sessions, Argon2id, TOTP, passkeys, API keys and the audit log from mail-archive. Before the server may leave `localhost`. | |
 | 3 | Upload and import | Upload in the web UI (drag and drop, several files), a consume folder, `./pgo import DIR`. PDFs and images (JPEG, PNG, HEIC); images become PDFs. | Allowed size per file. |
 | 4 | Processing queue and OCR | A job queue in PostgreSQL (`FOR UPDATE SKIP LOCKED`), OCRmyPDF for scans and image-only PDFs, thumbnails, page count. The image moves to a Debian base. | Parallel jobs, retries, what the UI shows while a document is processed. |
 | 5 | Full-text search | PostgreSQL full-text search over title, correspondent, type, tags, ASN and text, with German and English stemming (as in mail-archive). | Search syntax (`tag:`, `type:`, date ranges). |

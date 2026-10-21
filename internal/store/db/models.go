@@ -10,8 +10,80 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Correspondent struct {
+	ID         pgtype.UUID
+	OwnerID    int64
+	Name       string
+	MatchText  string
+	MatchMode  string
+	CreatedAt  time.Time
+	ModifiedAt time.Time
+}
+
+type Document struct {
+	ID                  pgtype.UUID
+	OwnerID             int64
+	Title               string
+	DocumentDate        time.Time
+	CreatedAt           time.Time
+	ModifiedAt          time.Time
+	Notes               string
+	IsFavorite          bool
+	IsInbox             bool
+	ArchiveSerialNumber *int32
+	PageCount           int32
+	ExtractedText       string
+	TextSource          string
+	Source              string
+	OriginalFileName    string
+	OriginalSha256      string
+	OriginalSize        int64
+	OriginalMime        string
+	ArchiveSha256       *string
+	ArchiveSize         *int64
+	CorrespondentID     pgtype.UUID
+	DocumentTypeID      pgtype.UUID
+}
+
+type DocumentTag struct {
+	OwnerID    int64
+	DocumentID pgtype.UUID
+	TagID      pgtype.UUID
+}
+
+type DocumentType struct {
+	ID         pgtype.UUID
+	OwnerID    int64
+	Name       string
+	Symbol     string
+	MatchText  string
+	MatchMode  string
+	CreatedAt  time.Time
+	ModifiedAt time.Time
+}
+
 type Installation struct {
 	ID        pgtype.UUID
 	Singleton bool
+	CreatedAt time.Time
+}
+
+type Tag struct {
+	ID         pgtype.UUID
+	OwnerID    int64
+	Name       string
+	ColorHex   string
+	Symbol     string
+	ParentID   pgtype.UUID
+	MatchText  string
+	MatchMode  string
+	CreatedAt  time.Time
+	ModifiedAt time.Time
+}
+
+type User struct {
+	ID        int64
+	Name      string
+	IsAdmin   bool
 	CreatedAt time.Time
 }
