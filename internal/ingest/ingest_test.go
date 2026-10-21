@@ -292,6 +292,8 @@ func TestNames(t *testing.T) {
 		{"..", "", ""},
 		{"dir/", "", ""},
 		{"tab\there\n.pdf", "tabhere.pdf", "tabhere"},
+		{"invoice\u202Efdp.exe", "invoicefdp.exe", "invoicefdp"},
+		{"\u2066a\u2069\u200Eb\u200F\u061C\u202A\u202B\u202C\u202D\u2067\u2068.pdf", "ab.pdf", "ab"},
 		{long + ".pdf", strings.Repeat("ä", 127), strings.Repeat("ä", 127)},
 		{strings.Repeat("x", 250) + ".pdf", strings.Repeat("x", 250) + ".pdf", strings.Repeat("x", 200)},
 	} {
@@ -301,6 +303,9 @@ func TestNames(t *testing.T) {
 		if got := ingest.TitleFromFileName(tc.in); got != tc.title {
 			t.Errorf("TitleFromFileName(%q) = %q, want %q", tc.in, got, tc.title)
 		}
+	}
+	if got := ingest.Title("Brief\u202E an Amt"); got != "Brief an Amt" {
+		t.Errorf("Title kept a bidi override: %q", got)
 	}
 	if got := ingest.Title(strings.Repeat("ü", 250)); got != strings.Repeat("ü", 200) {
 		t.Errorf("Title cut to %d runes", len([]rune(got)))

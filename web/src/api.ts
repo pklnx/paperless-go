@@ -217,8 +217,9 @@ export interface DocumentSummary {
 }
 
 export const documentsApi = {
-  /** The caller's documents (an admin's: everyone's), newest first, and the upload limit in bytes. */
-  list: (signal?: AbortSignal) => getJSON<{ documents: DocumentSummary[]; maxUploadSize: number }>("/api/documents", signal),
+  /** The caller's newest documents (an admin's: everyone's), at most limit (the server caps it at 100), and the upload limit in bytes. */
+  list: (limit: number, signal?: AbortSignal) =>
+    getJSON<{ documents: DocumentSummary[]; maxUploadSize: number }>(`/api/documents?limit=${limit}`, signal),
   /** The download URL of a document's original file or archive PDF. */
   fileURL: (id: string, kind: "original" | "archive" = "original") => `/api/documents/${encodeURIComponent(id)}/file?kind=${kind}`,
 };

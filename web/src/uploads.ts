@@ -51,7 +51,8 @@ export function sendFile(file: File, onProgress: (percent: number) => void): { d
     xhr.open("POST", "/api/documents");
     xhr.setRequestHeader("Content-Type", uploadContentType(file));
     xhr.setRequestHeader("Accept", "application/json");
-    if (file.name) xhr.setRequestHeader("X-File-Name", encodeURIComponent(file.name));
+    const name = encodedName(file.name);
+    if (name) xhr.setRequestHeader("X-File-Name", name);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && e.total > 0) onProgress(Math.min(100, Math.floor((e.loaded / e.total) * 100)));
     };
@@ -80,6 +81,15 @@ export function sendFile(file: File, onProgress: (percent: number) => void): { d
     xhr.send(file);
   });
   return { done, abort: () => xhr.abort() };
+}
+
+/** The file name for X-File-Name, percent-encoded; empty when it cannot be encoded (an unpaired surrogate), so the server names the document itself. */
+export function encodedName(name: string): string {
+  try {
+    return encodeURIComponent(name);
+  } catch {
+    return "";
+  }
 }
 
 type Send = typeof sendFile;
@@ -159,13 +169,22 @@ export class UploadQueue {
       const file = this.files.get(next.id)!;
       this.files.delete(next.id);
       this.set(next.id, { kind: "uploading", percent: 0 });
-      const { done, abort } = this.send(file, (percent) => this.set(next.id, { kind: "uploading", percent }));
-      this.aborts.set(next.id, abort);
-      void done.then((outcome) => {
-        this.aborts.delete(next.id);
-        this.set(next.id, outcome);
-        this.pump();
-      });
+      let started: ReturnType<Send>;
+      try {
+        started = this.send(file, (percent) => this.set(next.id, { kind: "uploading", percent }));
+      } catch {
+        // The request could not even start: the row fails, the slot stays free.
+        this.set(next.id, { kind: "failed" });
+        continue;
+      }
+      this.aborts.set(next.id, started.abort);
+      void started.done
+        .catch((): UploadOutcome => ({ kind: "failed" }))
+        .then((outcome) => {
+          this.aborts.delete(next.id);
+          this.set(next.id, outcome);
+          this.pump();
+        });
     }
   }
 }
@@ -201,6 +220,7 @@ export function stateText(state: UploadState, m: Messages, maxSize: string): str
         case "too_many_pixels":
           return m.uploadTooManyPixels;
       }
-      return state.message ? m.failed(state.message) : m.uploadNetworkError;
+      // The server's own text is English; show a translated one.
+      return state.message ? m.uploadFailed : m.uploadNetworkError;
   }
 }

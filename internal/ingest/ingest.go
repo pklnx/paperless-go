@@ -230,16 +230,31 @@ func (im *Importer) tooLarge() Result {
 }
 
 // clean makes s storable and displayable: valid UTF-8 (invalid bytes
-// become U+FFFD), NFC, without control characters.
+// become U+FFFD), NFC, without control characters and without the
+// bidirectional formatting characters that can make a name display as
+// something else ("invoice\u202Efdp.exe" shows as "invoiceexe.pdf").
 func clean(s string) string {
-	s = strings.ToValidUTF8(s, "�")
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || isBidiControl(r) {
 			return -1
 		}
 		return r
 	}, s)
 	return norm.NFC.String(s)
+}
+
+// isBidiControl reports whether r is a bidirectional mark, embedding,
+// override or isolate: U+061C, U+200E, U+200F, U+202A–U+202E and
+// U+2066–U+2069.
+func isBidiControl(r rune) bool {
+	switch {
+	case r == 0x061C, r == 0x200E, r == 0x200F:
+		return true
+	case r >= 0x202A && r <= 0x202E, r >= 0x2066 && r <= 0x2069:
+		return true
+	}
+	return false
 }
 
 // FileName reduces name to the base name of a path (split on / and \),

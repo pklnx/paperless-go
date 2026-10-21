@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { UNAUTHORIZED_EVENT, type DocumentSummary } from "./api";
 import { messagesFor } from "./i18n";
 import { FakeXHR, stubXHR } from "./fakeXHR";
-import { displayName, parallelUploads, sendFile, stateText, uploadContentType, UploadQueue, type UploadOutcome } from "./uploads";
+import { displayName, encodedName, parallelUploads, sendFile, stateText, uploadContentType, UploadQueue, type UploadOutcome } from "./uploads";
 
 const doc = (id: string, title: string): DocumentSummary => ({
   id,
@@ -152,6 +152,62 @@ describe("UploadQueue", () => {
   });
 });
 
+describe("failures to start", () => {
+  it("fails a row whose send throws and frees its slot", async () => {
+    const { calls, send } = manualSend();
+    let first = true;
+    const throwing = (f: File, p: (n: number) => void) => {
+      if (first) {
+        first = false;
+        throw new Error("send failed");
+      }
+      return send(f, p);
+    };
+    const q = new UploadQueue(throwing);
+    q.add([file("a.pdf"), file("b.pdf"), file("c.pdf")]);
+    expect(q.list.map((i) => i.state.kind)).toEqual(["failed", "uploading", "uploading"]);
+    expect(calls.map((c) => c.name)).toEqual(["b.pdf", "c.pdf"]);
+  });
+
+  it("fails a row whose request rejects and starts the next", async () => {
+    const { calls, send } = manualSend();
+    let first = true;
+    const rejecting = (f: File, p: (n: number) => void) => {
+      if (first) {
+        first = false;
+        return { done: Promise.reject(new Error("xhr.send threw")), abort: () => {} };
+      }
+      return send(f, p);
+    };
+    const q = new UploadQueue(rejecting);
+    q.add([file("a.pdf"), file("b.pdf"), file("c.pdf")]);
+    await vi.waitFor(() => expect(q.list[0]!.state.kind).toBe("failed"));
+    expect(calls.map((c) => c.name)).toEqual(["b.pdf", "c.pdf"]);
+    // Cancelling the failed row does nothing: its abort entry is gone.
+    q.cancel(q.list[0]!.id);
+    expect(q.list[0]!.state.kind).toBe("failed");
+  });
+
+  it("rejects when xhr.send throws, so the queue can fail the row", async () => {
+    stubXHR();
+    const spy = vi.spyOn(FakeXHR.prototype, "send").mockImplementation(() => {
+      throw new Error("NetworkError");
+    });
+    const { done } = sendFile(file("a.pdf"), () => {});
+    await expect(done).rejects.toThrow("NetworkError");
+    spy.mockRestore();
+  });
+
+  it("leaves out a file name that cannot be encoded", () => {
+    expect(encodedName("a\uD800.pdf")).toBe("");
+    expect(encodedName("März.pdf")).toBe("M%C3%A4rz.pdf");
+    stubXHR();
+    // A real File replaces lone surrogates itself; a stand-in keeps one.
+    sendFile({ name: "a\uD800.pdf", type: "application/pdf" } as File, () => {});
+    expect(FakeXHR.all[0]!.headers["X-File-Name"]).toBeUndefined();
+  });
+});
+
 describe("display", () => {
   it("strips bidi control characters from names", () => {
     expect(displayName("invoice‮fdp.exe")).toBe("invoicefdp.exe");
@@ -170,7 +226,9 @@ describe("display", () => {
     expect(stateText({ kind: "failed", reason: "too_large" }, en, "100 MB")).toBe("larger than 100 MB");
     expect(stateText({ kind: "failed", reason: "too_large" }, de, "100 MB")).toBe("größer als 100 MB");
     expect(stateText({ kind: "failed", reason: "unsupported" }, de, "")).toBe("keine PDF-, JPEG-, PNG- oder HEIC-Datei");
-    expect(stateText({ kind: "failed", message: "boom" }, en, "")).toBe("Failed: boom");
+    // An unknown server reason shows a translated text, not the server's English one.
+    expect(stateText({ kind: "failed", message: "boom" }, en, "")).toBe("could not be imported");
+    expect(stateText({ kind: "failed", message: "boom" }, de, "")).toBe("konnte nicht importiert werden");
     expect(stateText({ kind: "failed" }, en, "")).toBe("upload failed; check the connection");
   });
 

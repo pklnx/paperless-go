@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -176,9 +178,15 @@ func TestUploadDetectsTypeFromContent(t *testing.T) {
 	f := newAuthFixture(t)
 	f.addUser("alice", "correct horse battery", false)
 	f.loginOK("alice", "correct horse battery")
-	resp, out := f.upload("/api/documents", "image/png", "scan.png", pdf("declared as png"))
+	resp, out := f.upload("/api/documents", "image/png", "scan.html", pdf("declared as png"))
 	if resp.StatusCode != 201 || out["originalMime"] != "application/pdf" || out["source"] != "file" {
 		t.Fatalf("mismatched type: %d %v", resp.StatusCode, out)
+	}
+	// The download carries the detected type and its extension, not the name's.
+	dl, _ := f.download("/api/documents/" + out["id"].(string) + "/file")
+	if dl.Header.Get("Content-Type") != "application/pdf" ||
+		dl.Header.Get("Content-Disposition") != `attachment; filename="scan.pdf"; filename*=UTF-8''scan.pdf` {
+		t.Fatalf("download: %q %q", dl.Header.Get("Content-Type"), dl.Header.Get("Content-Disposition"))
 	}
 }
 
@@ -489,9 +497,17 @@ func TestDownloadName(t *testing.T) {
 		original string
 		archive  string
 	}{
-		{store.Document{OriginalFileName: "scan.jpeg", OriginalMIME: "image/jpeg"}, "scan.jpeg", "scan.pdf"},
+		{store.Document{OriginalFileName: "scan.jpeg", OriginalMIME: "image/jpeg"}, "scan.jpg", "scan.pdf"},
+		// The stored type decides the extension, not the client's name.
+		{store.Document{OriginalFileName: "x.html", OriginalMIME: "application/pdf"}, "x.pdf", "x.pdf"},
+		{store.Document{OriginalFileName: "photo.pdf", OriginalMIME: "image/heic"}, "photo.heic", "photo.pdf"},
+		{store.Document{OriginalFileName: "a.b.png", OriginalMIME: "image/png"}, "a.b.png", "a.b.pdf"},
 		{store.Document{Title: "a/b", OriginalMIME: "image/png"}, "a_b.png", "a_b.pdf"},
+		{store.Document{Title: "Stand 2026.03", OriginalMIME: "application/pdf"}, "Stand 2026.03.pdf", "Stand 2026.03.pdf"},
+		{store.Document{OriginalFileName: ".pdf", OriginalMIME: "application/pdf"}, "document.pdf", "document.pdf"},
 		{store.Document{OriginalMIME: "application/pdf"}, "document.pdf", "document.pdf"},
+		// A type the importer never stores gets no extension.
+		{store.Document{OriginalFileName: "page.html", OriginalMIME: "text/html"}, "page", "page.pdf"},
 	} {
 		if got := downloadName(&c.doc, false); got != c.original {
 			t.Errorf("%+v original: %q, want %q", c.doc, got, c.original)
@@ -499,6 +515,91 @@ func TestDownloadName(t *testing.T) {
 		if got := downloadName(&c.doc, true); got != c.archive {
 			t.Errorf("%+v archive: %q, want %q", c.doc, got, c.archive)
 		}
+	}
+}
+
+func TestServedType(t *testing.T) {
+	for in, want := range map[string]string{
+		"application/pdf": "application/pdf", "image/jpeg": "image/jpeg", "image/png": "image/png",
+		"image/heic": "image/heic", "image/heif": "image/heif",
+		"text/html": "application/octet-stream", "image/svg+xml": "application/octet-stream",
+		"application/pdf; charset=utf-8": "application/octet-stream", "": "application/octet-stream",
+	} {
+		if got := servedType(in); got != want {
+			t.Errorf("servedType(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A stored type the importer does not produce (here an HTML file from
+// elsewhere) is sent as application/octet-stream, without its extension.
+func TestDocumentFileUnknownType(t *testing.T) {
+	f := newAuthFixture(t)
+	alice := f.addUser("alice", "correct horse battery", false)
+	f.loginOK("alice", "correct horse battery")
+	data := []byte("<html><script>alert(1)</script></html>")
+	blob, _, err := f.blobs.Put(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := f.st.CreateDocument(context.Background(), store.Scope{UserID: alice.ID}, store.NewDocument{
+		Title: "page", Source: store.SourceFile, OriginalFileName: "page.html", OriginalSHA256: blob.SHA256,
+		OriginalSize: blob.Size, OriginalMIME: "text/html", IsInbox: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, got := f.download("/api/documents/" + doc.ID + "/file")
+	if resp.StatusCode != 200 || !bytes.Equal(got, data) || resp.Header.Get("Content-Type") != "application/octet-stream" ||
+		resp.Header.Get("Content-Disposition") != `attachment; filename="page"; filename*=UTF-8''page` {
+		t.Fatalf("unknown type: %d %q %q", resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Content-Disposition"))
+	}
+}
+
+// The list holds the newest documents, at most limit (default and
+// maximum 100), without their text.
+func TestListDocumentsLimit(t *testing.T) {
+	f := newAuthFixture(t)
+	alice := f.addUser("alice", "correct horse battery", false)
+	f.loginOK("alice", "correct horse battery")
+	ctx := context.Background()
+	sc := store.Scope{UserID: alice.ID}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	conn, err := pgx.Connect(ctx, f.dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	var newest string
+	for i := range 102 {
+		in := store.NewDocument{
+			Title: fmt.Sprintf("doc %d", i), Source: store.SourceFile, OriginalSHA256: fmt.Sprintf("%064x", i+1),
+			OriginalMIME: "application/pdf", ExtractedText: "secret text",
+		}
+		d, err := f.st.CreateDocument(ctx, sc, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Exec(ctx, `UPDATE documents SET created_at = $1 WHERE id = $2`, base.Add(time.Duration(i)*time.Minute), d.ID); err != nil {
+			t.Fatal(err)
+		}
+		newest = d.ID
+	}
+	out := f.expect("GET", "/api/documents", nil, 200)
+	if ids := listedIDs(t, out); len(ids) != 100 || ids[0] != newest {
+		t.Fatalf("default: %d documents, first %v", len(ids), ids[:1])
+	}
+	if docs := out["documents"].([]any); docs[0].(map[string]any)["extractedText"] != nil {
+		t.Fatalf("the list carries the text: %v", docs[0])
+	}
+	if ids := listedIDs(t, f.expect("GET", "/api/documents?limit=10", nil, 200)); len(ids) != 10 || ids[0] != newest {
+		t.Fatalf("limit=10: %d documents", len(ids))
+	}
+	if ids := listedIDs(t, f.expect("GET", "/api/documents?limit=1000", nil, 200)); len(ids) != 100 {
+		t.Fatalf("limit=1000: %d documents", len(ids))
+	}
+	for _, bad := range []string{"0", "-1", "x"} {
+		f.expect("GET", "/api/documents?limit="+bad, nil, 400)
 	}
 }
 

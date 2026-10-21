@@ -216,6 +216,9 @@ before the next starts:
 4. **Insert** with `CreateDocument`, in the inbox; the title is the file's
    base name without extension (NFC, no control characters, at most 200
    characters). An `ErrDuplicate` from a concurrent import is a duplicate too.
+   Titles and file names also lose bidirectional formatting characters
+   (U+061C, U+200E/F, U+202A–E, U+2066–9), which could make a name display
+   as something else.
 
 The result is `Imported`, `Duplicate` (with the existing document's ID and
 title) or `Refused` (`unsupported`, `too_large`, `too_many_pixels`,
@@ -329,15 +332,20 @@ another user's document answers `404` and an admin sees all.
   (`existing` left out if the lookup failed), `413` `too_large`, `415`
   `unsupported`, `422` `unreadable` or `too_many_pixels` (with `reason`),
   `400` for a body that broke off, `503` without the audit log.
-- **`GET /api/documents`** lists the scope's documents, newest first, without
-  their text, with `maxUploadSize` for the UI. Paging and filters come
-  with #7.
+- **`GET /api/documents?limit=N`** lists the scope's newest documents
+  (default and maximum 100; the start page asks for 10), without their
+  text (`RecentDocuments` does not even read it), with `maxUploadSize` for
+  the UI. Paging and filters come with #7.
 - **`GET /api/documents/{id}`** returns one document with its text.
 - **`GET /api/documents/{id}/file?kind=original|archive`** sends the file
   from the blob store (`OpenHash`) with `Content-Disposition: attachment`
   (RFC 6266: an ASCII `filename` plus `filename*=UTF-8''`), `nosniff` and
-  `Content-Security-Policy: sandbox`. The archive PDF answers `404` until
-  processing made one.
+  `Content-Security-Policy: sandbox`. The Content-Type is the stored type
+  only if the importer produces it (PDF, JPEG, PNG, HEIC, HEIF), otherwise
+  `application/octet-stream`; the file name is the stem of the original
+  name with the stored type's extension, so `x.html` holding a PDF
+  downloads as `x.pdf`. The archive PDF answers `404` until processing
+  made one.
 
 ## Login
 

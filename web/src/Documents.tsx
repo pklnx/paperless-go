@@ -82,9 +82,9 @@ export function DocumentsHome({ queue }: { queue: UploadQueue }) {
   // Load the list at start and again after each import.
   useEffect(() => {
     const ctl = new AbortController();
-    documentsApi.list(ctl.signal).then(
+    documentsApi.list(recentCount, ctl.signal).then(
       (res) => {
-        setDocs(res.documents.slice(0, recentCount));
+        setDocs(res.documents);
         queue.maxSize = res.maxUploadSize;
         setMaxSize(res.maxUploadSize);
         setError("");
@@ -113,7 +113,7 @@ export function DocumentsHome({ queue }: { queue: UploadQueue }) {
           <ul aria-label={t.recentTitle} className="flex flex-col divide-y divide-line rounded-lg border border-line">
             {docs.map((d) => (
               <li key={d.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-3 py-2">
-                <span className="min-w-0 flex-1 truncate">{displayName(d.title) || t.untitled}</span>
+                <span className="min-w-0 basis-full wrap-anywhere sm:basis-0 sm:flex-1">{displayName(d.title) || t.untitled}</span>
                 <span className="text-sm text-ink-muted">{new Date(d.createdAt).toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" })}</span>
                 <a className="text-sm text-accent-ink hover:underline" href={documentsApi.fileURL(d.id)} download>
                   {t.download}
@@ -183,7 +183,7 @@ function UploadRow({ item, limit, cancel }: { item: UploadItem; limit: string; c
   return (
     <li className="flex flex-col gap-1 text-sm">
       <div className="flex flex-wrap items-baseline gap-x-3">
-        <span className="min-w-0 flex-1 truncate">{name}</span>
+        <span className="min-w-0 basis-full wrap-anywhere sm:basis-0 sm:flex-1">{name}</span>
         <span className="text-ink-muted">{formatSize(item.size, lang)}</span>
         <span className={stateColor[item.state.kind]} role="status">
           {stateText(item.state, t, limit)}

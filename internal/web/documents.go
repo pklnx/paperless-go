@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,13 +89,29 @@ type documentListJSON struct {
 	MaxUploadSize int64 `json:"maxUploadSize"`
 }
 
-// handleListDocuments lists the scope's documents, newest first. Paging
-// and filters come with the document list (#7).
+// Page size of GET /api/documents: the newest documents only; paging and
+// filters come with the document list (#7).
+const (
+	documentListDefault = 100
+	documentListMax     = 100
+)
+
+// handleListDocuments lists the scope's newest documents (at most limit,
+// default and maximum 100), without their text.
 func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 	if !s.documentsAvailable(w, r) {
 		return
 	}
-	docs, err := s.store.ListDocuments(r.Context(), requestScope(r))
+	limit := documentListDefault
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			s.fail(w, r, http.StatusBadRequest, "limit must be a positive number", nil)
+			return
+		}
+		limit = min(n, documentListMax)
+	}
+	docs, err := s.store.RecentDocuments(r.Context(), requestScope(r), limit)
 	if err != nil {
 		s.failStore(w, r, err)
 		return
@@ -139,7 +156,7 @@ func (s *Server) handleDocumentFile(w http.ResponseWriter, r *http.Request) {
 		s.failStore(w, r, err)
 		return
 	}
-	hash, mimeType, name := d.OriginalSHA256, d.OriginalMIME, downloadName(d, false)
+	hash, mimeType, name := d.OriginalSHA256, servedType(d.OriginalMIME), downloadName(d, false)
 	if kind == "archive" {
 		if d.ArchiveSHA256 == nil {
 			s.fail(w, r, http.StatusNotFound, "this document has no archive PDF yet", nil)
@@ -166,31 +183,40 @@ func (s *Server) handleDocumentFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", time.Time{}, f)
 }
 
-// extensions gives a download without a stored file name an extension.
-var extensions = map[string]string{
+// servedTypes are the types the importer stores, with the extension a
+// download gets. Only these are sent as their own Content-Type; anything
+// else (a stored type from elsewhere, such as an archive import) goes out
+// as application/octet-stream without an extension.
+var servedTypes = map[string]string{
 	ingest.MIMEPDF: ".pdf", ingest.MIMEJPEG: ".jpg", ingest.MIMEPNG: ".png", ingest.MIMEHEIC: ".heic", ingest.MIMEHEIF: ".heif",
 }
 
-// downloadName is the file name a download is offered under: the original
-// file name, or the title with the type's extension; the archive PDF gets
-// the same stem with .pdf.
+// servedType is the Content-Type a stored file is sent with.
+func servedType(mime string) string {
+	if _, ok := servedTypes[mime]; ok {
+		return mime
+	}
+	return "application/octet-stream"
+}
+
+// downloadName is the file name a download is offered under: the stem of
+// the original file name (or the title) with the extension of the stored
+// type, never the client's own extension, so "x.html" holding a PDF
+// downloads as "x.pdf". The archive PDF gets .pdf.
 func downloadName(d *store.Document, archive bool) string {
-	name := d.OriginalFileName
-	if name == "" {
+	stem := ingest.FileName(d.OriginalFileName)
+	stem = strings.TrimSuffix(stem, filepath.Ext(stem))
+	if strings.TrimSpace(stem) == "" {
 		// A title may contain anything, also slashes.
-		name = ingest.FileName(strings.NewReplacer("/", "_", `\`, "_").Replace(d.Title))
-		if name == "" {
-			name = "document"
-		}
-		name += extensions[d.OriginalMIME]
+		stem = ingest.FileName(strings.NewReplacer("/", "_", `\`, "_").Replace(d.Title))
+	}
+	if strings.TrimSpace(stem) == "" {
+		stem = "document"
 	}
 	if archive {
-		if stem := strings.TrimSuffix(name, filepath.Ext(name)); stem != "" {
-			name = stem
-		}
-		name += ".pdf"
+		return stem + ".pdf"
 	}
-	return name
+	return stem + servedTypes[d.OriginalMIME]
 }
 
 // contentDisposition is an attachment header for name after RFC 6266: a

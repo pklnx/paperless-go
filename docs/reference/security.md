@@ -162,7 +162,10 @@ scripts, styles and requests, no framing), `X-Content-Type-Options: nosniff`,
 Document files (`GET /api/documents/{id}/file`) are always sent as a
 download (`Content-Disposition: attachment`) with `nosniff` and
 `Content-Security-Policy: sandbox`, so a file is never run as a page of
-the server, even when a browser shows it.
+the server, even when a browser shows it. They are sent with their type only if
+it is one the server imports (PDF, JPEG, PNG, HEIC/HEIF), otherwise as
+`application/octet-stream`, and the offered file name gets the extension
+of that type, not the one the file was uploaded with.
 
 ## Reporting a vulnerability
 

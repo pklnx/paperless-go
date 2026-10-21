@@ -25,7 +25,7 @@ beforeEach(() => {
   listCalls = 0;
   stubXHR();
   vi.stubGlobal("fetch", async (url: string) => {
-    if (url === "/api/documents") {
+    if (url === "/api/documents?limit=10") {
       listCalls++;
       return new Response(JSON.stringify({ documents: docs, maxUploadSize: 1000 }), { status: 200, headers: { "Content-Type": "application/json" } });
     }

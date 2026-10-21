@@ -280,6 +280,24 @@ func (s *Store) ListDocuments(ctx context.Context, sc Scope) ([]*Document, error
 	return out, nil
 }
 
+// RecentDocuments returns at most limit of the scope's documents, newest
+// first, without their extracted text (ExtractedText is empty). A limit
+// below 1 returns none.
+func (s *Store) RecentDocuments(ctx context.Context, sc Scope, limit int) ([]*Document, error) {
+	if limit < 1 {
+		return []*Document{}, nil
+	}
+	rows, err := s.q.ListRecentDocuments(ctx, db.ListRecentDocumentsParams{Owner: sc.owner(), Lim: clampInt32(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Document, len(rows))
+	for i, r := range rows {
+		out[i] = documentFromDB(db.GetDocumentRow(r))
+	}
+	return out, nil
+}
+
 // UpdateDocument replaces the user-edited fields of a document. Links must
 // point at the document owner's rows (ErrOwnerMismatch otherwise), also in
 // an All scope.

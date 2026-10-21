@@ -555,3 +555,37 @@ func TestDeleteDocumentCascadesToTagLinks(t *testing.T) {
 		t.Errorf("document_tags rows = %d (%v), want 0", n, err)
 	}
 }
+
+// RecentDocuments stays in the scope, keeps the limit and leaves out the
+// text.
+func TestRecentDocuments(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	bob := store.Scope{UserID: storetest.User(t, st, "bob", false).ID}
+	admin := store.Scope{UserID: storetest.User(t, st, "admin", true).ID, All: true}
+	for _, c := range []string{"a1", "a2", "a3"} {
+		in := newDoc(c)
+		in.ExtractedText = "text of " + c
+		mustDoc(t, st, alice, in)
+	}
+	mustDoc(t, st, bob, newDoc("b1"))
+	docs, err := st.RecentDocuments(ctx, alice, 2)
+	if err != nil || len(docs) != 2 {
+		t.Fatalf("alice: %d, %v", len(docs), err)
+	}
+	for _, d := range docs {
+		if d.OwnerID != alice.UserID || d.ExtractedText != "" || d.Title == "" {
+			t.Fatalf("alice's document: %+v", d)
+		}
+	}
+	if docs, _ := st.RecentDocuments(ctx, bob, 10); len(docs) != 1 || docs[0].Title != "b1" {
+		t.Fatalf("bob: %+v", docs)
+	}
+	if docs, _ := st.RecentDocuments(ctx, admin, 10); len(docs) != 4 {
+		t.Fatalf("admin: %d", len(docs))
+	}
+	if docs, err := st.RecentDocuments(ctx, alice, 0); err != nil || len(docs) != 0 {
+		t.Fatalf("limit 0: %d, %v", len(docs), err)
+	}
+}
