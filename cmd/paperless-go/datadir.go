@@ -94,7 +94,7 @@ func prepareDataDir(dir string, stdout, stderr io.Writer, env dataDirEnv) {
 		return
 	}
 	warn := func(reason string) {
-		fmt.Fprintf(stderr, "warning: the data directory %s (ARCHIVE_DIR in .env, default ./data) is not writable "+
+		fmt.Fprintf(stderr, "warning: the data directory %s (DATA_DIR in .env, default ./data) is not writable "+
 			"for the container user, UID %d, %s.\n%s", dir, containerUID, reason, ownerHint(env.userns))
 	}
 	if !env.isRoot {
@@ -135,13 +135,13 @@ func prepareDataDir(dir string, stdout, stderr io.Writer, env dataDirEnv) {
 // another UID on the host, so a plain chown on the host would be wrong.
 func ownerHint(userns bool) string {
 	if userns {
-		return `  Fix it on the host (use your ARCHIVE_DIR instead of data), with rootless Docker:
+		return `  Fix it on the host (use your DATA_DIR instead of data), with rootless Docker:
     docker run --rm --user 0 -v "$PWD/data:/data" alpine chown -R 65532:65532 /data
   or with Podman:
     podman unshare chown -R 65532:65532 data
 `
 	}
-	return `  Fix it on the host (use your ARCHIVE_DIR instead of data):
+	return `  Fix it on the host (use your DATA_DIR instead of data):
     sudo chown -R 65532:65532 data
 `
 }

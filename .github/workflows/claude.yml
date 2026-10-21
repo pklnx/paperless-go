@@ -417,6 +417,7 @@ jobs:
       issues: read # the linked issue with the plan
       checks: read # gh pr checks: check runs
       statuses: read # gh pr checks: commit statuses
+      actions: read # gh pr checks and gh pr view: the workflow run of each check suite
     concurrency:
       group: claude-second-review-${{ github.event.pull_request.number }}
       cancel-in-progress: false

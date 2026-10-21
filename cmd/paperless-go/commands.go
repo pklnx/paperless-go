@@ -167,9 +167,18 @@ network.`,
 	return cmd
 }
 
-// checkSchema refuses to serve a database with pending migrations: the
-// handlers would fail on missing tables.
+// checkSchema refuses to serve a database with pending migrations, where the
+// handlers would fail on missing tables, and one migrated by a newer
+// version, whose schema this binary does not know.
 func checkSchema(ctx context.Context, st *store.Store) error {
+	database, known, err := st.SchemaVersions(ctx)
+	if err != nil {
+		return err
+	}
+	if database > known {
+		return fmt.Errorf("the database schema (version %d) is newer than this version of paperless-go knows (%d): "+
+			"run the newer version, or restore a backup made before the upgrade", database, known)
+	}
 	statuses, err := st.MigrationStatus(ctx)
 	if err != nil {
 		return err

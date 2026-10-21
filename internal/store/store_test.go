@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/pklnx/paperless-go/internal/store"
 	"github.com/pklnx/paperless-go/internal/store/storetest"
 )
 
@@ -100,5 +101,65 @@ func TestInstallation(t *testing.T) {
 	}
 	if *a != *b {
 		t.Errorf("installation changed between reads: %+v, %+v", a, b)
+	}
+}
+
+func TestSchemaVersions(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	database, known, err := st.SchemaVersions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if known < 1 || database != known {
+		t.Errorf("after migrate: database %d, known %d", database, known)
+	}
+	if _, err := st.MigrateDown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if database, _, err = st.SchemaVersions(ctx); err != nil || database >= known {
+		t.Errorf("after down: database %d (%v), known %d", database, err, known)
+	}
+}
+
+func TestConcurrentMigrate(t *testing.T) {
+	_, url := storetest.NewWithURL(t)
+	ctx := context.Background()
+	// Two stores on a fresh schema: roll back first, then migrate from both
+	// at once. The session lock lets one apply and the other find nothing.
+	a, err := store.Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := store.Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if _, err := a.MigrateDown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		applied []string
+		err     error
+	}
+	results := make(chan result, 2)
+	for _, st := range []*store.Store{a, b} {
+		go func() {
+			applied, err := st.Migrate(ctx)
+			results <- result{applied, err}
+		}()
+	}
+	total := 0
+	for range 2 {
+		r := <-results
+		if r.err != nil {
+			t.Errorf("migrate: %v", r.err)
+		}
+		total += len(r.applied)
+	}
+	if total != 1 {
+		t.Errorf("applied %d migrations in total, want 1", total)
 	}
 }

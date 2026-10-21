@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+	"github.com/pressly/goose/v3/lock"
 
 	"github.com/pklnx/paperless-go/internal/store/db"
 )
@@ -104,14 +105,37 @@ func (s *Store) MigrationStatus(ctx context.Context) ([]MigrationStatus, error) 
 	return out, err
 }
 
+// SchemaVersions returns the schema version of the database and the
+// newest migration this binary embeds. A database ahead of the binary was
+// migrated by a newer version.
+func (s *Store) SchemaVersions(ctx context.Context) (database, known int64, err error) {
+	err = s.withMigrations(func(p *goose.Provider) error {
+		if database, err = p.GetDBVersion(ctx); err != nil {
+			return err
+		}
+		for _, src := range p.ListSources() {
+			known = max(known, src.Version)
+		}
+		return nil
+	})
+	return database, known, err
+}
+
 func (s *Store) withMigrations(fn func(*goose.Provider) error) error {
 	sub, err := fs.Sub(migrationsFS, "migrations")
 	if err != nil {
 		return err
 	}
+	// A session lock keeps two migrate runs at the same time from
+	// applying the same version. The second retries every second for up
+	// to 5 minutes (goose's default timeout, retried more often).
+	locker, err := lock.NewPostgresSessionLocker(lock.WithLockTimeout(1, 300))
+	if err != nil {
+		return err
+	}
 	sqlDB := stdlib.OpenDBFromPool(s.pool)
 	defer func(d *sql.DB) { _ = d.Close() }(sqlDB)
-	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, sub)
+	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, sub, goose.WithSessionLocker(locker))
 	if err != nil {
 		return err
 	}
