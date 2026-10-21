@@ -222,7 +222,10 @@ title) or `Refused` (`unsupported`, `too_large`, `too_many_pixels`,
 `unreadable`); an error is transient, nothing was created and a retry may
 succeed. Nothing calls `blobstore.Remove`: a blob left by a failure is
 reused by the retry or swept as an orphan (#12). Images are stored as
-originals; `CreateDocument` queues every new document for
+originals; the CLI `import` walks a path (files only, symlinks skipped, sources
+untouched), calls `Import` per file and writes one `document.import` audit
+entry per run (the importer's per-file transactions have no audit entry of
+their own); `--dry-run` uses `Detect` and `FindDocumentByOriginal` only. `CreateDocument` queues every new document for
 [processing](#processing), which builds the archive PDF.
 
 ## Processing

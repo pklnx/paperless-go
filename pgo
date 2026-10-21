@@ -4,6 +4,7 @@
 #   ./pgo migrate
 #   ./pgo migrate status
 #   ./pgo backup ./backups
+#   ./pgo import ~/scans --user alice
 #
 # Starts PostgreSQL if needed, rebuilds the image when the code changed (fast
 # when cached) and hides Docker Compose's progress output. In a release
@@ -11,6 +12,8 @@
 # also makes a fresh data directory writable for the container user.
 set -eu
 
+# The directory ./pgo was called from: `import` resolves its DIR against it.
+caller_dir=$(pwd)
 cd "$(dirname "$0")"
 
 build=
@@ -60,11 +63,74 @@ if [ "${1:-}" = backup ]; then
 	exit 0
 fi
 
+# import reads a folder on the host: mount it read-only at /import and pass
+# that path to the command; the other arguments (--user, --dry-run) go along.
+import_dir=
+if [ "${1:-}" = import ]; then
+	shift
+	dir=
+	# Each argument is moved to the end of the list unless it is the folder.
+	todo=$#
+	while [ "$todo" -gt 0 ]; do
+		case $1 in
+		--user)
+			if [ "$todo" -lt 2 ]; then
+				echo "error: --user needs a name" >&2
+				exit 2
+			fi
+			set -- "$@" "$1" "$2"
+			shift 2
+			todo=$((todo - 2))
+			;;
+		-*)
+			set -- "$@" "$1"
+			shift
+			todo=$((todo - 1))
+			;;
+		*)
+			if [ -n "$dir" ]; then
+				echo "usage: ./pgo import DIR [--user NAME] [--dry-run]" >&2
+				exit 2
+			fi
+			dir=$1
+			shift
+			todo=$((todo - 1))
+			;;
+		esac
+	done
+	if [ -z "$dir" ]; then
+		echo "usage: ./pgo import DIR [--user NAME] [--dry-run]" >&2
+		exit 2
+	fi
+	case $dir in
+	/*) ;;
+	*) dir=$caller_dir/$dir ;;
+	esac
+	if [ ! -d "$dir" ]; then
+		echo "error: $dir is not a directory" >&2
+		exit 2
+	fi
+	import_dir=$(cd "$dir" && pwd -P)
+	case $import_dir in
+	*[:,]*)
+		echo "error: the path must not contain ':' or ','" >&2
+		exit 2
+		;;
+	esac
+	set -- import /import "$@"
+fi
+
 # Allocate a TTY only when attached to a terminal (not in cron or pipes),
 # so interactive prompts work and stdin works otherwise.
 tty_flag=-T
 if [ -t 0 ] && [ -t 1 ]; then
 	tty_flag=
+fi
+
+if [ -n "$import_dir" ]; then
+	exec docker compose --progress quiet run --rm $build $tty_flag \
+		-v "$import_dir:/import:ro" \
+		-e PAPERLESS_GO_COMMAND=./pgo -e PAPERLESS_GO_OPERATOR="$operator" paperless-go "$@"
 fi
 
 exec docker compose --progress quiet run --rm $build $tty_flag \

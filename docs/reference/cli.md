@@ -13,6 +13,7 @@ command.
 | `process [--until-empty]` | Processes queued documents in the foreground (see [Processing](#processing)); with `--until-empty` it stops when none is due. |
 | `reprocess [--failed \| --all \| ID...]` | Queues documents for processing again. |
 | `keygen` | Prints a new random secret key for `PAPERLESS_GO_SECRET_KEY` (32 bytes, base64). Run it once at the first install; changing the key later breaks every two-factor login. |
+| `import PATH [--user NAME] [--dry-run]` | Imports the PDF, JPEG, PNG and HEIC/HEIF files in `PATH` (a folder, searched recursively, or one file) as new documents in a user's inbox; see [Importing files](../guide/import). |
 | `--version` | Prints the version. |
 
 ## Users
@@ -51,6 +52,24 @@ Only in the wrapper:
 | Command | Does |
 |---|---|
 | `./pgo backup DIR` | Writes a `pg_dump` of the database to `DIR`. Copy the data directory afterwards; see [Backups](../guide/operations#backups). |
+
+## Import
+
+`import PATH` reads the files below `PATH` and never changes, moves or
+deletes them; symbolic links are skipped. It prints one line per file
+(`imported`, `duplicate of "TITLE"` or `failed: REASON`) and a summary, and
+exits with status 1 if any file failed. Running it again reports the imported
+files as duplicates.
+
+| Flag | Does |
+|---|---|
+| `--user NAME` | The owner of the documents. Required when there is more than one user; an unknown or locked user is refused. |
+| `--dry-run` | Checks type, size (`PAPERLESS_GO_MAX_UPLOAD_SIZE`), pixels (50 megapixels at most) and duplicates, and stores nothing. |
+
+`./pgo import DIR` takes a folder on the host (relative to where you run it)
+and mounts it read-only into the container. A file instead of a folder is
+refused. Each run that imports something writes a `document.import` entry to
+the audit log.
 
 ## Audit log
 
