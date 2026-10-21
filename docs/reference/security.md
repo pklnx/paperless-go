@@ -49,6 +49,26 @@ from the internet.
   their own. The last admin who can log in cannot be demoted, locked or
   removed.
 
+## Audit log
+
+The [audit log](../guide/audit-log) records:
+
+| What | Recorded |
+|---|---|
+| Logins and logouts | The user, client address, user agent, method (`password`). |
+| Failed logins | The reason (`wrong_password`, `unknown_user`, `locked`) and the user, if known. For an unknown user the tried name is kept only if it is a valid user name, so a password typed into the name field is not stored. Attempts the login limit refuses are not recorded. |
+| User changes | Adding, removing, locking, unlocking, promoting and demoting users, password resets and passwords set on the command line: who did it and to whom. |
+| Own password changes | Who changed their password. |
+| Command line | Every command that changes a user, and `audit export`, with the command, the operating system user and `PAPERLESS_GO_OPERATOR` (`./pgo` sets the host user; not verified). |
+
+Passwords, generated or typed, are never recorded. A change and its entry
+are written in one transaction: if the entry cannot be written, the change
+is not made. The log is append-only: the database refuses to change or
+delete entries, also for the database owner unless it is a superuser.
+Removing a user keeps their entries under the name they had. Users see their
+own entries on the Log page; admins see everyone's and can export them with
+`audit export`. Entries are kept for good; there is no retention yet.
+
 ## Browser protections
 
 Every website open in your browser could try to send requests to the server.

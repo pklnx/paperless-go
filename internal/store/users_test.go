@@ -311,6 +311,10 @@ func TestLoginMigrationRefusesUsers(t *testing.T) {
 	ctx := context.Background()
 	storetest.User(t, st, "alice", false)
 
+	// The audit log first, which has no entries.
+	if rolledBack, err := st.MigrateDown(ctx); err != nil || rolledBack != "00005_audit_log.sql" {
+		t.Fatalf("roll back the audit log: %q, %v", rolledBack, err)
+	}
 	if _, err := st.MigrateDown(ctx); err == nil || !strings.Contains(err.Error(), "users exist") {
 		t.Fatalf("roll back with users: %v", err)
 	}

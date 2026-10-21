@@ -144,18 +144,33 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	}
 }
 
-// housekeeping deletes expired sessions at start and then every hour until
-// ctx ends.
+// auditMonthsAhead is how many months of audit log partitions serve keeps
+// ready beyond the current one.
+const auditMonthsAhead = 3
+
+// housekeeping runs at start and then every hour until ctx ends: it creates
+// the audit log partitions ahead and deletes expired sessions.
 func (s *Server) housekeeping(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
+		s.ensureAuditPartitions(ctx)
 		s.deleteExpiredSessions(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+	}
+}
+
+func (s *Server) ensureAuditPartitions(ctx context.Context) {
+	n, err := s.store.EnsureAuditPartitions(ctx, auditMonthsAhead)
+	switch {
+	case err != nil && ctx.Err() == nil:
+		s.log.Error("create audit log partitions", "err", err)
+	case n > 0:
+		s.log.Info("created audit log partitions", "count", n)
 	}
 }
 
@@ -192,6 +207,10 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, status int, msg st
 }
 
 func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, store.ErrAuditUnavailable) {
+		s.failAudit(w, r, err)
+		return
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		s.fail(w, r, http.StatusNotFound, "not found", err)
 		return

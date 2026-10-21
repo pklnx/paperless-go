@@ -29,6 +29,7 @@ func openApp(ctx context.Context) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
+	ensureAuditPartitions(ctx, st)
 	return &app{cfg: cfg, store: st}, nil
 }
 

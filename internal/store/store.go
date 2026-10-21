@@ -26,6 +26,8 @@ var migrationsFS embed.FS
 type Store struct {
 	pool *pgxpool.Pool
 	q    *db.Queries
+	// userAgents caches the IDs of audit log user agents.
+	userAgents userAgentCache
 }
 
 // Open connects to the database.

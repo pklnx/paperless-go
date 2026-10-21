@@ -226,6 +226,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if len(in.Password) > auth.MaxPasswordLength {
 		// No stored password is that long; skip the hashing work.
 		s.limiter.Fail(name, addr)
+		s.auditLoginFailed(r, reasonWrongPassword, name, nil)
 		s.fail(w, r, http.StatusUnauthorized, errWrongLogin, nil)
 		return
 	}
@@ -249,10 +250,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		s.limiter.Fail(name, addr)
 		s.log.Info("login failed", "user", loggableUserName(name), "addr", addr)
+		if u == nil {
+			s.auditLoginFailed(r, reasonUnknownUser, name, nil)
+		} else {
+			s.auditLoginFailed(r, reasonWrongPassword, name, u)
+		}
 		s.fail(w, r, http.StatusUnauthorized, errWrongLogin, nil)
 		return
 	}
 	if u.LockedAt != nil {
+		s.auditLoginFailed(r, reasonLocked, name, u)
 		s.fail(w, r, http.StatusForbidden, "this user is locked", nil)
 		return
 	}
@@ -276,7 +283,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.now()
-	if err := s.store.StartSession(ctx, hash, u.ID, now, now.Add(auth.MaxSessionAge), truncateUserAgent(r.UserAgent())); err != nil {
+	e := s.auditEntry(r, "auth.login")
+	e.SetUser(u.ID, u.Name)
+	e.Detail("method", "password")
+	if err := s.store.StartSession(withAudit(r, e), hash, u.ID, now, now.Add(auth.MaxSessionAge), truncateUserAgent(r.UserAgent())); err != nil {
 		s.failStore(w, r, err)
 		return
 	}
@@ -285,10 +295,24 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, sessionJSON{User: userJSON{Name: u.Name, Admin: u.IsAdmin, MustChangePassword: u.MustChangePassword}})
 }
 
-// handleLogout ends the session.
+// handleLogout ends the session. A logout never fails because of the audit
+// log: without its entry the session is deleted anyway.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if token := sessionToken(r); token != "" {
-		if err := s.store.DeleteSession(r.Context(), auth.HashSessionToken(token)); err != nil {
+		hash := auth.HashSessionToken(token)
+		ctx := r.Context()
+		// Only a valid session writes a logout entry.
+		if sess, err := s.session(r); err == nil && sess != nil {
+			e := s.auditEntry(r, "auth.logout")
+			e.SetUser(sess.UserID, sess.UserName)
+			ctx = withAudit(r, e)
+		}
+		err := s.store.EndSession(ctx, hash)
+		if errors.Is(err, store.ErrAuditUnavailable) {
+			s.log.Error("audit log entry lost", "action", "auth.logout", "err", err)
+			err = s.store.DeleteSession(r.Context(), hash)
+		}
+		if err != nil {
 			s.fail(w, r, http.StatusInternalServerError, "internal error", err)
 			return
 		}

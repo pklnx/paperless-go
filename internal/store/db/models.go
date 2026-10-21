@@ -5,10 +5,33 @@
 package db
 
 import (
+	"net/netip"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+type AuditLog struct {
+	ID          int64
+	At          time.Time
+	Actor       string
+	UserID      *int64
+	UserName    *string
+	ApiKeyID    *int64
+	ApiKeyName  *string
+	Action      string
+	TargetType  *string
+	TargetID    *string
+	TargetName  *string
+	ClientIp    *netip.Addr
+	UserAgentID *int64
+	Details     []byte
+}
+
+type AuditUserAgent struct {
+	ID        int64
+	UserAgent string
+}
 
 type Correspondent struct {
 	ID         pgtype.UUID

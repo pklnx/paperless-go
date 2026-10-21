@@ -4,13 +4,14 @@ import { AuthGate } from "./Auth";
 import { fetchHealth, type Health } from "./health";
 import { t } from "./i18n";
 import logo from "./logo.svg";
+import { LogPage } from "./LogPage";
 import { ProfilePage } from "./Profile";
 import { ThemeToggle } from "./ThemeToggle";
 import { UsersPage } from "./UsersPage";
 
 const docsURL = "https://pklnx.github.io/paperless-go/";
 
-type View = "home" | "profile" | "users";
+type View = "home" | "profile" | "log" | "users";
 
 /** The app: the login gate, then the logged-in shell. */
 export function App() {
@@ -22,6 +23,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
   const nav: { id: View; label: string }[] = [
     { id: "home", label: t.home },
     { id: "profile", label: t.profile },
+    { id: "log", label: t.log },
     ...(user.admin ? [{ id: "users" as const, label: t.users }] : []),
   ];
   return (
@@ -53,6 +55,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
       <main className="flex-1">
         {view === "home" && <Home />}
         {view === "profile" && <ProfilePage user={user} />}
+        {view === "log" && <LogPage admin={user.admin} />}
         {view === "users" && user.admin && <UsersPage />}
       </main>
     </div>

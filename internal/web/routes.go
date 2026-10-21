@@ -37,6 +37,8 @@ func (s *Server) routes() []route {
 
 		h("PUT "+profilePasswordPath, s.handleChangeOwnPassword, accessSession),
 
+		h("GET /api/audit", s.handleAudit, accessSession),
+
 		h("GET /api/users", s.handleListUsers, accessSession),
 		h("POST /api/users", s.handleCreateUser, accessSession),
 		h("PATCH /api/users/{name}", s.handleUpdateUser, accessSession),

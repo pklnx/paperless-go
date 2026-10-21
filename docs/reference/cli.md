@@ -35,8 +35,24 @@ see every user's documents.
 The last admin who can log in (not locked) can be neither demoted, locked
 nor removed.
 
+Every command that changes a user writes an [audit log](../guide/audit-log)
+entry together with the change; if the entry cannot be written, nothing
+changes. The entry names the command, the operating system user and, when
+set, `PAPERLESS_GO_OPERATOR`: `./pgo` sets it to the user who runs it on
+the host. Neither name is verified.
+
 Only in the wrapper:
 
 | Command | Does |
 |---|---|
 | `./pgo backup DIR` | Writes a `pg_dump` of the database to `DIR`. Copy the data directory afterwards; see [Backups](../guide/operations#backups). |
+
+## Audit log
+
+| Command | Does |
+|---|---|
+| `audit export --since DATE --format csv\|jsonl [--until DATE] [--user NAME] [--action A]... [--out FILE]` | Writes the entries of a period, oldest first, to stdout or a new file `FILE` (mode `0600`, refused if it exists). `DATE` is `YYYY-MM-DD` (midnight UTC) or RFC 3339; a plain `--until` date includes that day. `--action` takes a group (`login`, `users`, `profile`, `export`) or an action such as `auth.login`, and repeats. The export itself is recorded as `audit.export`. In CSV, a cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'` so spreadsheets do not run it as a formula. |
+
+With `./pgo`, `--out` must point into a directory the container can write,
+for example the data directory (`/data/...`); stdout works anywhere:
+`./pgo audit export --since 2026-01-01 --format csv > audit.csv`.

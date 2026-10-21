@@ -1,0 +1,52 @@
+# Audit log
+
+paperless-go records who logged in and who changed which login: in the web
+UI and on the command line. The log is append-only: the database refuses to
+change or delete entries.
+
+## What is recorded
+
+| Action | When |
+|---|---|
+| `auth.login`, `auth.logout` | A user logs in or out. |
+| `auth.login_failed` | A login is refused: wrong password, unknown user or a locked user. For an unknown user the tried name is kept only if it is a valid user name. Attempts the login limit refuses are not recorded. |
+| `user.add`, `user.remove` | An admin adds or removes a user. |
+| `user.lock`, `user.unlock` | An admin locks or unlocks a user. |
+| `user.promote`, `user.demote` | An admin grants or takes away the admin role. |
+| `user.password_reset` | An admin generates a new password for a user. |
+| `user.password_set` | `user set-password` sets a password on the command line. |
+| `profile.password_change` | A user changes their own password. |
+| `audit.export` | `audit export` writes the log out. |
+
+Each entry has the time, the user (by the name they had then), the client
+address and browser in the web UI, the user an admin action was about, and
+details such as a failed login's reason. Passwords are never recorded.
+Commands record the command, the operating system user and the operator
+`./pgo` passes (the user on the host); neither is verified, because whoever
+can run commands holds the database password.
+
+A change and its entry are written together: if the entry cannot be
+written, the change is not made and the web UI answers with an error.
+Removing a user keeps their entries.
+
+## Reading the log
+
+The **Log** page in the web UI shows your own entries, newest first, for the
+last 30 days by default; choose a period and a kind of action to see others.
+Admins see every user's entries and can narrow them to one user or to the
+command line.
+
+Admins can export a period as CSV or JSON lines:
+
+```sh
+./pgo audit export --since 2026-01-01 --format csv > audit-2026.csv
+./pgo audit export --since 2026-10-01 --until 2026-10-31 --user alice --action login --format jsonl > alice.jsonl
+```
+
+See [Command line](../reference/cli#audit-log) for all options.
+
+## Storage
+
+The log is partitioned by month. `serve` creates the partitions three months
+ahead, every command one month ahead. Entries are kept for good; there is no
+retention yet. Back up the database as usual: the log is part of the dump.

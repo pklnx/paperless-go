@@ -20,6 +20,9 @@ const (
 	// EnvTrustedProxies lists the reverse proxies (CIDR or single addresses)
 	// whose X-Forwarded-For names the client; empty trusts none.
 	EnvTrustedProxies = "PAPERLESS_GO_TRUSTED_PROXIES"
+	// EnvOperator names who runs a command, for the audit log (not
+	// verified). ./pgo sets it to the host user.
+	EnvOperator = "PAPERLESS_GO_OPERATOR"
 )
 
 // Config holds the application configuration.

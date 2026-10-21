@@ -41,8 +41,9 @@ describe("App", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe(t.statusOk));
     expect(screen.getByText("alice")).toBeTruthy();
-    // Not an admin: no users page.
+    // Not an admin: no users page, but the own log.
     expect(screen.queryByRole("button", { name: t.users })).toBeNull();
+    expect(screen.getByRole("button", { name: t.log })).toBeTruthy();
   });
 
   it("shows a server without database", async () => {
