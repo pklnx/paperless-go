@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadNeedsDatabaseURL(t *testing.T) {
@@ -110,6 +111,46 @@ func TestLoadMaxUploadSize(t *testing.T) {
 	t.Setenv(EnvMaxUploadSize, "lots")
 	if _, err := Load(); err == nil {
 		t.Error("Load() accepted an invalid size")
+	}
+}
+
+func TestLoadOCR(t *testing.T) {
+	t.Setenv(EnvDatabaseURL, "postgres://x")
+	for _, k := range []string{EnvOCRWorkers, EnvOCRLanguages, EnvOCRTimeout} {
+		t.Setenv(k, "")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OCRWorkers != 1 || cfg.OCRLanguages != "deu+eng" || cfg.OCRTimeout != 30*time.Minute {
+		t.Errorf("defaults: %d, %q, %s", cfg.OCRWorkers, cfg.OCRLanguages, cfg.OCRTimeout)
+	}
+
+	t.Setenv(EnvOCRWorkers, " 0 ")
+	t.Setenv(EnvOCRLanguages, "deu+eng+chi_sim+deu_latf")
+	t.Setenv(EnvOCRTimeout, "2h")
+	if cfg, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OCRWorkers != 0 || cfg.OCRLanguages != "deu+eng+chi_sim+deu_latf" || cfg.OCRTimeout != 2*time.Hour {
+		t.Errorf("set: %d, %q, %s", cfg.OCRWorkers, cfg.OCRLanguages, cfg.OCRTimeout)
+	}
+
+	for env, values := range map[string][]string{
+		EnvOCRWorkers:   {"-1", "17", "two"},
+		EnvOCRLanguages: {"deu eng", "deu,eng", "+deu", "deu+", "DEU", "deu;rm", "-l"},
+		EnvOCRTimeout:   {"30", "59s", "-1h", "soon"},
+	} {
+		for _, v := range values {
+			t.Setenv(EnvOCRWorkers, "")
+			t.Setenv(EnvOCRLanguages, "")
+			t.Setenv(EnvOCRTimeout, "")
+			t.Setenv(env, v)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), env) {
+				t.Errorf("%s=%q: %v", env, v, err)
+			}
+		}
 	}
 }
 

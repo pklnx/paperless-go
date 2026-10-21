@@ -19,6 +19,13 @@ make docker-multiarch   # build amd64 + arm64 images
 scripts/compose-smoke-test.sh   # end-to-end test of Compose and ./pgo (also in CI)
 ```
 
+Running `serve` from a host build needs the OCR tools of the image
+(poppler-utils, Tesseract with the configured languages): with processing on,
+it refuses to start when `tesseract --list-langs` lacks one. Without them, set
+`PAPERLESS_GO_OCR_WORKERS=0`; documents then stay queued until `serve` with
+the tools or `process` runs. The tests with the real tools run in the image:
+`docker build --target toolstest -t paperless-go:toolstest . && docker run --rm paperless-go:toolstest`.
+
 Database tests create a throwaway database per test
 (`internal/store/storetest`) and are skipped without `TEST_DATABASE_URL`; the
 user in it needs `CREATEDB`. CI runs them all.

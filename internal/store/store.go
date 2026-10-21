@@ -80,6 +80,16 @@ func (s *Store) MigrateDown(ctx context.Context) (string, error) {
 	return rolledBack, err
 }
 
+// MigrateDownTo rolls back every applied migration newer than version, newest
+// first. Tests use it to reach the schema before a migration however many
+// came after it; like MigrateDown, it usually drops data.
+func (s *Store) MigrateDownTo(ctx context.Context, version int64) error {
+	return s.withMigrations(func(p *goose.Provider) error {
+		_, err := p.DownTo(ctx, version)
+		return err
+	})
+}
+
 // MigrationStatus describes one known migration.
 type MigrationStatus struct {
 	Path      string

@@ -28,3 +28,6 @@ Compose, set them in `.env`; `docker-compose.yml` passes them on.
 | `PAPERLESS_GO_REQUIRE_2FA` | `false` | `true` makes two-factor login required for every user; admins always need it. Other values are refused. |
 | `PAPERLESS_GO_OPERATOR` | (none) | Who runs a command, recorded in the [audit log](../guide/audit-log) (not verified). `./pgo` sets it to the host user. |
 | `PAPERLESS_GO_MAX_UPLOAD_SIZE` | `100MiB` | Largest file imported by upload, consume folder and CLI import: bytes, or a number with `KiB`, `MiB` or `GiB`. A file of exactly this size passes. Images may also have at most 50 megapixels. |
+| `PAPERLESS_GO_OCR_WORKERS` | `1` | How many documents `serve` processes at once (0 to 16). Each runs its tools on every CPU. `0` turns processing in `serve` off; `process` still works. |
+| `PAPERLESS_GO_OCR_LANGUAGES` | `deu+eng` | Tesseract languages, joined with `+`. `serve` and `process` refuse to start when Tesseract lacks one; the image has `deu`, `eng` and `osd`. |
+| `PAPERLESS_GO_OCR_TIMEOUT` | `30m` | Limit of each processing attempt (at least `1m`, for example `2h`). An attempt that takes longer is stopped and retried. |

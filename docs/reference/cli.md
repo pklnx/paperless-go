@@ -10,6 +10,8 @@ command.
 | `migrate status` | Lists applied and pending migrations. |
 | `migrate down --yes` | Rolls back the most recent migration. Usually deletes data; for development. |
 | `serve [--listen ADDR]` | Runs the web server (default `127.0.0.1:8080`; `:8080` in Compose). Refuses to start without `PAPERLESS_GO_SECRET_KEY` and while migrations are pending. |
+| `process [--until-empty]` | Processes queued documents in the foreground (see [Processing](#processing)); with `--until-empty` it stops when none is due. |
+| `reprocess [--failed \| --all \| ID...]` | Queues documents for processing again. |
 | `keygen` | Prints a new random secret key for `PAPERLESS_GO_SECRET_KEY` (32 bytes, base64). Run it once at the first install; changing the key later breaks every two-factor login. |
 | `--version` | Prints the version. |
 
@@ -58,3 +60,29 @@ Only in the wrapper:
 With `./pgo`, `--out` must point into a directory the container can write,
 for example the data directory (`/data/...`); stdout works anywhere:
 `./pgo audit export --since 2026-01-01 --format csv > audit.csv`.
+
+## Processing
+
+Every new document is queued for processing: its text is extracted, its
+pages counted and its archive PDF made. `serve` processes the queue in the
+background (`PAPERLESS_GO_OCR_WORKERS`). A failed attempt is retried twice,
+after 1 and 5 minutes; a damaged PDF or one that needs a password to open
+fails at once. The error stays with the document.
+
+| Command | Does |
+|---|---|
+| `process` | Processes the queue in the foreground until stopped. It can run next to `serve`: each document goes to one of them. |
+| `process --until-empty` | Processes until no queued document is due, then prints how many were processed, are waiting for a retry, or failed. |
+| `reprocess --failed` | Queues the documents whose processing failed. |
+| `reprocess --all` | Queues every document. |
+| `reprocess ID...` | Queues the documents with these IDs. An unknown ID queues nothing. |
+
+Processing again replaces a document's extracted text, page count and
+archive PDF. Text that did not come from processing (`PDF-Text` or
+`Tesseract`), such as text imported from the app or edited by hand, is kept.
+`reprocess` writes a `document.reprocess` entry to the audit log.
+
+This version extracts the text layer of PDFs. A PDF with fewer than 15
+characters on some page needs OCR, and images need conversion; both come
+with the next version, and until then such documents fail with a message
+that says so. After the update, `reprocess --failed` queues them again.

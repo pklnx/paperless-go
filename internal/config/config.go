@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pklnx/paperless-go/internal/crypto"
 )
@@ -37,6 +39,23 @@ const (
 	// EnvRequire2FA set to true makes two-factor login required for every
 	// user; admins always need it.
 	EnvRequire2FA = "PAPERLESS_GO_REQUIRE_2FA"
+	// EnvOCRWorkers is how many documents serve processes at once; 0 turns
+	// processing in serve off.
+	EnvOCRWorkers = "PAPERLESS_GO_OCR_WORKERS"
+	// EnvOCRLanguages are the Tesseract languages, joined with "+".
+	EnvOCRLanguages = "PAPERLESS_GO_OCR_LANGUAGES"
+	// EnvOCRTimeout limits each processing attempt (a Go duration).
+	EnvOCRTimeout = "PAPERLESS_GO_OCR_TIMEOUT"
+)
+
+// Processing defaults.
+const (
+	DefaultOCRWorkers   = 1
+	DefaultOCRLanguages = "deu+eng"
+	DefaultOCRTimeout   = 30 * time.Minute
+	// MaxOCRWorkers bounds PAPERLESS_GO_OCR_WORKERS: each worker runs its
+	// tools on every CPU.
+	MaxOCRWorkers = 16
 )
 
 // DefaultMaxUploadSize is the size limit when EnvMaxUploadSize is unset.
@@ -56,6 +75,12 @@ type Config struct {
 	// MaxUploadSize is the largest file in bytes that is imported; a
 	// file of exactly this size passes.
 	MaxUploadSize int64
+	// OCRWorkers is how many documents serve processes at once (0: none).
+	OCRWorkers int
+	// OCRLanguages are Tesseract language codes joined with "+".
+	OCRLanguages string
+	// OCRTimeout limits each processing attempt.
+	OCRTimeout time.Duration
 	// SecretKey seals TOTP secrets; nil if not configured. It is a
 	// secret: never log it.
 	SecretKey []byte
@@ -106,6 +131,15 @@ func Load() (*Config, error) {
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
+	if cfg.OCRWorkers, err = parseWorkers(os.Getenv(EnvOCRWorkers)); err != nil {
+		return nil, err
+	}
+	if cfg.OCRLanguages, err = ParseLanguages(os.Getenv(EnvOCRLanguages)); err != nil {
+		return nil, err
+	}
+	if cfg.OCRTimeout, err = parseTimeout(os.Getenv(EnvOCRTimeout)); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -135,6 +169,47 @@ func ParseSize(env, v string, def int64) (int64, error) {
 		return 0, fmt.Errorf("%s: want a positive size in bytes or with KiB, MiB or GiB like 100MiB, got %q", env, v)
 	}
 	return n << shift, nil
+}
+
+func parseWorkers(v string) (int, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return DefaultOCRWorkers, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 || n > MaxOCRWorkers {
+		return 0, fmt.Errorf("%s: want a number from 0 to %d, got %q", EnvOCRWorkers, MaxOCRWorkers, v)
+	}
+	return n, nil
+}
+
+// languages matches Tesseract languages (deu, eng, chi_sim, deu_latf) joined with +.
+var languages = regexp.MustCompile(`^[a-z][a-z0-9_]{1,31}(\+[a-z][a-z0-9_]{1,31})*$`)
+
+// ParseLanguages checks a list of Tesseract languages joined with "+",
+// such as deu+eng; empty means DefaultOCRLanguages. Whether Tesseract has
+// them is checked when serve starts.
+func ParseLanguages(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return DefaultOCRLanguages, nil
+	}
+	if !languages.MatchString(v) {
+		return "", fmt.Errorf("%s: want Tesseract languages joined with +, such as deu+eng, got %q", EnvOCRLanguages, v)
+	}
+	return v, nil
+}
+
+func parseTimeout(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return DefaultOCRTimeout, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < time.Minute {
+		return 0, fmt.Errorf("%s: want a duration of at least 1m, such as 30m or 2h, got %q", EnvOCRTimeout, v)
+	}
+	return d, nil
 }
 
 // Sealer returns a Sealer for the configured secret key, or an error that

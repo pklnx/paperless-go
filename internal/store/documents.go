@@ -43,6 +43,8 @@ type Document struct {
 	OriginalMIME        string
 	ArchiveSHA256       *string // nil until OCR has run
 	ArchiveSize         *int64
+	ThumbnailSHA256     *string // nil until processing has made one (#5, part 4)
+	ProcessingNote      string  // how processing went, for example why OCR was skipped
 	CorrespondentID     *string
 	DocumentTypeID      *string
 	TagIDs              []string
@@ -97,8 +99,8 @@ func documentFromDB(r db.GetDocumentRow) *Document {
 		ExtractedText: r.ExtractedText, TextSource: r.TextSource, Source: r.Source,
 		OriginalFileName: r.OriginalFileName, OriginalSHA256: r.OriginalSha256,
 		OriginalSize: r.OriginalSize, OriginalMIME: r.OriginalMime, ArchiveSHA256: r.ArchiveSha256,
-		ArchiveSize: r.ArchiveSize, CorrespondentID: idPtr(r.CorrespondentID),
-		DocumentTypeID: idPtr(r.DocumentTypeID), TagIDs: tags,
+		ArchiveSize: r.ArchiveSize, ThumbnailSHA256: r.ThumbnailSha256, ProcessingNote: r.ProcessingNote,
+		CorrespondentID: idPtr(r.CorrespondentID), DocumentTypeID: idPtr(r.DocumentTypeID), TagIDs: tags,
 	}
 }
 
@@ -163,7 +165,9 @@ func (in *NewDocument) validate() error {
 
 // CreateDocument adds a document owned by the scope's user, with its tags.
 // The input is validated first: a refused field gives a *ValidationError
-// (ErrInvalid). When the owner already has a document with the same
+// (ErrInvalid). A document without an archive PDF is queued for processing
+// in the same transaction, so no committed document is ever left
+// unprocessed. When the owner already has a document with the same
 // original file, the error is a *DuplicateError (ErrDuplicate); other
 // owners' documents do not count. A linked tag, correspondent or document
 // type that is not the owner's gives ErrOwnerMismatch; a taken ASN gives
@@ -208,10 +212,16 @@ func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*
 		if err != nil {
 			return err
 		}
-		if len(tags) == 0 {
-			return nil
+		if len(tags) > 0 {
+			if err := q.AddDocumentTags(ctx, db.AddDocumentTagsParams{OwnerID: owner, DocumentID: id, TagIds: tags}); err != nil {
+				return err
+			}
 		}
-		return q.AddDocumentTags(ctx, db.AddDocumentTagsParams{OwnerID: owner, DocumentID: id, TagIds: tags})
+		if in.ArchiveSHA256 == nil {
+			_, err := enqueue(ctx, q, []pgtype.UUID{id})
+			return err
+		}
+		return nil
 	})
 	if isUniqueViolation(err, "documents_owner_original_sha256_key") {
 		dup := &DuplicateError{}

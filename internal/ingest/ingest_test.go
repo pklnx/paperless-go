@@ -150,6 +150,14 @@ func TestImportDetectsFromContentNotName(t *testing.T) {
 		res.Document.Source != store.SourceFile || !res.Document.IsInbox {
 		t.Errorf("pdf: %+v %+v", res, res.Document)
 	}
+
+	// Both new documents are queued for processing (#5).
+	for _, doc := range []*store.Document{d, res.Document} {
+		jobs, err := e.st.DocumentJobs(context.Background(), doc.ID)
+		if err != nil || len(jobs) != 1 || jobs[0].State != store.JobQueued {
+			t.Errorf("jobs of %s: %+v, %v", doc.OriginalMIME, jobs, err)
+		}
+	}
 }
 
 func TestImportRefusedStoresNothing(t *testing.T) {
