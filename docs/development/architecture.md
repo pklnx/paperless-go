@@ -70,12 +70,22 @@ another user's tag, correspondent or type. Every store call takes a
 (`ErrNotFound`), and `All` (admins) widens it to every owner. A link to a
 row that is not the owner's gives `ErrOwnerMismatch`, whether the row
 belongs to someone else or does not exist.
+A refused value gives a `*ValidationError` (`ErrInvalid`): `CreateDocument`
+validates its input first, and any other check or not-null violation the
+store has no specific error for is mapped to it, so no database message
+reaches a caller. A new row whose owner does not exist (any more) gives
+`ErrUnknownUser`. The web layer answers `ErrInvalid` with 400 and fixed
+wording, and any store error it does not know with a generic 500 that is
+only logged.
 
 **Files.** A document keeps its original file next to the archive PDF. Both
 live in the blob store, named by their SHA-256 without an extension; the
 type is in the database. `original_sha256` is the uploaded file (the app's
 `contentHash`) and detects duplicates per owner (`ErrDuplicate` names the
 existing document; the same file for two owners is stored once on disk).
+`FindDocumentByOriginal(ownerID, hash)` looks up a duplicate by the owner
+the new document would get, never through a scope: an admin's upload is
+checked only against the admin's own documents.
 `archive_sha256` is the PDF with a text layer from OCR, `NULL` until
 processed and equal to the original for a PDF that already has text. Export
 writes the archive PDF, or the original when there is none. Deleting a row
@@ -154,6 +164,11 @@ about durability.
   store root is an error. The caller makes sure no row refers to the file;
   deleting a document row leaves its file, and the orphan sweep that removes
   unreferenced files comes with the trash (#12).
+
+Every call that takes a hash (`OpenHash`, `Exists`, `Remove`) accepts only
+a lowercase hex SHA-256 and builds the path itself, so no input reaches a
+file outside `documents/`; a malformed hash gives `ErrNotHash` (`Exists`:
+false). There is no access by path.
 
 Stale temporary names in `tmp/` are possible after a crash. A name left
 after publication is a second hard link to a live blob. `Walk` reports every

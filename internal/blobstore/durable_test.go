@@ -341,7 +341,7 @@ func TestPutFailures(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, rec, root := newRecorded(t)
-			final := filepath.Join(root, filepath.FromSlash(RelPath(hash)))
+			final := filepath.Join(root, filepath.FromSlash(relPath(hash)))
 			if tc.existing {
 				if _, _, err := s.Put(strings.NewReader(content)); err != nil {
 					t.Fatal(err)
@@ -446,7 +446,7 @@ func TestPutConcurrentInstances(t *testing.T) {
 	probe, _, _ := newRecorded(t)
 	pb, _, _ := probe.Put(strings.NewReader(content))
 	hash := pb.SHA256
-	final := filepath.Join(root, filepath.FromSlash(RelPath(hash)))
+	final := filepath.Join(root, filepath.FromSlash(relPath(hash)))
 	leaf := shardDirs(root, hash)[0]
 
 	bAtLink, aPublished, releaseA := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -541,7 +541,7 @@ func TestRemoveDurable(t *testing.T) {
 			t.Fatal(err)
 		}
 		dirs := shardDirs(root, hash)
-		equal(t, "remove", rec.take(), append([]string{"unlink:" + s.abs(RelPath(hash))}, barrier(dirs[0])...))
+		equal(t, "remove", rec.take(), append([]string{"unlink:" + s.abs(relPath(hash))}, barrier(dirs[0])...))
 		if s.Exists(hash) {
 			t.Error("file still there")
 		}
@@ -549,14 +549,14 @@ func TestRemoveDurable(t *testing.T) {
 	t.Run("missing file", func(t *testing.T) {
 		s, rec, root := newRecorded(t)
 		hash := put(t, s)
-		if err := os.Remove(s.abs(RelPath(hash))); err != nil {
+		if err := os.Remove(s.abs(relPath(hash))); err != nil {
 			t.Fatal(err)
 		}
 		rec.take()
 		if err := s.Remove(hash); err != nil {
 			t.Fatal(err)
 		}
-		equal(t, "remove", rec.take(), append([]string{"unlink:" + s.abs(RelPath(hash))}, barrier(shardDirs(root, hash)[0])...))
+		equal(t, "remove", rec.take(), append([]string{"unlink:" + s.abs(relPath(hash))}, barrier(shardDirs(root, hash)[0])...))
 	})
 	t.Run("missing leaf shard", func(t *testing.T) {
 		s, rec, root := newRecorded(t)
@@ -569,7 +569,7 @@ func TestRemoveDurable(t *testing.T) {
 		if err := s.Remove(hash); err != nil {
 			t.Fatal(err)
 		}
-		equal(t, "remove", rec.take(), append([]string{"unlink:" + s.abs(RelPath(hash)), "open:" + dirs[0]},
+		equal(t, "remove", rec.take(), append([]string{"unlink:" + s.abs(relPath(hash)), "open:" + dirs[0]},
 			barrier(dirs[1], dirs[2], root)...))
 		if _, err := os.Stat(dirs[0]); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("Remove created the shard: %v", err)
@@ -586,13 +586,13 @@ func TestRemoveDurable(t *testing.T) {
 		if err := s.Remove(hash); err != nil {
 			t.Fatal(err)
 		}
-		equal(t, "remove", rec.take(), append([]string{"unlink:" + s.abs(RelPath(hash)), "open:" + dirs[0], "open:" + dirs[1]},
+		equal(t, "remove", rec.take(), append([]string{"unlink:" + s.abs(relPath(hash)), "open:" + dirs[0], "open:" + dirs[1]},
 			barrier(dirs[2], root)...))
 	})
 	t.Run("unrelated failures", func(t *testing.T) {
 		s, rec, root := newRecorded(t)
 		hash := put(t, s)
-		final := s.abs(RelPath(hash))
+		final := s.abs(relPath(hash))
 		rec.failOnce("unlink:"+final, syscall.EIO)
 		if err := s.Remove(hash); !errors.Is(err, syscall.EIO) {
 			t.Errorf("unlink failure: %v", err)
@@ -624,6 +624,6 @@ func TestRemoveDurable(t *testing.T) {
 		if err := s.Remove(hash); err != nil {
 			t.Fatal(err)
 		}
-		equal(t, "retry", rec.take(), append([]string{"unlink:" + s.abs(RelPath(hash))}, barrier(leaf)...))
+		equal(t, "retry", rec.take(), append([]string{"unlink:" + s.abs(relPath(hash))}, barrier(leaf)...))
 	})
 }

@@ -3,7 +3,9 @@ package blobstore
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,7 +41,7 @@ func TestPutDeduplicates(t *testing.T) {
 		t.Fatalf("second put should dedup: %+v created=%v", b2, created)
 	}
 
-	f, err := s.Open(b1.Path)
+	f, err := s.OpenHash(want)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,5 +212,69 @@ func TestRemoveFailsWithoutRoot(t *testing.T) {
 	}
 	if err := s.Remove(blob.SHA256); err == nil {
 		t.Fatal("Remove succeeded without the store root")
+	}
+}
+
+// OpenHash, Exists and Remove accept only lowercase hex SHA-256 hashes: no
+// input reaches a path outside documents/ or a name the store did not
+// build, and short input does not panic. Files are planted where the
+// uppercase and the 65-character names would point, so an unvalidated
+// lookup would find them.
+func TestHashInputValidated(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("x"))
+	valid := hex.EncodeToString(sum[:])
+	upper := strings.ToUpper(valid)
+	long := valid + "0"
+	for _, name := range []string{upper, long} {
+		p := filepath.Join(root, "documents", name[0:2], name[2:4], name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("planted"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "outside"), []byte("planted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, bad := range []string{
+		"", "a", "ab", "abc", "..", "../outside", "../../../../../../etc/passwd",
+		upper, long, valid[:63], valid[:62] + "..", valid[:63] + "/", valid[:63] + "g",
+	} {
+		if s.Exists(bad) {
+			t.Errorf("Exists(%q) = true", bad)
+		}
+		if f, err := s.OpenHash(bad); !errors.Is(err, ErrNotHash) {
+			if f != nil {
+				_ = f.Close()
+			}
+			t.Errorf("OpenHash(%q) = %v, want ErrNotHash", bad, err)
+		}
+		if err := s.Remove(bad); !errors.Is(err, ErrNotHash) {
+			t.Errorf("Remove(%q) = %v, want ErrNotHash", bad, err)
+		}
+	}
+	for _, p := range []string{
+		filepath.Join(root, "outside"),
+		filepath.Join(root, "documents", upper[0:2], upper[2:4], upper),
+		filepath.Join(root, "documents", long[0:2], long[2:4], long),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("planted file %s: %v", p, err)
+		}
+	}
+
+	// A valid hash without a blob is missing, not malformed.
+	if _, err := s.OpenHash(valid); !errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrNotHash) {
+		t.Errorf("OpenHash(missing) = %v, want fs.ErrNotExist", err)
+	}
+	if s.Exists(valid) {
+		t.Error("Exists(missing) = true")
 	}
 }

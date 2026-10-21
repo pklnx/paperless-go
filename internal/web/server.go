@@ -231,16 +231,20 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, status int, msg st
 	s.writeJSON(w, status, apiError{Error: msg})
 }
 
+// failStore answers a store error. Answers use fixed wording only: a store
+// or database message never reaches the client; an error without a known
+// meaning is a generic 500 and only logged.
 func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, store.ErrAuditUnavailable) {
+	switch {
+	case errors.Is(err, store.ErrAuditUnavailable):
 		s.failAudit(w, r, err)
-		return
-	}
-	if errors.Is(err, store.ErrNotFound) {
+	case errors.Is(err, store.ErrNotFound):
 		s.fail(w, r, http.StatusNotFound, "not found", err)
-		return
+	case errors.Is(err, store.ErrInvalid):
+		s.fail(w, r, http.StatusBadRequest, "invalid input", err)
+	default:
+		s.fail(w, r, http.StatusInternalServerError, "internal error", err)
 	}
-	s.fail(w, r, http.StatusInternalServerError, "internal error", err)
 }
 
 // maxBody is far more than any JSON request of the API needs.

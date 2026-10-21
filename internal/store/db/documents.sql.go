@@ -126,20 +126,25 @@ func (q *Queries) DeleteDocument(ctx context.Context, arg DeleteDocumentParams) 
 	return result.RowsAffected(), nil
 }
 
-const documentIDByOriginal = `-- name: DocumentIDByOriginal :one
-SELECT id FROM documents WHERE owner_id = $1 AND original_sha256 = $2
+const documentByOriginal = `-- name: DocumentByOriginal :one
+SELECT id, title FROM documents WHERE owner_id = $1 AND original_sha256 = $2
 `
 
-type DocumentIDByOriginalParams struct {
+type DocumentByOriginalParams struct {
 	OwnerID        int64
 	OriginalSha256 string
 }
 
-func (q *Queries) DocumentIDByOriginal(ctx context.Context, arg DocumentIDByOriginalParams) (pgtype.UUID, error) {
-	row := q.db.QueryRow(ctx, documentIDByOriginal, arg.OwnerID, arg.OriginalSha256)
-	var id pgtype.UUID
-	err := row.Scan(&id)
-	return id, err
+type DocumentByOriginalRow struct {
+	ID    pgtype.UUID
+	Title string
+}
+
+func (q *Queries) DocumentByOriginal(ctx context.Context, arg DocumentByOriginalParams) (DocumentByOriginalRow, error) {
+	row := q.db.QueryRow(ctx, documentByOriginal, arg.OwnerID, arg.OriginalSha256)
+	var i DocumentByOriginalRow
+	err := row.Scan(&i.ID, &i.Title)
+	return i, err
 }
 
 const getDocument = `-- name: GetDocument :one

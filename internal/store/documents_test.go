@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,8 +122,157 @@ func TestDocumentArchiveFileNeedsSize(t *testing.T) {
 	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
 	in := newDoc("a")
 	in.ArchiveSHA256 = ptr(hashOf("archive"))
-	if _, err := st.CreateDocument(context.Background(), alice, in); err == nil {
-		t.Fatal("archive hash without size was accepted")
+	if _, err := st.CreateDocument(context.Background(), alice, in); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("archive hash without size: %v, want ErrInvalid", err)
+	}
+}
+
+// CreateDocument validates its input before the database sees it: each
+// refused field gives a *ValidationError naming it, and no row is written.
+func TestCreateDocumentValidation(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	for _, tc := range []struct {
+		field  string
+		change func(*store.NewDocument)
+	}{
+		{"source", func(d *store.NewDocument) { d.Source = "" }},
+		{"source", func(d *store.NewDocument) { d.Source = "mail" }},
+		{"original_sha256", func(d *store.NewDocument) { d.OriginalSHA256 = "" }},
+		{"original_sha256", func(d *store.NewDocument) { d.OriginalSHA256 = strings.ToUpper(d.OriginalSHA256) }},
+		{"original_sha256", func(d *store.NewDocument) { d.OriginalSHA256 = d.OriginalSHA256[:63] }},
+		{"original_sha256", func(d *store.NewDocument) { d.OriginalSHA256 += "0" }},
+		{"original_sha256", func(d *store.NewDocument) { d.OriginalSHA256 = "../" + d.OriginalSHA256[3:] }},
+		{"original_size", func(d *store.NewDocument) { d.OriginalSize = -1 }},
+		{"original_mime", func(d *store.NewDocument) { d.OriginalMIME = "" }},
+		{"original_mime", func(d *store.NewDocument) { d.OriginalMIME = " " }},
+		{"page_count", func(d *store.NewDocument) { d.PageCount = -1 }},
+		{"archive_serial_number", func(d *store.NewDocument) { d.ArchiveSerialNumber = ptr(int32(0)) }},
+		{"archive_size", func(d *store.NewDocument) { d.ArchiveSize = ptr(int64(1)) }},
+		{"archive_sha256", func(d *store.NewDocument) { d.ArchiveSHA256, d.ArchiveSize = ptr("abc"), ptr(int64(1)) }},
+		{"archive_size", func(d *store.NewDocument) { d.ArchiveSHA256, d.ArchiveSize = ptr(hashOf("pdf")), ptr(int64(-1)) }},
+		{"title", func(d *store.NewDocument) { d.Title = "a\x00b" }},
+		{"title", func(d *store.NewDocument) { d.Title = "\xff" }},
+		{"notes", func(d *store.NewDocument) { d.Notes = "\x00" }},
+		{"extracted_text", func(d *store.NewDocument) { d.ExtractedText = "\xc3" }},
+		{"text_source", func(d *store.NewDocument) { d.TextSource = "\x00" }},
+		{"original_file_name", func(d *store.NewDocument) { d.OriginalFileName = "a\x00.pdf" }},
+	} {
+		in := newDoc("valid")
+		tc.change(&in)
+		_, err := st.CreateDocument(ctx, alice, in)
+		var verr *store.ValidationError
+		if !errors.Is(err, store.ErrInvalid) || !errors.As(err, &verr) || verr.Field != tc.field {
+			t.Errorf("%s: %v, want a ValidationError for %s", tc.field, err, tc.field)
+		}
+	}
+	docs, err := st.ListDocuments(ctx, alice)
+	if err != nil || len(docs) != 0 {
+		t.Fatalf("documents after refused input: %d, %v", len(docs), err)
+	}
+	// All valid values still pass.
+	in := newDoc("valid")
+	in.Source, in.Title = store.SourceImage, "Grüße"
+	in.ArchiveSHA256, in.ArchiveSize = ptr(hashOf("pdf")), ptr(int64(0))
+	in.ArchiveSerialNumber = ptr(int32(1))
+	mustDoc(t, st, alice, in)
+}
+
+// Check violations the store has no specific error for become a
+// ValidationError, without SQL or the database's message.
+func TestCheckViolationIsInvalid(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	d := mustDoc(t, st, alice, newDoc("a"))
+	for name, err := range map[string]error{
+		"blank correspondent": func() error {
+			_, err := st.CreateCorrespondent(ctx, alice, store.CorrespondentInput{Name: "  "})
+			return err
+		}(),
+		"unknown match mode": func() error {
+			_, err := st.CreateCorrespondent(ctx, alice, store.CorrespondentInput{Name: "x", MatchMode: "fuzzy"})
+			return err
+		}(),
+		"bad colour": func() error {
+			_, err := st.CreateTag(ctx, alice, store.TagInput{Name: "x", ColorHex: "red"})
+			return err
+		}(),
+		"asn zero on update": func() error {
+			_, err := st.UpdateDocument(ctx, alice, d.ID, store.DocumentUpdate{ArchiveSerialNumber: ptr(int32(0))})
+			return err
+		}(),
+	} {
+		var verr *store.ValidationError
+		var pgErr *pgconn.PgError
+		if !errors.Is(err, store.ErrInvalid) || !errors.As(err, &verr) || verr.Constraint == "" {
+			t.Errorf("%s: %v, want a ValidationError naming the constraint", name, err)
+			continue
+		}
+		if errors.As(err, &pgErr) {
+			t.Errorf("%s: the PostgreSQL error is still reachable: %v", name, pgErr)
+		}
+		if msg := err.Error(); strings.Contains(msg, "SQLSTATE") || strings.Contains(msg, "violates") || strings.Contains(msg, verr.Constraint) {
+			t.Errorf("%s: message %q exposes database details", name, msg)
+		}
+	}
+}
+
+// A new row whose owner does not exist gives ErrUnknownUser.
+func TestUnknownOwner(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	ghost := store.Scope{UserID: 1 << 40}
+	if _, err := st.CreateDocument(ctx, ghost, newDoc("a")); !errors.Is(err, store.ErrUnknownUser) {
+		t.Errorf("document: %v, want ErrUnknownUser", err)
+	}
+	if _, err := st.CreateCorrespondent(ctx, ghost, store.CorrespondentInput{Name: "x"}); !errors.Is(err, store.ErrUnknownUser) {
+		t.Errorf("correspondent: %v, want ErrUnknownUser", err)
+	}
+	if _, err := st.CreateTag(ctx, ghost, store.TagInput{Name: "x"}); !errors.Is(err, store.ErrUnknownUser) {
+		t.Errorf("tag: %v, want ErrUnknownUser", err)
+	}
+}
+
+// FindDocumentByOriginal looks only at the given owner's documents, also
+// for an admin: another owner's document with the same file is never
+// returned.
+func TestFindDocumentByOriginal(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	bob := store.Scope{UserID: storetest.User(t, st, "bob", false).ID}
+	admin := storetest.User(t, st, "admin", true)
+
+	in := newDoc("shared file")
+	in.Title = "Alice's copy"
+	a := mustDoc(t, st, alice, in)
+	in.Title = "Bob's copy"
+	b := mustDoc(t, st, bob, in)
+
+	got, err := st.FindDocumentByOriginal(ctx, alice.UserID, hashOf("shared file"))
+	if err != nil || got.ID != a.ID || got.Title != "Alice's copy" {
+		t.Errorf("alice: %+v, %v, want %s", got, err, a.ID)
+	}
+	got, err = st.FindDocumentByOriginal(ctx, bob.UserID, hashOf("shared file"))
+	if err != nil || got.ID != b.ID || got.Title != "Bob's copy" {
+		t.Errorf("bob: %+v, %v, want %s", got, err, b.ID)
+	}
+	if got, err := st.FindDocumentByOriginal(ctx, admin.ID, hashOf("shared file")); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("admin: %+v, %v, want ErrNotFound", got, err)
+	}
+	// So the admin's upload of the same file is a new document.
+	if _, err := st.CreateDocument(ctx, store.Scope{UserID: admin.ID, All: true}, newDoc("shared file")); err != nil {
+		t.Errorf("admin's copy: %v", err)
+	}
+	if _, err := st.FindDocumentByOriginal(ctx, alice.UserID, hashOf("other")); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("unknown hash: %v, want ErrNotFound", err)
+	}
+	for _, bad := range []string{"", "abc", strings.ToUpper(hashOf("shared file")), hashOf("shared file") + "0"} {
+		if _, err := st.FindDocumentByOriginal(ctx, alice.UserID, bad); !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("hash %q: %v, want ErrInvalid", bad, err)
+		}
 	}
 }
 
