@@ -55,6 +55,25 @@ describe("session", () => {
       stop();
     }
   });
+  it("announces a required 2FA setup", async () => {
+    const { seen, stop } = listen();
+    try {
+      reply(403, { error: "set up two-factor authentication first", twoFactorSetupRequired: true });
+      await expect(usersApi.list()).rejects.toBeInstanceOf(ApiError);
+      expect(seen).toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+    }
+  });
+  it("returns the challenge of the password step and sends the second step", async () => {
+    reply(200, { twoFactorRequired: true, challenge: "c1" });
+    expect(await sessionApi.login("a", "b")).toEqual({ twoFactorRequired: true, challenge: "c1" });
+    const user = { name: "a", admin: false, mustChangePassword: false, twoFactorEnabled: true, twoFactorRequired: false };
+    const fetch = reply(200, { user });
+    expect(await sessionApi.login2FA("c1", "123456")).toEqual(user);
+    expect(fetch.mock.calls.at(-1)![0]).toBe("/api/session/2fa");
+    expect(JSON.parse(String(fetch.mock.calls.at(-1)![1]?.body))).toEqual({ challenge: "c1", code: "123456" });
+  });
   it("reads the wait time after too many attempts", () => {
     expect(retryAfter(new ApiError(429, "x", { retryAfter: 120 }))).toBe(120);
     expect(retryAfter(new ApiError(429, "x", {}))).toBe(60);
@@ -98,12 +117,26 @@ describe("users and profile", () => {
     expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual({ current: "old", new: "new one" });
   });
 
+  it("calls the 2FA endpoints", async () => {
+    let fetch = reply(200, { recoveryCodes: ["a"] });
+    expect(await profileApi.twoFactor.confirm("123456")).toEqual({ recoveryCodes: ["a"] });
+    expect(fetch.mock.calls.at(-1)![0]).toBe("/api/profile/2fa/confirm");
+    fetch = reply(204);
+    await profileApi.twoFactor.disable("pw", "123456");
+    expect(fetch.mock.calls.at(-1)![1]?.method).toBe("DELETE");
+    expect(JSON.parse(String(fetch.mock.calls.at(-1)![1]?.body))).toEqual({ currentPassword: "pw", code: "123456" });
+    fetch = reply(204);
+    await usersApi.reset2FA("a b");
+    expect(fetch.mock.calls.at(-1)![0]).toBe("/api/users/a%20b/2fa/reset");
+  });
+
   it("tells whether a user owns data", () => {
     const u = (owned: Partial<ManagedUser["owned"]>): ManagedUser => ({
       name: "kim",
       admin: false,
       locked: false,
       mustChangePassword: false,
+      twoFactorEnabled: false,
       owned: { documents: 0, tags: 0, correspondents: 0, documentTypes: 0, savedViews: 0, ...owned },
       createdAt: "",
       lastLoginAt: null,

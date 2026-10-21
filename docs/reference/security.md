@@ -2,16 +2,18 @@
 
 ::: warning Keep it on this computer for now
 Every page and API call except the health check and the UI code needs a
-login, but there is no second factor (TOTP, passkeys) yet. Keep the default:
-the web UI is published on `127.0.0.1` only. Two-factor login, passkeys and
-API keys follow (see the [roadmap](../development/roadmap)).
+login, and admins log in with a password and a TOTP code. Passkeys, API
+keys and the review of these docs follow (see the
+[roadmap](../development/roadmap)); until then keep the default: the web UI
+is published on `127.0.0.1` only.
 :::
 
 ## What is protected how
 
 | What | Protection |
 |---|---|
-| Web UI and API | Login with user name and password (below). Reachable from this computer only (`WEB_BIND=127.0.0.1`). Host check and same-origin check below. |
+| Web UI and API | Login with user name and password, plus a TOTP code for admins and everybody who turned it on (below). Reachable from this computer only (`WEB_BIND=127.0.0.1`). Host check and same-origin check below. |
+| TOTP secrets, recovery codes | Secrets encrypted with `PAPERLESS_GO_SECRET_KEY`; recovery codes only as keyed hashes (see [Secret key](#secret-key)). |
 | Database | Published on `127.0.0.1` only; password in `.env`. |
 | Document files | Plain files in the data directory, readable for the container user (UID 65532). Use an encrypted disk. |
 | Backups | `./pgo backup` writes the dump with mode `0600`. |
@@ -19,7 +21,8 @@ API keys follow (see the [roadmap](../development/roadmap)).
 ## Network access
 
 Docker Compose publishes the web UI on `127.0.0.1`, so only this computer can
-reach it. Until two-factor login exists, keep it that way. Then the same
+reach it. Until passkeys, API keys and the security review are done, keep
+it that way. Then the same
 rules as in mail-archive will apply: HTTPS through `tailscale serve` or
 a reverse proxy, every host name in `PAPERLESS_GO_ALLOWED_HOSTS`, and the
 port published only as far as needed with `WEB_BIND`. Never forward the port
@@ -49,19 +52,67 @@ from the internet.
   their own. The last admin who can log in cannot be demoted, locked or
   removed.
 
+## Two-factor login
+
+- **Admins always need it**; `PAPERLESS_GO_REQUIRE_2FA=true` requires it for
+  everybody. Other users can turn it on in their profile. TOTP follows RFC
+  6238 (SHA-1, 6 digits, 30 seconds), so every authenticator app works.
+- **Setting it up.** A user who needs 2FA but has none yet, also an admin
+  from before this version, logs in with the password and can then only set
+  it up: scan the QR code (or type the key), confirm with a code and save the
+  ten recovery codes. Until then every other request answers `403`. A
+  generated password is replaced first, then 2FA is set up.
+- **Logging in.** After a correct password the server answers with a
+  challenge, not a session; the session starts only after a valid code. The
+  challenge is valid for 5 minutes and only until the user's 2FA changes.
+  Each code's time step is accepted once, and never an older one than the
+  last accepted (no replay). Wrong codes count for the same failure limits
+  as wrong passwords; a correct password does not reset them.
+- **Recovery codes.** Ten codes of 16 characters, each usable once in place
+  of a TOTP code, also typed in capitals or without dashes. They are shown
+  once (with a PDF and a text file made in the browser) and stored only as
+  HMAC-SHA-256 hashes. New codes need a current code and replace the old
+  ones.
+- **Turning it off** needs the password and a current code, and ends the
+  user's other sessions. Admins (and everybody when it is required) cannot
+  turn it off.
+- **Lost authenticator and codes.** Another admin resets it on the Users
+  page, or anyone with shell access runs `./pgo user reset-2fa NAME`; this
+  works for the last admin too. It logs the user out everywhere.
+- **Until 2FA is set up**, after a reset or for an admin from before 2FA
+  existed, the password alone protects the account, and whoever logs in
+  first registers their authenticator. Such a user should log in and set up
+  2FA right away. Every reset is in the audit log.
+- **Refused codes and passwords** when a logged-in user changes their own
+  2FA count towards the login limits and are logged as `profile.2fa_failed`.
+
+## Secret key
+
+`PAPERLESS_GO_SECRET_KEY` (32 random bytes, base64; `./pgo keygen`) encrypts
+the TOTP secrets with AES-256-GCM, each bound to its user's ID, and keys the
+HMAC of the recovery codes. A copy of the database alone therefore reveals
+no secret and cannot test guessed recovery codes. `serve` refuses to start
+without a valid key.
+
+Keep the key with your backups, but apart from the database dump if you
+can: dump and key together give the TOTP secrets. Never change it: with
+another key, no TOTP or recovery code works, and every user who uses
+two-factor login needs `user reset-2fa`.
+
 ## Audit log
 
 The [audit log](../guide/audit-log) records:
 
 | What | Recorded |
 |---|---|
-| Logins and logouts | The user, client address, user agent, method (`password`). |
-| Failed logins | The reason (`wrong_password`, `unknown_user`, `locked`) and the user, if known. For an unknown user the tried name is kept only if it is a valid user name, so a password typed into the name field is not stored. Attempts the login limit refuses are not recorded. |
+| Logins and logouts | The user, client address, user agent, method (`password`, or `2fa` with the factor `totp` or `recovery_code` and, for a recovery code, how many are left). |
+| Failed logins | The reason (`wrong_password`, `unknown_user`, `locked`, `second_factor`) and the user, if known. For an unknown user the tried name is kept only if it is a valid user name, so a password typed into the name field is not stored. Attempts the login limit refuses are not recorded. |
 | User changes | Adding, removing, locking, unlocking, promoting and demoting users, password resets and passwords set on the command line: who did it and to whom. |
-| Own password changes | Who changed their password. |
+| Own login changes | Who changed their password, turned 2FA on or off or created new recovery codes, and which factor confirmed it. |
+| 2FA resets | Who reset whose two-factor login, in the web UI or with `user reset-2fa`. |
 | Command line | Every command that changes a user, and `audit export`, with the command, the operating system user and `PAPERLESS_GO_OPERATOR` (`./pgo` sets the host user; not verified). |
 
-Passwords, generated or typed, are never recorded. A change and its entry
+Passwords, generated or typed, TOTP secrets and codes are never recorded. A change and its entry
 are written in one transaction: if the entry cannot be written, the change
 is not made. The log is append-only: the database refuses to change or
 delete entries, also for the database owner unless it is a superuser.

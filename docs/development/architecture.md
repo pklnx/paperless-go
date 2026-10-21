@@ -25,8 +25,9 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 
 | Path | Purpose |
 |---|---|
-| `cmd/paperless-go` | Command line (cobra): `migrate`, `serve`, `user`, `audit export`, `prepare-data` (hidden, run by `./pgo migrate`). |
-| `internal/auth` | Argon2id password hashes, session tokens, the failed-login limiter and a rate limit, all with an injectable clock. |
+| `cmd/paperless-go` | Command line (cobra): `migrate`, `serve`, `keygen`, `user`, `audit export`, `prepare-data` (hidden, run by `./pgo migrate`). |
+| `internal/auth` | Argon2id password hashes, session tokens, TOTP (RFC 6238) and recovery codes, the failed-login limiter and a rate limit, all with an injectable clock. |
+| `internal/crypto` | AES-256-GCM sealing of small secrets (the TOTP secrets) with `PAPERLESS_GO_SECRET_KEY`. |
 | `internal/config` | Configuration from `PAPERLESS_GO_*` environment variables. |
 | `internal/blobstore` | Content-addressed document files: named by their SHA-256 without extension (`documents/ab/cd/<sha256>`), published and removed durably (see [Blob durability](#blob-durability)). |
 | `internal/store` | PostgreSQL access: migrations (goose, embedded), queries (sqlc, generated into `internal/store/db`). |
@@ -47,7 +48,7 @@ app and the server through the app's archive folder format:
 
 | App (SwiftData) | Server table |
 |---|---|
-| — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`), `sessions` |
+| — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges` |
 | — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; see [Audit log](#audit-log)) |
 | `Document`: id (UUID), title, documentDate, createdAt, modifiedAt, notes, isFavorite, isInbox, archiveSerialNumber, pageCount, fileSize, extractedText, source, originalFileName, textSource, contentHash | `documents`, with the UUID as primary key; the original file (`original_sha256`, size, MIME type) and the archive PDF (`archive_sha256`, size) |
 | `Tag`: name, colorHex, symbol, parent, matchText, matchMode | `tags`, `document_tags` (nested through `parent_id`) |
@@ -208,7 +209,7 @@ and `internal/store`, `cmd/paperless-go/users.go`).
 
 - **Route table.** `internal/web/routes.go` lists every route with its
   `access`: `accessPublic` (`GET /healthz`, `GET /{$}`, `GET /assets/`),
-  `accessLogin` (`/api/session`: read, log in, log out) or `accessSession`.
+  `accessLogin` (`/api/session`: read, log in, log out, and `/api/session/2fa`) or `accessSession`.
   The zero value is `accessSession`, so a route that forgets it gets the
   strictest rule, and so does every path without a route (the JSON `404`
   under `/api/` comes only after the login). `authenticate` enforces the
@@ -234,6 +235,23 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   before) gives the same error. The last unlocked admin stays.
 - **Client address.** The login limits count per user name and per client
   address; `X-Forwarded-For` counts only from `PAPERLESS_GO_TRUSTED_PROXIES`.
+- **Two-factor login** (`internal/auth/totp.go`, `internal/store/two_factor.go`,
+  `internal/web/two_factor.go`). Admins always need it,
+  `PAPERLESS_GO_REQUIRE_2FA` extends it to everyone. A user who needs it but
+  has none gets a session restricted to `GET /api/profile/2fa` and `POST
+  /api/profile/2fa/setup|confirm` (`403` with `twoFactorSetupRequired`
+  elsewhere, after a must-change password). With 2FA on, `POST
+  /api/session` answers with a challenge (SHA-256 stored, 5 minutes on the
+  server clock), and `POST /api/session/2fa` (`accessLogin`, same failure
+  limits) checks the code, uses up the challenge, creates the session and
+  writes `auth.login` in one transaction. `users.two_factor_version`
+  changes with every 2FA change and invalidates pending challenges; the
+  last accepted time step (`two_factor_last_counter`) stops replays. The
+  secret is sealed with AES-256-GCM, associated data the user ID;
+  recovery codes are HMAC-SHA-256 with a key derived from the secret key.
+  Turning 2FA off and new recovery codes check the code in the same
+  transaction as the change, so the audit entry records the factor used.
+  `serve` refuses to start without the key.
 
 ## Audit log
 
@@ -270,8 +288,13 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   `auth.login_failed` (best effort, with `reason` and, for an unknown user,
   the tried name only if it is a valid user name), `user.add`,
   `user.remove`, `user.lock`, `user.unlock`, `user.promote`, `user.demote`,
-  `user.password_reset`, `user.password_set` (CLI), `profile.password_change`,
-  `audit.export` (CLI, written before the export starts). Requests refused
+  `user.password_reset`, `user.password_set` (CLI), `user.2fa_reset` (web
+  and CLI), `profile.password_change`, `profile.2fa_enable`,
+  `profile.2fa_disable`, `profile.recovery_codes` (with the `factor` that
+  confirmed it), `audit.export` (CLI, written before the export starts).
+  A two-factor login records `method: 2fa` and its `factor` (`totp`,
+  `recovery_code` with `recoveryCodesLeft`); a wrong code gives
+  `auth.login_failed` with `reason: second_factor`. Requests refused
   by the login limiter write nothing, so a flood cannot grow the log.
 - **Reading.** `GET /api/audit` takes its scope from `requestScope`: users
   get their own rows (`audit_log_user_idx`), admins everyone's, optionally
