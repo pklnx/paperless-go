@@ -29,6 +29,8 @@ func TestMapErr(t *testing.T) {
 		{"wrapped owner fk", fmt.Errorf("insert: %w", pg("23503", "deadlines_owner_id_fkey", "")), ErrUnknownUser},
 		{"known fk", pg("23503", "documents_correspondent_fkey", ""), ErrOwnerMismatch},
 		{"known check", pg("23514", "tags_parent_not_self", ""), ErrTagCycle},
+		{"deadlock", pg("40P01", "", ""), ErrRetry},
+		{"wrapped deadlock", fmt.Errorf("delete: %w", pg("40P01", "", "")), ErrRetry},
 		{"other fk", other, other},
 		{"other restrict", pg("23001", "something_else_fkey", ""), nil},
 	} {

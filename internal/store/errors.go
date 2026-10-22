@@ -51,6 +51,12 @@ var (
 	// message never contains SQL or the refused value.
 	ErrInvalid = errors.New("store: invalid value")
 
+	// ErrRetry means PostgreSQL aborted the change because it deadlocked
+	// with a concurrent one (SQLSTATE 40P01), for example a tag's delete
+	// and a change of a document's tags. Nothing was written; the same call
+	// can be tried again.
+	ErrRetry = errors.New("store: concurrent change, try again")
+
 	// ErrUnknownUser means the owner of a new row does not exist (any
 	// more), for example because the user was deleted meanwhile.
 	ErrUnknownUser = errors.New("store: unknown user")
@@ -129,6 +135,8 @@ func mapErr(err error) error {
 		return err
 	}
 	switch pgErr.Code {
+	case "40P01": // deadlock_detected
+		return ErrRetry
 	case errTagCycleCode:
 		return ErrTagCycle
 	case "23514": // check_violation

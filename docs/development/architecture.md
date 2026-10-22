@@ -181,10 +181,9 @@ matches a whole name only; at most 1000 IDs per item, ordered by kind and
 ID). Negated items get `!!`, items of one `or_group` are joined by `|`, the
 groups by `&`. An item that yields nothing is dropped; with none left the
 result is `NULL` (no full-text condition). The function is plpgsql and so never folded at plan time: a query
-must call it once, as a scalar subquery (`@@ (SELECT
-document_search_tsquery(...))`, an InitPlan that still uses the index),
-or a sequential scan calls it for every row (measured: 4.9 s instead of
-22 ms for 20 000 documents). Names are resolved within
+that calls it inline runs it for every row of a sequential scan (measured:
+4.9 s instead of 22 ms for 20 000 documents), so the store search calls it
+once, on its own, before the search (see below). Names are resolved within
 `owner`, or among all owners when it is `NULL` (an admin). Because the
 composite foreign keys keep a document's links within its owner, a user
 cannot match another user's documents through a name or an ID. Renaming or
@@ -205,6 +204,66 @@ owns it and nothing outside the extension uses it.
 
 **Reads.** No query reads the vectors back: `GetDocument` and
 `ListDocuments` list their columns instead of `d.*`.
+
+**Store search.** `internal/search` parses the query syntax
+([user guide](../guide/search.md)) into free-text items and filters; it
+never builds SQL. `store.SearchDocuments(ctx, scope, query)` turns them
+into bound parameters and runs four steps, the last two only when needed:
+
+1. `SearchTsquery` calls `document_search_tsquery` once and returns the
+   `tsquery` as text (`''` when no item is left). Its text form reads back
+   as the same `tsquery`.
+2. `SearchTagIDs` and `SearchLinkIDs` resolve the names of `tag:`,
+   `correspondent:` and `type:` to IDs in the scope (exact name ignoring
+   case; tags with their descendants). Go combines the filters: tag
+   filters become groups that each need one tag, the single-valued fields
+   (correspondent, type, ASN) intersect, date filters intersect into one
+   range plus excluded ranges, and `-date:<x` becomes `date:>=x`.
+   Filters that contradict each other, or a positive filter with an
+   unknown name, return an empty page without a query.
+3. One query per sort order (`queries/search.sql`): relevance, added and
+   date, the last two in both directions. A `CASE` in `ORDER BY` would
+   keep the planner from walking an index in order. The filter block and
+   the snippet are copied between `-- filters:begin/end` and `--
+   snippet:begin/end`; `TestSearchFilterCopies` keeps the copies equal.
+   The `tsquery` is a parameter there, so it is a constant: the GIN index
+   serves it and nothing builds it per row
+   (`TestSearchTsqueryOncePerSearch` counts the calls on forced sequential
+   scans and checks the plan uses `documents_search_idx`).
+4. The inner query finds the page's IDs, one row more than the page to
+   tell whether another follows; the outer query reads their columns,
+   tags and snippets, so these cost only the page.
+
+The search queries run as unnamed statements
+(`pgx.QueryExecModeCacheDescribe`): PostgreSQL plans each with its values,
+so the `IS NULL` tests of unused filters fold away and `@@` can use the
+index. A prepared statement may switch to a generic plan after five runs,
+which cannot do either.
+
+Relevance is `ts_rank_cd('{0.1,0.2,0.4,1.0}', search_text ||
+search_links, q, 1)`, computed for every match. It runs in a read-only
+transaction with `SET LOCAL enable_seqscan = off`: for a broad term
+PostgreSQL tends to pick a sequential scan, which also detoasts the
+vectors of every row that does not match, while the bitmap scan of
+`documents_search_idx` reads only the matches. The benchmark
+(`go test -tags searchbench -run TestSearchBench ./internal/store/`, 100 000
+documents) has the numbers. Paging is by keyset over `(key, id)`: newest first
+breaks ties by ascending ID, matching `documents_owner_created_idx` and
+`documents_owner_date_idx`; oldest first walks them backwards. The cursor
+is base64url JSON with the sort, the direction, the key (Unix microseconds,
+or the exact bits of the `real` rank) and the ID; one from another sort is
+`ErrInvalidCursor`.
+
+Snippets: `ts_headline` over the first 100 000 characters of the text,
+with the private-use characters U+E000 and U+E001 around matches, two
+fragments of up to 25 words. It tries `german` first, then `english`
+(whose stems German parsing misses, such as `happiness` for `happy`), then
+`paperless_simple` (accents, `cafe` for `Café`), and keeps the first that
+marks a match. `ts_headline` leaves out what its parser takes for HTML
+tags.
+
+A deadlock (`40P01`, see Concurrency) maps to `store.ErrRetry`; the call
+can be repeated.
 
 ## Blob durability
 
