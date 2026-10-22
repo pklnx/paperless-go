@@ -621,7 +621,11 @@ exempt, see [Login](#login)): `bodyJSON`, the zero value, takes
 raw file with a type from `uploadContentTypes` and never a form or text.
 Then `authenticate` checks the login (see [Login](#login)). Unknown
 `/api/` paths answer `404` in JSON after the login. `/healthz` pings the
-database and answers `503` when it does not answer.
+database and answers `503` when it does not answer. A request has 30 s to
+be read (`ReadTimeout`); upload and download extend both deadlines to an
+hour, so for every other handler the request context is cancelled after
+30 s, since in HTTP/1 the background read of a request ends at the read
+deadline.
 
 ## Documents API
 
@@ -650,7 +654,8 @@ another user's document answers `404` and an admin sees all.
   |---|---|
   | `q` | The [search syntax](../guide/search.md), parsed by `search.Parse` in the zone of `tz`. |
   | `tag`, `correspondent`, `type` | UUIDs, repeatable (at most 100 each), any of them; joined with `q` by AND. |
-  | `inbox` | `true` or `false`: an `is:inbox` filter. |
+  | `inbox`, `favorite` | `true` or `false`: an `is:inbox` or `is:favorite` filter. |
+  | `owner` | `me`: only the caller's own documents (an admin's default view; without it an admin lists everyone's, the "Everyone's documents" switch). For an admin also a user ID: only that user's. A non-admin may name only themselves (`403`). The same `listScope` as the metadata lists. |
   | `sort` | `relevance` (the default with free text that is not only negated), `added` (the default otherwise: with only negated words every match ranks 0, and ranking them all took 4–5 s on 100 000 documents) or `date`. |
   | `order` | `desc` (default) or `asc`; relevance has no ascending order. |
   | `tz` | An IANA zone (`time.LoadLocation`, zones built in through `time/tzdata`) for the days of `date:` and `added:`; default UTC. `Local` is refused. |
@@ -671,11 +676,16 @@ another user's document answers `404` and an admin sees all.
   `ErrInvalidCursor` and `ErrInvalidSort` to `400` and `ErrRetry` to `503`
   with `Retry-After: 1`; any other error is a logged `500` with `internal
   error`, so no database message reaches the client.
-  The first page of a search (text, a filter or an ID parameter, no
-  cursor) writes `document.search` after the search ran, with `q` as
-  typed and the `tag`, `correspondent`, `type` and `inbox` parameters; if
-  the entry cannot be written the answer is `503` and no result. Further
-  pages, plain lists and refused searches write nothing.
+  The first page of a typed search (`q` with free text or search syntax,
+  no cursor) writes `document.search` after the search ran, with `q` as
+  typed and the `tag`, `correspondent`, `type`, `inbox`, `favorite` and
+  `owner` parameters; if the entry cannot be written the answer is `503`
+  and no result. The filter parameters alone are browsing (a sidebar
+  click) and write nothing, like further pages, plain lists and refused
+  searches (maintainer decision on #7).
+- **Document JSON** has `ownerId`; for admins also `ownerName`, the
+  owner's user name, so the UI can mark other users' documents and load
+  that owner's metadata.
 - **`GET /api/documents/{id}`** returns one document with its text.
 - **`GET /api/documents/{id}/file?kind=original|archive`** sends the file
   from the blob store (`OpenHash`) with `Content-Disposition: attachment`
@@ -702,6 +712,90 @@ another user's document answers `404` and an admin sees all.
   `reprocess ID`. Answers: `202` with the document when it was queued,
   `200` when it was queued or running already, `404` outside the scope,
   `503` without the audit log.
+- **`PATCH /api/documents/{id}`** (write) changes only the fields sent
+  (`store.PatchDocument`): `title` (at most 1 024 characters and no
+  control characters (Unicode Cc: NUL, tab, line breaks, escape …), like
+  the titles the import makes and metadata names; empty is allowed, the
+  UI shows the file name), `documentDate`, `notes` (at most 100 000
+  characters; of the control characters only tab, line feed and carriage
+  return; the body may be up to 1 MiB), `isFavorite`,
+  `isInbox`, `archiveSerialNumber`, `correspondentId`, `documentTypeId`
+  (`null` clears these three) and `tagIds` (replaces the tags). `null` for
+  any other field answers `400` `invalid_field`, an empty body `400`
+  `nothing_to_change`. One transaction locks the row (`LockDocument`,
+  `FOR NO KEY UPDATE`: no key column changes, so a foreign-key check of a
+  row referencing the document, such as a new job, does not wait),
+  updates the given
+  columns (the search triggers follow), replaces the tags, touches
+  `modified_at` and writes `document.update` (target the document, no
+  target name; `fields`, the names of the fields sent; `ownerId` for an
+  admin's change of another user's document). Processing writes only its
+  own columns (text, archive, thumbnail), so an edit and a finishing job
+  never undo each other. Answers: `200` with the document as `GET`,
+  `400` `owner_mismatch` (a tag, correspondent or type that is not the
+  document owner's, also for an admin), `invalid_title`, `invalid_notes`,
+  `invalid_asn`, `404` outside the scope, `409` `asn_taken` with
+  `documentId` of the document that has the number, `503` without the
+  audit log or after 3 deadlocks (`Retry-After: 1`).
+- **`POST /api/documents/bulk`** (write) changes several documents, all
+  or nothing (`store.BulkUpdateDocuments`). The selection is exactly one
+  of:
+
+  | Field | Selects |
+  |---|---|
+  | `ids` | These documents: at most 500 (`store.MaxBulkIDs`) after removing repeats, each in the scope, else `404` and nothing changes. An empty list is `400` `empty_selection`. |
+  | `match` | Every match of a search across all pages: an object with the list's parameters `q`, `tag`, `correspondent`, `type` (arrays), `inbox`, `favorite` (booleans), `owner` and `tz`. The server reads it with `listQuery` and `ownerScope`, the code of `GET /api/documents`, and resolves it in the transaction with the search's own filter block (`MatchDocumentIDs`); a client-sent ID list plays no part. `owner` only narrows the match (`BulkSelection.Owner`); the change runs in the caller's scope, so the audit records `ownerId` for another user's documents with `owner=<id>` too. At most 5 000 matches (`store.MaxBulkMatches`), else `400` `too_many_documents` with `matched` and `limit`, and nothing changes. |
+
+  The change: `addTags`, `removeTags` (UUID arrays; a tag in both is
+  `400` `tag_add_and_remove`; IDs are compared as UUIDs, so repeats and
+  another case count as the same tag), `correspondent`, `documentType` (a UUID,
+  or `null` to clear), `inbox`, `favorite` (booleans). Adding a tag a
+  document has, or removing one it lacks, is no error; a tag to add, a
+  correspondent or type of another owner is `400` `owner_mismatch`.
+  Tags, or a correspondent or type to set, need documents of one owner:
+  an admin's selection across owners answers `400` `several_owners`;
+  inbox, favourite and clearing work across owners. Nothing to change is
+  `400` `nothing_to_change`. The answer is `{updated}`, `0` for a search
+  without matches (which writes no entry).
+
+  **Dry run.** `{"match": {...}, "dryRun": true}` changes nothing and
+  answers `{matched, owners, limit}`: the number of matches (also above the
+  limit), their owners (`0` above the limit) and the limit, so the UI
+  shows the count and asks before it sends the change. The list itself
+  has no total.
+
+  **Locking.** One transaction resolves the selection, locks the
+  documents in id order (`LockDocuments`, `ORDER BY id FOR NO KEY
+  UPDATE`, so two bulk changes over overlapping sets wait for each other),
+  by `match` runs the search again with the documents locked and keeps
+  only those that still match (the first match ran before the lock under
+  READ COMMITTED, so a document a concurrent change took out of the match
+  in between is left alone; `TestBulkUpdateByMatchRecheckedAfterLock`
+  holds the bulk change between match and lock), removes and
+  adds the tags (one `DELETE`, one `INSERT … ON CONFLICT DO NOTHING`),
+  updates the columns and touches `modified_at` of every document. Against
+  a metadata delete it can still deadlock: `DeleteTag` deletes the tag's
+  `document_tags` rows, then its statement trigger waits for the locked
+  documents, while the bulk change waits for those rows (or, setting the
+  deleted correspondent or type, for its key share). Whichever transaction
+  PostgreSQL aborts is retried as a whole (`retryDeadlock`, 3 attempts,
+  then `503` with `Retry-After: 1`); a bulk change by search resolves its
+  matches again. `TestBulkUpdateRetriesDeadlockWithDeleteTag` makes the
+  bulk change the victim (its connection's `deadlock_timeout` is 10 ms,
+  the delete's an hour) and checks the retry succeeds. A retry can
+  deadlock again: the delete's trigger updates the documents in its own
+  order while the retry locks them in id order, so a retry that wins
+  some of the locks before the delete finishes repeats the cycle (seen in
+  about 1 of 20 runs with `FOR NO KEY UPDATE`). The test therefore lets
+  the retry lock only after the delete finished (`WithBeforeLock`).
+
+  **Audit.** One `document.bulk_update` per change (no target; `count`,
+  `fields`, `selection` `ids` or `match`, `ids` of the changed documents,
+  `match` with the search's parameters as `document.search` records them,
+  and `bulkRun`, a random ID) and one `document.update` per document (the
+  document as target, `fields`, `bulkRun`, `ownerId` for another user's),
+  all in the change's transaction (`InsertAuditEntries`, one statement).
+  Field names only: never the tags, links or other values set.
 
 ## Metadata API
 
@@ -926,8 +1020,10 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   `reason` `user`, `admin` or `cli`), `audit.export` (CLI,
   written before the export starts), `document.create` (upload, with
   `via: upload`; the target is the new document), `document.search` (the
-  first page of a search, with `q` and the filter parameters; see
-  [Documents API](#documents-api)), `document.import` (CLI),
+  first page of a typed search, with `q` and the filter parameters; see
+  [Documents API](#documents-api)), `document.update` and
+  `document.bulk_update` (edits, with field names only; see [Documents
+  API](#documents-api)), `document.import` (CLI),
   `document.consume` (system; see [Consume folder](#consume-folder)),
   `tag.*`, `correspondent.*`, `document_type.*` (see [Metadata
   API](#metadata-api)).

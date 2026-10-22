@@ -531,6 +531,9 @@ func TestExportAudit(t *testing.T) {
 	if p, _ := store.AuditActionPatterns([]string{"user.password_reset"}); p[0] != `user.password\_reset` {
 		t.Errorf("underscore not escaped: %v", p)
 	}
+	if p, err := store.AuditActionPatterns([]string{"documents"}); err != nil || len(p) != 1 || p[0] != "document.%" {
+		t.Errorf("documents group: %v, %v", p, err)
+	}
 }
 
 // ListAudit shows a user their own entries only, and an admin scope every

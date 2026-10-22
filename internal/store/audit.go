@@ -88,7 +88,11 @@ type auditKey struct{}
 // pendingAudit is an entry waiting for the transaction of the change it
 // describes.
 type pendingAudit struct {
-	entry   *AuditEntry
+	entry *AuditEntry
+	// extra are more entries by the same actor and client that the store
+	// method adds while it runs (auditExtra): the per-document entries of
+	// a bulk change. They are written with entry and reset per attempt.
+	extra   []*AuditEntry
 	written bool
 }
 
@@ -108,6 +112,16 @@ func auditFrom(ctx context.Context) *AuditEntry {
 		return p.entry
 	}
 	return nil
+}
+
+// auditExtra adds entries to be written with the pending entry of ctx, in
+// the same transaction. Only Action, the target and Details of each are
+// used; the actor and client are the pending entry's. Without a pending
+// entry it does nothing.
+func auditExtra(ctx context.Context, entries ...*AuditEntry) {
+	if p, ok := ctx.Value(auditKey{}).(*pendingAudit); ok && !p.written {
+		p.extra = append(p.extra, entries...)
+	}
 }
 
 // fillAuditTarget sets the ID of a target created in the transaction (a new
@@ -145,9 +159,18 @@ func (s *Store) Audit(ctx context.Context, e AuditEntry) error {
 // inTx runs fn in a transaction. With an entry from WithAudit in ctx, the
 // entry is written after fn succeeded, in the same transaction.
 func (s *Store) inTx(ctx context.Context, fn func(*db.Queries) error) error {
+	return s.inTxWith(ctx, func(_ pgx.Tx, q *db.Queries) error { return fn(q) })
+}
+
+// inTxWith is inTx for a function that also needs the transaction itself
+// (for the search queries' unnamed statements).
+func (s *Store) inTxWith(ctx context.Context, fn func(pgx.Tx, *db.Queries) error) error {
 	p, _ := ctx.Value(auditKey{}).(*pendingAudit)
 	if p != nil && p.written {
 		p = nil
+	}
+	if p != nil {
+		p.extra = nil // left over from an attempt that failed
 	}
 	var ua *int64
 	if p != nil {
@@ -162,11 +185,15 @@ func (s *Store) inTx(ctx context.Context, fn func(*db.Queries) error) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := s.q.WithTx(tx)
-	if err := fn(q); err != nil {
+	if err := fn(tx, q); err != nil {
 		return err
 	}
 	if p != nil {
-		if err := insertAudit(ctx, q, p.entry, ua); err != nil {
+		err := insertAudit(ctx, q, p.entry, ua)
+		if err == nil && len(p.extra) > 0 {
+			err = insertAuditEntries(ctx, q, p.entry, p.extra, ua)
+		}
+		if err != nil {
 			// A failed statement aborts the transaction, so no retry here:
 			// create the partition for the next attempt.
 			_ = tx.Rollback(ctx)
@@ -223,6 +250,34 @@ func insertAudit(ctx context.Context, q *db.Queries, e *AuditEntry, ua *int64) e
 		TargetType: nullString(e.TargetType), TargetID: nullString(cleanString(e.TargetID)), TargetName: nullString(cleanString(e.TargetName)),
 		ClientIp: ip, UserAgentID: ua, Details: details,
 	})
+}
+
+// insertAuditEntries writes entries in one statement, each with the actor
+// and client of base, through q.
+func insertAuditEntries(ctx context.Context, q *db.Queries, base *AuditEntry, entries []*AuditEntry, ua *int64) error {
+	p := db.InsertAuditEntriesParams{
+		Actor: base.Actor, UserID: base.UserID, UserName: nullString(cleanString(base.UserName)),
+		ApiKeyID: base.APIKeyID, ApiKeyName: nullString(cleanString(base.APIKeyName)), UserAgentID: ua,
+	}
+	if base.ClientIP.IsValid() {
+		a := base.ClientIP.Unmap()
+		p.ClientIp = &a
+	}
+	for _, e := range entries {
+		details, err := json.Marshal(cleanDetail(e.Details))
+		if err != nil {
+			return err
+		}
+		if string(details) == "null" {
+			details = []byte("{}")
+		}
+		p.Actions = append(p.Actions, e.Action)
+		p.TargetTypes = append(p.TargetTypes, e.TargetType)
+		p.TargetIds = append(p.TargetIds, cleanString(e.TargetID))
+		p.TargetNames = append(p.TargetNames, cleanString(e.TargetName))
+		p.Details = append(p.Details, details)
+	}
+	return q.InsertAuditEntries(ctx, p)
 }
 
 // missingPartition reports the error of a row whose month has no partition.
@@ -352,16 +407,17 @@ func clampInt32(n int) int32 {
 
 // The action groups a filter may name instead of exact actions.
 var auditGroups = map[string][]string{
-	"login":    {"auth.%"},
-	"users":    {"user.%"},
-	"profile":  {"profile.%"},
-	"api_keys": {"api_key.%"},
-	"export":   {"audit.export"},
+	"login":     {"auth.%"},
+	"users":     {"user.%"},
+	"profile":   {"profile.%"},
+	"api_keys":  {"api_key.%"},
+	"export":    {"audit.export"},
+	"documents": {"document.%"},
 }
 
 // AuditGroups are the names of the action groups, for help texts.
 func AuditGroups() []string {
-	return []string{"login", "users", "profile", "api_keys", "export"}
+	return []string{"login", "users", "profile", "api_keys", "export", "documents"}
 }
 
 var auditActionPattern = regexp.MustCompile(`^[a-z0-9_]+\.[a-z0-9_]+$`)

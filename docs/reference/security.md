@@ -30,7 +30,9 @@ reach it. To use it from your home network or a VPN:
 3. **Publish the port** only as far as needed with `WEB_BIND`. With a proxy
    or `tailscale serve` on the same computer, keep the default `127.0.0.1`.
 
-Do not forward the port from the internet to the web UI.
+Do not forward the port from the internet to the web UI. To publish the
+site on the internet, put a reverse proxy in front and follow [Running on
+the internet](../guide/internet).
 
 ### HTTPS behind a proxy
 
@@ -330,7 +332,8 @@ The [audit log](../guide/audit-log) records:
 | 2FA resets | Who reset whose two-factor login, in the web UI or with `user reset-2fa`. |
 | API keys | Who created a key (name, scopes, expiry) and who revoked which key of whom; `user revoke-api-keys` and password resets record how many keys they revoked. |
 | Requests with a key | Uploads and searches made with a key are recorded with the actor `api_key` and the key's name. Other reads are not recorded. |
-| Searches | The first page of each search, with the search text and the filters (`document.search`). |
+| Searches | The first page of each typed search, with the search text and the filters (`document.search`); sidebar filters alone are not recorded. |
+| Document edits | Who changed which document, with the names of the changed fields and never their values (`document.update`); a change of several documents adds one summary entry (`document.bulk_update`). |
 | Uploads | Who uploaded which document. |
 | Command line | Every command that changes a user, and `audit export`, with the command, the operating system user and `PAPERLESS_GO_OPERATOR` (`./pgo` sets the host user; not verified). |
 

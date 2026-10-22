@@ -54,11 +54,13 @@ SET title = sqlc.arg(title),
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner));
 
 -- LockDocument locks the document row for a change of its tags and returns
--- its owner.
+-- its owner. FOR NO KEY UPDATE: no key column changes, so the foreign-key
+-- checks of rows referencing the document (document_tags, jobs; FOR KEY
+-- SHARE) need not wait for the change.
 -- name: LockDocument :one
 SELECT owner_id FROM documents
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
-FOR UPDATE;
+FOR NO KEY UPDATE;
 
 -- name: ClearDocumentTags :exec
 DELETE FROM document_tags WHERE document_id = $1;
@@ -75,3 +77,61 @@ UPDATE documents SET modified_at = now() WHERE id = $1;
 -- name: DeleteDocument :execrows
 DELETE FROM documents
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner));
+
+-- name: PatchDocument :execrows
+-- Sets only the given columns: a NULL narg, or a false set_* flag, keeps
+-- the stored value. The caller has locked the row (LockDocument).
+UPDATE documents
+SET title = COALESCE(sqlc.narg(title)::text, title),
+    document_date = COALESCE(sqlc.narg(document_date)::timestamptz, document_date),
+    notes = COALESCE(sqlc.narg(notes)::text, notes),
+    is_favorite = COALESCE(sqlc.narg(is_favorite)::boolean, is_favorite),
+    is_inbox = COALESCE(sqlc.narg(is_inbox)::boolean, is_inbox),
+    archive_serial_number = CASE WHEN sqlc.arg(set_asn)::boolean THEN sqlc.narg(archive_serial_number)::int
+                                 ELSE archive_serial_number END,
+    correspondent_id = CASE WHEN sqlc.arg(set_correspondent)::boolean THEN sqlc.narg(correspondent_id)::uuid
+                            ELSE correspondent_id END,
+    document_type_id = CASE WHEN sqlc.arg(set_document_type)::boolean THEN sqlc.narg(document_type_id)::uuid
+                            ELSE document_type_id END,
+    modified_at = now()
+WHERE id = sqlc.arg(id);
+
+-- name: DocumentByASN :one
+SELECT id, title FROM documents WHERE owner_id = $1 AND archive_serial_number = $2;
+
+-- LockDocuments locks the documents of ids in the scope, in id order, so
+-- two bulk changes over overlapping sets wait for each other instead of
+-- deadlocking. It returns the locked ids with their owners. FOR NO KEY
+-- UPDATE as in LockDocument.
+-- name: LockDocuments :many
+SELECT id, owner_id FROM documents
+WHERE id = ANY (sqlc.arg(ids)::uuid[]) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
+ORDER BY id
+FOR NO KEY UPDATE;
+
+-- name: CountOwnedTags :one
+SELECT count(*) FROM tags WHERE owner_id = sqlc.arg(owner_id) AND id = ANY (sqlc.arg(ids)::uuid[]);
+
+-- name: BulkRemoveDocumentTags :exec
+DELETE FROM document_tags
+WHERE document_id = ANY (sqlc.arg(ids)::uuid[]) AND tag_id = ANY (sqlc.arg(tag_ids)::uuid[]);
+
+-- name: BulkAddDocumentTags :exec
+INSERT INTO document_tags (owner_id, document_id, tag_id)
+SELECT d.owner_id, d.id, t
+FROM documents d CROSS JOIN unnest(sqlc.arg(tag_ids)::uuid[]) AS t
+WHERE d.id = ANY (sqlc.arg(ids)::uuid[])
+ON CONFLICT DO NOTHING;
+
+-- name: BulkUpdateDocuments :exec
+-- Sets the given columns of the locked documents as PatchDocument does,
+-- and touches modified_at of every one of them.
+UPDATE documents
+SET is_favorite = COALESCE(sqlc.narg(is_favorite)::boolean, is_favorite),
+    is_inbox = COALESCE(sqlc.narg(is_inbox)::boolean, is_inbox),
+    correspondent_id = CASE WHEN sqlc.arg(set_correspondent)::boolean THEN sqlc.narg(correspondent_id)::uuid
+                            ELSE correspondent_id END,
+    document_type_id = CASE WHEN sqlc.arg(set_document_type)::boolean THEN sqlc.narg(document_type_id)::uuid
+                            ELSE document_type_id END,
+    modified_at = now()
+WHERE id = ANY (sqlc.arg(ids)::uuid[]);

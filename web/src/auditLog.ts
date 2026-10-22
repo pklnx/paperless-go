@@ -2,7 +2,7 @@ import type { AuditEntry, AuditFilter } from "./api";
 import { t, type Messages } from "./i18n";
 
 /** The action groups of the filter, as the API names them. */
-export const auditGroups = ["login", "users", "profile", "api_keys", "export"] as const;
+export const auditGroups = ["login", "users", "profile", "api_keys", "export", "documents"] as const;
 
 const isoDay = (d: Date) => d.toISOString().slice(0, 10);
 

@@ -300,7 +300,9 @@ tags:
 
 Set `PAPERLESS_GO_IMAGE` in `.env` to use another tag or your own build;
 pinning an exact version is safer than `latest`, because migrations only run
-with `./pgo migrate`. The images carry a provenance attestation and an SBOM.
+with `./pgo migrate`. Do not update images automatically (Watchtower, a floating tag):
+the server refuses to start while migrations are pending. See [Running on
+the internet](./internet#updates). The images carry a provenance attestation and an SBOM.
 
 The image is based on Debian and contains OCRmyPDF with Tesseract (German
 and English), Poppler, img2pdf and libheif; it is about 145 MB to download.
@@ -313,6 +315,10 @@ Pull requests that change the database schema carry the label
 
 `GET /healthz` answers `200 ok` while the server runs and the database
 answers, and `503` otherwise. It needs no login and contains no data.
+
+For a site on the internet, also watch the audit log and the refused
+logins in the server log, and keep the system and the images updated; see
+[Running on the internet](./internet#logs-and-the-audit-log).
 
 ## Logs
 

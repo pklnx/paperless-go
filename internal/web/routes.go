@@ -73,6 +73,8 @@ func (s *Server) routes() []route {
 		{pattern: "POST /api/documents", handler: http.HandlerFunc(s.handleUpload), access: accessUpload, body: bodyFile},
 		h("GET /api/documents", s.handleListDocuments, accessRead),
 		h("GET /api/documents/{id}", s.handleGetDocument, accessRead),
+		h("PATCH /api/documents/{id}", s.handlePatchDocument, accessWrite),
+		h("POST /api/documents/bulk", s.handleBulkDocuments, accessWrite),
 		h("GET /api/documents/{id}/file", s.handleDocumentFile, accessRead),
 		h("GET /api/documents/{id}/thumbnail", s.handleThumbnail, accessRead),
 		h("POST /api/documents/{id}/reprocess", s.handleReprocess, accessWrite),
