@@ -3,7 +3,7 @@
 State of the work for the next session. Update before a session ends.
 
 ## Open PRs
-- #66 PostgreSQL `postgres:18` (Debian) instead of Alpine, with an automatic index rebuild on a collation change (migration 00013, `second-review`, `breaking`, minimum PostgreSQL 17). Both first reviews asked for changes; fixed in `8db3171`; a round-2 review is under way.
+- None.
 
 ## Next tickets
 - #3 users and login: done (#29, #38, #40, #45, #51).
@@ -35,7 +35,7 @@ State of the work for the next session. Update before a session ends.
 - PostgreSQL: Debian image `postgres:18` (musl ranked full-text search about 4× slower); minimum PostgreSQL 17; existing databases keep their sort order, new ones use builtin `C.UTF-8` (#66).
 
 ## Done (2026-10-22)
-- #51 API keys (#20); #55 OCR and images (#35); #57, #59, #62 Action fixes, then #65 removed the Action; #58, #64, #67 search (#52–#54); #60 admin changes in the user's log (#39); #61 public repository; #63 no-release note.
+- #51 API keys (#20); #55 OCR and images (#35); #57, #59, #62 Action fixes, then #65 removed the Action; #58, #64, #67 search (#52–#54); #66 PostgreSQL Debian image, index rebuild on collation change, minimum PostgreSQL 17; #60 admin changes in the user's log (#39); #61 public repository; #63 no-release note.
 
 ## Done (2026-10-21)
 - #1 foundation; #22–#25 document model (#2); #29 users and sessions (#16); #37 Debian image with OCR tools (#33); #38 audit log (#17); #40 TOTP and secret key (#18, `breaking`); #41 store hardening (#27); #42 processing queue (#34); #43 ingest (#28); #44 CLI import (#30); #45 passkeys (#19); #46 upload API and UI (#32); #47 consume folder (#31).
