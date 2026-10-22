@@ -230,7 +230,8 @@ func (s *Store) SearchDocuments(ctx context.Context, sc Scope, q search.Query) (
 		}
 	}
 
-	page := &DocumentPage{Hits: make([]SearchHit, 0, min(len(rows), limit))}
+	// rows holds at most limit+1 (≤ search.MaxLimit+1) rows.
+	page := &DocumentPage{Hits: make([]SearchHit, 0, len(rows))}
 	for i, r := range rows {
 		if i == limit {
 			last := rows[limit-1]
