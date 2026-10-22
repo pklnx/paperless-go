@@ -83,6 +83,8 @@ type Document struct {
 	DocumentTypeID      pgtype.UUID
 	ThumbnailSha256     *string
 	ProcessingNote      string
+	SearchText          interface{}
+	SearchLinks         interface{}
 }
 
 type DocumentTag struct {

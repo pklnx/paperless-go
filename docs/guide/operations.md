@@ -81,6 +81,17 @@ an admin (Users page or `./pgo user reset-password`) now also removes the
 user's passkeys, unless the admin unticks it or passes `--keep-passkeys`.
 The login limits now count IPv6 clients per `/64`, not per address.
 
+**Full-text search index (#6).** The migration indexes every document's
+text once: plan on about 1–3 minutes per 100 000 documents of average
+length, during which the documents table is locked (the web server does not
+run while migrations are pending), and on about 1.5–2 times the stored text
+in extra disk space. It creates the PostgreSQL extension `unaccent`, a trusted extension
+that needs no superuser: in the Compose setup the database user creates it
+itself. With your own PostgreSQL server and a user without the `CREATE`
+privilege on the database, have an administrator run
+`CREATE EXTENSION unaccent SCHEMA public;` in it first. Rolling the migration back (`migrate down`) drops the
+index and the extension.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build

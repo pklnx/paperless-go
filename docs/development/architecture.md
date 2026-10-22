@@ -59,6 +59,7 @@ app and the server through the app's archive folder format:
 | `Deadline`: kind, date, label, origin, isDone, addedToCalendarAt, addedToRemindersAt, createdAt, modifiedAt | `deadlines`, several per document |
 | `SavedView`: name, symbol, sortIndex, createdAt, filterJSON | `saved_views`, with the filter as a `JSONB` object |
 | — | `jobs` (`00007_jobs.sql`; see [Processing](#processing)); `documents.thumbnail_sha256`, `documents.processing_note` |
+| — | `documents.search_text`, `documents.search_links` (`00011_search.sql`; see [Search index](#search-index)) |
 
 UUIDs as keys (not serials) keep imported and exported records stable across
 the app and the server.
@@ -119,6 +120,77 @@ refuses anything else; the store gives `ErrInvalidFilter`). The server does
 not interpret it: unknown keys and values are kept, while whitespace and key
 order are normalized by PostgreSQL. Lists are ordered as in the app: by
 `sort_index`, then `created_at`, then `id`.
+
+## Search index
+
+Full-text search (#6) runs in PostgreSQL. Part 1 (`00011_search.sql`) adds
+the index and the SQL function that turns a parsed query into a `tsquery`;
+the parser, the store search and the API build on it.
+
+**Columns.** Two `tsvector` columns on `documents`, both `NOT NULL DEFAULT
+''`, kept up to date by triggers (generated columns cannot read other tables
+or fall back when a vector is too large):
+
+| Column | Holds | Set by |
+|---|---|---|
+| `search_text` | Title (weight A; `paperless_simple`, `german`, `english`), ASN as `123` and `asn123` (A; `simple`), original file name with `_ . -` as spaces (C; `paperless_simple`), notes (C; all three), the first 300 000 characters of `extracted_text` (D; all three) | `BEFORE INSERT OR UPDATE OF title, archive_serial_number, notes, original_file_name, extracted_text`; skipped when none of them changed |
+| `search_links` | One lexeme per linked correspondent (`c`), document type (`d`) and tag (`t`): a space, the letter and the UUID, at position 1, weight B. The parser never makes a lexeme with a space, so a typed word cannot match one | `BEFORE INSERT OR UPDATE OF correspondent_id, document_type_id` (also the `ON DELETE SET NULL` of a deleted correspondent or type); statement-level `AFTER INSERT` and `AFTER DELETE` on `document_tags` with transition tables, refreshing each affected document once per statement (a tag's delete reaches `document_tags` by its cascade) |
+
+`documents_search_idx` is a GIN index on `(search_text || search_links)`;
+queries use exactly this expression. `documents_owner_date_idx` on
+`(owner_id, document_date DESC, id)` serves the date sort.
+
+**Configurations.** `german` and `english` (Snowball) stem; `paperless_simple`
+is `simple` with the `unaccent` dictionary and covers exact words, numbers
+and prefixes. The German stemmer maps `ä ö ü` to `a o u` and `ß` to `ss`,
+and `unaccent` does the same for the simple part, so `Gebühren`/`Gebuhren`
+and `Straße`/`Strasse` match each other; `Gebuehren` does not. `unaccent`
+is a trusted extension (PostgreSQL 13+): the database owner creates it
+without superuser rights, and it ships with `postgres:18-alpine`. It and
+`paperless_simple` live in `public` and are always referenced
+schema-qualified, so nothing depends on the caller's `search_path`.
+
+**Cap.** A `tsvector` cannot exceed 1 MB, and the worker accepts 16 MiB of
+text. `documents_search_text_vector` takes 300 000 characters of the text;
+on overflow (SQLSTATE `54000`) it retries with 100 000, then without the
+text, then with 100 000 characters of every other field, then gives an
+empty vector. Saving a document never fails because of the index.
+
+**Positions.** `a || b` shifts `b`'s positions by `a`'s largest, and
+positions stop at 16 383. The short fields come first and the `german` copy
+of the text right after them, so a phrase is found within about the first
+16 000 words of the text; behind that, and in the `simple` and `english`
+copies of a long text, every position is 16 383 and only single words
+match.
+
+**Names are resolved when a query runs.** `document_search_tsquery(owner,
+terms[], is_phrase[], negated[], or_group[])` (`STABLE`) takes the parser's
+free-text items as bound arrays. Each item becomes, joined by `|`:
+`plainto_tsquery` (or `phraseto_tsquery`) in the three configurations; for
+a word of 3 or more characters, a prefix query from the lexemes
+`paperless_simple` makes of it, each quoted by a fixed escaper plus `:*`;
+and the link lexemes of the tags (with their descendants), correspondents
+and document types whose name contains the term, ignoring case and accents
+(`ILIKE` over `unaccent`, wildcards escaped; a term under 3 characters
+matches a whole name only; at most 1000 IDs per item, ordered by kind and
+ID). Negated items get `!!`, items of one `or_group` are joined by `|`, the
+groups by `&`. An item that yields nothing is dropped; with none left the
+result is `NULL` (no full-text condition). Names are resolved within
+`owner`, or among all owners when it is `NULL` (an admin). Because the
+composite foreign keys keep a document's links within its owner, a user
+cannot match another user's documents through a name or an ID. Renaming or
+moving a tag, or renaming a correspondent or type, therefore rewrites no
+document; only a document's own link changes touch its row.
+
+**Concurrency.** `documents_search_links_vector` reads `document_tags` and
+is `VOLATILE` (plpgsql) on purpose: each statement takes a fresh snapshot,
+so a trigger that waited for the document's row lock sees tags committed
+meanwhile. Every writer of `document_tags` locks the document row first
+(`SetDocumentTags` through `LockDocument`; the bulk edit (#7) and automatic
+tagging must do the same), so two rebuilds of one document never interleave.
+
+**Reads.** No query reads the vectors back: `GetDocument` and
+`ListDocuments` list their columns instead of `d.*`.
 
 ## Blob durability
 
