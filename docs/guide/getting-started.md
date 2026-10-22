@@ -18,22 +18,14 @@ by default; to reach it from your network or a VPN, follow
 
 ## Install
 
-Download the Docker Compose bundle of the latest release and extract it.
-
-The repository and its images on `ghcr.io` are private. Downloads need the
-[GitHub CLI](https://cli.github.com/) signed in to an account with access,
-with the `read:packages` scope for the images:
+Download the Docker Compose bundle of the latest release, check it against
+the release's `SHA256SUMS` file and extract it:
 
 ```sh
-gh auth login
-gh auth refresh -s read:packages
-gh auth token | docker login ghcr.io -u "$(gh api user -q .login)" --password-stdin
-```
-
-Then:
-
-```sh
-gh release download --repo pklnx/paperless-go --pattern paperless-go.tar.gz --clobber && tar -xzf paperless-go.tar.gz
+curl -fLO https://github.com/pklnx/paperless-go/releases/latest/download/paperless-go.tar.gz
+curl -fLO https://github.com/pklnx/paperless-go/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS   # macOS: shasum -a 256 -c SHA256SUMS
+tar -xzf paperless-go.tar.gz
 cd paperless-go
 cp .env.example .env
 ```
@@ -42,6 +34,11 @@ The bundle holds `docker-compose.yml`, the `./pgo` wrapper, `.env.example`
 and a `README.txt`. Its `docker-compose.yml` uses the image of that release,
 `ghcr.io/pklnx/paperless-go:<version>`; nothing is built. See
 [Versions](./operations#versions) for the version numbers.
+
+The images need no sign-in: `./pgo` pulls them, and so does a plain
+`docker pull ghcr.io/pklnx/paperless-go:latest`, without `docker login`.
+This needs the package on `ghcr.io` to be public; a `denied` error means it
+is not (yet).
 
 Edit `.env` and set `POSTGRES_PASSWORD` to any long random password. Then
 generate the secret key that encrypts the two-factor secrets, and put the
@@ -90,7 +87,7 @@ To run the code of a branch, or to change it, clone the repository; its
 code changes:
 
 ```sh
-gh repo clone pklnx/paperless-go   # the repository is private; uses the gh sign-in above
+git clone https://github.com/pklnx/paperless-go.git
 cd paperless-go
 cp .env.example .env
 ```

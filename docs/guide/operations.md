@@ -36,7 +36,10 @@ version you skip: they list database migrations and manual steps. Then, in
 the directory that holds your `paperless-go/` directory:
 
 ```sh
-gh release download --repo pklnx/paperless-go --pattern paperless-go.tar.gz --clobber && tar -xzf paperless-go.tar.gz
+curl -fLO https://github.com/pklnx/paperless-go/releases/latest/download/paperless-go.tar.gz
+curl -fLO https://github.com/pklnx/paperless-go/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS    # macOS: shasum -a 256 -c SHA256SUMS
+tar -xzf paperless-go.tar.gz
 cd paperless-go
 ./pgo migrate              # apply new database migrations with the new image
 docker compose up -d web   # restart the web server with the new image

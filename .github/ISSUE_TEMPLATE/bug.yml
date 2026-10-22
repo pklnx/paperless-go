@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thanks for reporting. Please remove passwords, API keys, personal data and document contents from logs and screenshots before posting.
-        Security problems: please use the private vulnerability report (link on the previous page) instead.
+        Security problems: do not open an issue; please use the private vulnerability report instead (link on the previous page, or the Security tab → Report a vulnerability).
   - type: textarea
     id: what
     attributes:

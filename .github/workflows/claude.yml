@@ -652,13 +652,21 @@ jobs:
     # implementation runs in Claude sessions, so the token cannot push
     # (contents: read) and file edits and git commits are disallowed. It runs on
     # GITHUB_TOKEN; its comments come from github-actions[bot].
+    #
+    # Fork pull requests get no answer: review events from a fork have no
+    # secrets (the if below skips them), and an issue comment on a fork PR
+    # runs with secrets while the action would check out the fork's code. The
+    # first step refuses both before any step uses a secret; review fork PRs in
+    # a Claude session instead.
     if: >-
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') &&
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') &&
-       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') &&
-       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association))
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association) &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -673,7 +681,39 @@ jobs:
       group: claude-mention-${{ github.event.issue.number || github.event.pull_request.number }}
       cancel-in-progress: false
     steps:
+      # Uses no secret and runs first: every later step needs same=true. An
+      # unknown head repository (a deleted fork) counts as a fork, and a
+      # failing lookup fails the job.
+      - name: Same-repository pull request
+        id: repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          ON_PR: ${{ github.event.issue.pull_request && 'true' || 'false' }}
+          NUMBER: ${{ github.event.issue.number }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          cross=false
+          case "$EVENT" in
+            issue_comment)
+              if [ "$ON_PR" = true ]; then
+                cross=$(gh pr view "$NUMBER" --json isCrossRepository -q .isCrossRepository)
+              fi
+              ;;
+            pull_request_review | pull_request_review_comment)
+              if [ "$HEAD_REPO" != "$GH_REPO" ]; then cross=true; fi
+              ;;
+          esac
+          if [ "$cross" = false ]; then
+            echo "same=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "same=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::@claude does not answer on pull requests from forks; review them in a Claude session."
+          fi
       - name: API key set
+        if: steps.repo.outputs.same == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
@@ -685,11 +725,14 @@ jobs:
       # The action then removes the checkout's header and points origin at
       # its own token (the same GITHUB_TOKEN) before Claude starts.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.repo.outputs.same == 'true'
         with:
           persist-credentials: true
       - name: Install sandbox tools
+        if: steps.repo.outputs.same == 'true'
         run: *bwrap
       - uses: anthropics/claude-code-action@a5a423f75c251dcbff8a74e99f83b2cb03c72bfa # v1.0.256
+        if: steps.repo.outputs.same == 'true'
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}

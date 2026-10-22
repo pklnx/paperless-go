@@ -2,8 +2,10 @@
 
 ## Reporting a vulnerability
 
-The repository is private, so only its collaborators can read its issues.
-Report security problems as an issue with the label `security`.
+Report security problems privately through GitHub private vulnerability
+reporting: Security tab → Report a vulnerability
+(<https://github.com/pklnx/paperless-go/security/advisories/new>).
+Do not open a public issue for a vulnerability.
 
 Include what you found, how to reproduce it and what an attacker could do with it.
 
