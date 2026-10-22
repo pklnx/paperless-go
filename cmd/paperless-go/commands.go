@@ -177,7 +177,9 @@ Everything but the health check and the UI code needs a login; create the
 first admin with "user add NAME --admin". Admins (and everybody with
 ` + config.EnvRequire2FA + `=true) log in with a password and a TOTP code; they
 set it up at their first login. Scripts use API keys ("Authorization: Bearer
-pl_…"), created on the profile page, with the scopes read and write.
+pl_…"), created on the profile page, with the scopes read (list, show
+and download), upload (add documents only) and write (add, change and
+delete; includes upload).
 
 ` + config.EnvSecretKey + ` is required: it encrypts the TOTP secrets.
 Generate it once with "keygen" and keep it with your backups; without it

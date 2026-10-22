@@ -5,8 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/pklnx/paperless-go/internal/auth"
 	"github.com/pklnx/paperless-go/internal/store"
@@ -27,11 +30,21 @@ func newKey(t *testing.T, st *store.Store, userID int64, name string, scopes []s
 }
 
 func TestNormalizeScopes(t *testing.T) {
-	got, err := store.NormalizeScopes([]string{"write", "read", "write"})
-	if err != nil || fmt.Sprint(got) != "[read write]" {
-		t.Fatalf("%v %v", got, err)
+	for _, c := range []struct {
+		in   []string
+		want string
+	}{
+		{[]string{"write", "read", "write"}, "[read write]"},
+		{[]string{"upload"}, "[upload]"},
+		{[]string{"upload", "read", "upload"}, "[read upload]"},
+		{[]string{"write", "upload"}, "[write]"}, // write includes upload
+		{[]string{"upload", "read", "write"}, "[read write]"},
+	} {
+		if got, err := store.NormalizeScopes(c.in); err != nil || fmt.Sprint(got) != c.want {
+			t.Errorf("%v: %v %v, want %s", c.in, got, err, c.want)
+		}
 	}
-	for _, bad := range [][]string{nil, {}, {"sync"}, {"read", "admin"}} {
+	for _, bad := range [][]string{nil, {}, {"sync"}, {"read", "admin"}, {"upload", "Upload"}} {
 		if _, err := store.NormalizeScopes(bad); !errors.Is(err, store.ErrAPIKeyScope) {
 			t.Errorf("%v: %v", bad, err)
 		}
@@ -291,5 +304,138 @@ func TestAPIKeysMigrationDown(t *testing.T) {
 	}
 	if keys, err := st.ListAPIKeys(ctx, u.ID); err != nil || len(keys) != 0 {
 		t.Fatalf("after up: %v %v", keys, err)
+	}
+}
+
+const uploadScopeVersion = 17
+
+// insertRawKey stores a key with scopes directly, as an older version or
+// another path would, and returns the key's hash.
+func insertRawKey(t *testing.T, conn *pgx.Conn, userID int64, name string, scopes []string) ([]byte, error) {
+	t.Helper()
+	_, hash, hint, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = conn.Exec(context.Background(), `INSERT INTO api_keys (user_id, key_hash, hint, name, scopes, created_at)
+		VALUES ($1, $2, $3, $4, $5, now())`, userID, hash, hint, name, scopes)
+	return hash, err
+}
+
+// Migration 00017 allows the upload scope and keeps the existing keys and
+// the cardinality check; Down removes upload from keys with another scope,
+// deletes the upload-only keys and refuses upload again; Up works again.
+func TestAPIKeyUploadScopeMigration(t *testing.T) {
+	st, url := storetest.NewWithURL(t)
+	ctx := context.Background()
+	conn := connect(t, url)
+	u, err := st.CreateUser(ctx, "alice", "h", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MigrateDownTo(ctx, uploadScopeVersion-1); err != nil {
+		t.Fatal(err)
+	}
+	// Keys from before the upgrade.
+	old := map[string][]string{"r": {"read"}, "w": {"write"}, "rw": {"read", "write"}}
+	var rwHash []byte
+	for name, scopes := range old {
+		h, err := insertRawKey(t, conn, u.ID, name, scopes)
+		if err != nil {
+			t.Fatalf("old %s: %v", name, err)
+		}
+		if name == "rw" {
+			rwHash = h
+		}
+	}
+	if _, err := insertRawKey(t, conn, u.ID, "u", []string{"upload"}); !checkViolation(err) {
+		t.Fatalf("upload before up: %v", err)
+	}
+
+	refusals := func(stage string) {
+		t.Helper()
+		for _, bad := range [][]string{{}, {"admin"}, {"read", "admin"}} {
+			if _, err := insertRawKey(t, conn, u.ID, "bad", bad); !checkViolation(err) {
+				t.Errorf("%s: scopes %v: %v", stage, bad, err)
+			}
+		}
+	}
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	refusals("after up")
+	// The old [read, write] key keeps working, with the upload.
+	_, k, err := st.APIKeyLogin(ctx, rwHash, time.Now())
+	if err != nil || !k.Allows(store.ScopeRead) || !k.Allows(store.ScopeUpload) || !k.Allows(store.ScopeWrite) {
+		t.Fatalf("old key after up: %+v %v", k, err)
+	}
+	added := map[string][]string{"u": {"upload"}, "ru": {"read", "upload"}, "uw": {"upload", "write"}, "ruw": {"read", "upload", "write"}}
+	for name, scopes := range added {
+		if _, err := insertRawKey(t, conn, u.ID, name, scopes); err != nil {
+			t.Fatalf("after up %s: %v", name, err)
+		}
+	}
+
+	stored := func() map[string]string {
+		t.Helper()
+		keys, err := st.ListAPIKeys(ctx, u.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]string{}
+		for _, k := range keys {
+			out[k.Name] = fmt.Sprint(k.Scopes)
+		}
+		return out
+	}
+	if m, err := st.MigrateDown(ctx); err != nil || m != "00017_api_key_upload_scope.sql" {
+		t.Fatalf("down: %q, %v", m, err)
+	}
+	want := map[string]string{
+		"r": "[read]", "w": "[write]", "rw": "[read write]",
+		"ru": "[read]", "uw": "[write]", "ruw": "[read write]",
+	}
+	if got := stored(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("after down: %v, want %v", got, want)
+	}
+	if _, err := insertRawKey(t, conn, u.ID, "u2", []string{"upload"}); !checkViolation(err) {
+		t.Errorf("upload after down: %v", err)
+	}
+	refusals("after down")
+
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+	refusals("after down and up")
+	if _, err := insertRawKey(t, conn, u.ID, "u", []string{"upload"}); err != nil {
+		t.Errorf("upload after down and up: %v", err)
+	}
+	if got := stored(); fmt.Sprint(got) != fmt.Sprint(map[string]string{
+		"r": "[read]", "w": "[write]", "rw": "[read write]", "ru": "[read]", "uw": "[write]", "ruw": "[read write]", "u": "[upload]",
+	}) {
+		t.Errorf("after down and up: %v", got)
+	}
+}
+
+// The migration stops when the check it replaces cannot be found exactly
+// once, instead of dropping the wrong one.
+func TestAPIKeyUploadScopeMigrationNeedsTheCheck(t *testing.T) {
+	st, url := storetest.NewWithURL(t)
+	ctx := context.Background()
+	conn := connect(t, url)
+	if err := st.MigrateDownTo(ctx, uploadScopeVersion-1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `ALTER TABLE api_keys ADD CONSTRAINT extra_scopes_check CHECK (cardinality(scopes) <= 3)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Migrate(ctx); err == nil || !strings.Contains(err.Error(), "expected one check on scopes") {
+		t.Fatalf("up with two checks: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `ALTER TABLE api_keys DROP CONSTRAINT extra_scopes_check`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("up: %v", err)
 	}
 }

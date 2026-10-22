@@ -13,7 +13,7 @@ import (
 	"github.com/pklnx/paperless-go/internal/store"
 )
 
-// API keys let scripts call the read and write routes with
+// API keys let scripts call the read, upload and write routes with
 // "Authorization: Bearer pl_…", ported from mail-archive. A key request
 // never reads cookies, also when the key is invalid, and needs no Origin
 // header: the credential is the header itself, which a cross-origin page
@@ -61,6 +61,8 @@ func requiredScope(a access) string {
 	switch a {
 	case accessRead:
 		return store.ScopeRead
+	case accessUpload:
+		return store.ScopeUpload
 	case accessWrite:
 		return store.ScopeWrite
 	}
@@ -117,7 +119,7 @@ func (s *Server) authenticateKey(w http.ResponseWriter, r *http.Request, key str
 		s.fail(w, r, http.StatusForbidden, "not available with an API key", nil)
 		return nil
 	}
-	if !k.HasScope(scope) {
+	if !k.Allows(scope) {
 		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`%s, error="insufficient_scope", scope=%q`, bearerRealm, scope))
 		s.writeJSON(w, http.StatusForbidden, scopeJSON{Error: "this API key lacks the " + scope + " scope", Scope: scope})
 		return nil
@@ -221,7 +223,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 	scopes, err := store.NormalizeScopes(in.Scopes)
 	if err != nil {
-		s.fail(w, r, http.StatusBadRequest, "choose the scopes read, write or both", nil)
+		s.fail(w, r, http.StatusBadRequest, "choose one or more of the scopes read, upload and write", nil)
 		return
 	}
 	now := s.now()

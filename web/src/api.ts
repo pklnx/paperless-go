@@ -170,7 +170,7 @@ export const passkeyApi = {
   remove: async (id: number) => (await send<{ credentialId: string; rpId?: string }>("DELETE", `/api/profile/passkeys/${id}`))!,
 };
 
-export type ApiKeyScope = "read" | "write";
+export type ApiKeyScope = "read" | "upload" | "write";
 
 /** An API key as listed: never the key itself. */
 export interface ApiKey {

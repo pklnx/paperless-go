@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -191,18 +192,26 @@ func TestAPIKeyConflictKeepsRecoveryCode(t *testing.T) {
 	f.expect("POST", "/api/profile/api-keys", body("third"), 401)
 }
 
-// TestAPIKeyRouteAccess calls every route of the table with a read key, a
-// write key and a key with both. Driven by routes(), so new routes are
-// covered as they come: a key works only on read and write routes with the
-// matching scope, never on login, profile, user, key or audit routes.
+// TestAPIKeyRouteAccess calls every route of the table with a key of
+// every scope combination. Driven by routes(), so new routes are covered
+// as they come: a key works only on read, upload and write routes with the
+// matching scope (write includes upload), never on login, profile, user,
+// key or audit routes; a refusal names the missing scope in the body and
+// in WWW-Authenticate.
 func TestAPIKeyRouteAccess(t *testing.T) {
 	f := newAuthFixture(t)
 	f.addUser("kim", keyPassword, false)
 	f.loginOK("kim", keyPassword)
-	keys := map[string]string{
-		"read":  f.createKey("r", []string{"read"}, ""),
-		"write": f.createKey("w", []string{"write"}, ""),
-		"both":  f.createKey("b", []string{"read", "write"}, ""),
+	combos := [][]string{
+		{"read"}, {"upload"}, {"write"}, {"read", "upload"}, {"read", "write"}, {"upload", "write"}, {"read", "upload", "write"},
+	}
+	type namedKey struct {
+		scopes []string
+		key    string
+	}
+	var keys []namedKey
+	for _, c := range combos {
+		keys = append(keys, namedKey{c, f.createKey(strings.Join(c, "+"), c, "")})
 	}
 	params := strings.NewReplacer("{$}", "", "{name}", "nothing", "{id}", "00000000-0000-0000-0000-000000000000")
 	seen := map[access]int{}
@@ -216,44 +225,135 @@ func TestAPIKeyRouteAccess(t *testing.T) {
 			method, path = "GET", rt.pattern+"x"
 		}
 		path = params.Replace(path)
-		for kind, key := range keys {
-			got := f.keyStatus(key, method, path)
-			scope := requiredScope(rt.access)
-			allowed := scope != "" && (kind == "both" || kind == scope)
+		scope := requiredScope(rt.access)
+		for _, k := range keys {
+			resp, out := f.keyRequest(k.key, method, path, nil, "", nil)
+			got, auth := resp.StatusCode, resp.Header.Get("WWW-Authenticate")
+			allowed := scope != "" && (&store.APIKey{Scopes: k.scopes}).Allows(scope)
 			switch {
 			case allowed && (got == 401 || got == 403):
-				t.Errorf("%s with a %s key: %d, want access", rt.pattern, kind, got)
-			case !allowed && got != 403:
-				t.Errorf("%s with a %s key: %d, want 403", rt.pattern, kind, got)
+				t.Errorf("%s with a %v key: %d %v, want access", rt.pattern, k.scopes, got, out)
+			case allowed:
+			case scope == "":
+				if got != 403 || out["error"] != "not available with an API key" || !strings.Contains(auth, `error="insufficient_scope"`) || strings.Contains(auth, "scope=") {
+					t.Errorf("%s with a %v key: %d %v %q, want 403 not available", rt.pattern, k.scopes, got, out, auth)
+				}
+			default:
+				if got != 403 || out["scope"] != scope || out["error"] != "this API key lacks the "+scope+" scope" ||
+					!strings.Contains(auth, `error="insufficient_scope", scope="`+scope+`"`) {
+					t.Errorf("%s with a %v key: %d %v %q, want 403 for %s", rt.pattern, k.scopes, got, out, auth, scope)
+				}
 			}
 		}
 	}
-	if seen[accessRead] == 0 || seen[accessWrite] == 0 {
+	if seen[accessRead] == 0 || seen[accessUpload] == 0 || seen[accessWrite] == 0 {
 		t.Errorf("routes per access: %v", seen)
 	}
-	// Every non-GET route that a key may use needs write.
+	// Every non-GET route that a key may use needs upload or write, and
+	// upload is the upload route only.
 	for _, rt := range (&Server{}).routes() {
 		if method, _, _ := strings.Cut(rt.pattern, " "); method != "GET" && rt.access == accessRead {
 			t.Errorf("%s: a read key could change something", rt.pattern)
 		}
+		if rt.access == accessUpload && rt.pattern != "POST /api/documents" {
+			t.Errorf("%s: an upload key could use it", rt.pattern)
+		}
 	}
-	// The scope is named.
-	resp, out := f.keyRequest(keys["read"], "POST", "/api/documents", pdf("x"), "application/pdf", nil)
-	if resp.StatusCode != 403 || out["scope"] != "write" || !strings.Contains(resp.Header.Get("WWW-Authenticate"), `scope="write"`) {
-		t.Errorf("scope answer: %d %v %q", resp.StatusCode, out, resp.Header.Get("WWW-Authenticate"))
+	// The upload's refusal names upload, the scope a key needs at least.
+	read := keys[0].key
+	resp, out := f.keyUpload(read, "a.pdf", pdf("a"))
+	if resp.StatusCode != 403 || out["scope"] != "upload" || out["error"] != "this API key lacks the upload scope" ||
+		!strings.Contains(resp.Header.Get("WWW-Authenticate"), `scope="upload"`) {
+		t.Errorf("read key upload: %d %v %q", resp.StatusCode, out, resp.Header.Get("WWW-Authenticate"))
 	}
-	if resp, _ := f.keyUpload(keys["read"], "a.pdf", pdf("a")); resp.StatusCode != 403 {
-		t.Errorf("read key uploads: %d", resp.StatusCode)
-	}
-	if resp, _ := f.keyUpload(keys["write"], "a.pdf", pdf("a")); resp.StatusCode != 201 {
+	if resp, _ := f.keyUpload(keys[2].key, "a.pdf", pdf("a")); resp.StatusCode != 201 {
 		t.Errorf("write key upload: %d", resp.StatusCode)
 	}
-	if s := f.keyStatus(keys["write"], "GET", "/api/documents"); s != 403 {
+	if s := f.keyStatus(keys[2].key, "GET", "/api/documents"); s != 403 {
 		t.Errorf("write key reads: %d", s)
 	}
 	// Public routes work with a key too.
-	if s := f.keyStatus(keys["read"], "GET", "/healthz"); s != 200 {
+	if s := f.keyStatus(read, "GET", "/healthz"); s != 200 {
 		t.Errorf("healthz: %d", s)
+	}
+}
+
+// TestAPIKeyUploadScope: an upload key uploads (201, then 200 for the
+// same file) and gets 403 with the missing scope on the reads and changes
+// of the document it uploaded; a write key is stored as [write] and still
+// uploads; the audit entry of the creation records the scopes.
+func TestAPIKeyUploadScope(t *testing.T) {
+	f := newAuthFixture(t)
+	f.addUser("kim", keyPassword, false)
+	f.loginOK("kim", keyPassword)
+	n := len(auditLog(t, f.st))
+	phone := f.createKey("iPhone", []string{"upload"}, "")
+	resp, out := f.keyUpload(phone, "scan.pdf", pdf("scan"))
+	if resp.StatusCode != 201 {
+		t.Fatalf("upload: %d %v", resp.StatusCode, out)
+	}
+	id, _ := out["id"].(string)
+	if resp, out := f.keyUpload(phone, "again.pdf", pdf("scan")); resp.StatusCode != 200 || out["duplicate"] != true {
+		t.Errorf("duplicate upload: %d %v", resp.StatusCode, out)
+	}
+	tag := f.expect("POST", "/api/tags", map[string]any{"name": "Bills"}, 201)["id"].(string)
+	refused := []struct{ method, path, scope string }{
+		{"GET", "/api/documents", "read"},
+		{"GET", "/api/documents/" + id, "read"},
+		{"GET", "/api/documents/" + id + "/file", "read"},
+		{"GET", "/api/documents/" + id + "/thumbnail", "read"},
+		{"GET", "/api/documents/counts", "read"},
+		{"GET", "/api/tags", "read"},
+		{"POST", "/api/tags", "write"},
+		{"PATCH", "/api/tags/" + tag, "write"},
+		{"DELETE", "/api/tags/" + tag, "write"},
+		{"POST", "/api/documents/" + id + "/reprocess", "write"},
+	}
+	for _, c := range refused {
+		resp, out := f.keyRequest(phone, c.method, c.path, []byte("{}"), "application/json", nil)
+		if resp.StatusCode != 403 || out["scope"] != c.scope || !strings.Contains(resp.Header.Get("WWW-Authenticate"), `scope="`+c.scope+`"`) {
+			t.Errorf("%s %s with an upload key: %d %v %q", c.method, c.path, resp.StatusCode, out, resp.Header.Get("WWW-Authenticate"))
+		}
+	}
+	for _, p := range []string{"/api/profile/api-keys", "/api/users", "/api/audit"} {
+		if resp, out := f.keyRequest(phone, "GET", p, nil, "", nil); resp.StatusCode != 403 || out["error"] != "not available with an API key" {
+			t.Errorf("GET %s with an upload key: %d %v", p, resp.StatusCode, out)
+		}
+	}
+	// write with upload is stored as [write], which uploads.
+	w := f.expect("POST", "/api/profile/api-keys", map[string]any{"name": "script", "scopes": []string{"upload", "write"}, "currentPassword": keyPassword}, 201)
+	if fmt.Sprint(w["scopes"]) != "[write]" {
+		t.Errorf("write+upload stored as %v", w["scopes"])
+	}
+	if resp, out := f.keyUpload(w["key"].(string), "w.pdf", pdf("w")); resp.StatusCode != 201 {
+		t.Errorf("write key upload: %d %v", resp.StatusCode, out)
+	}
+	list := f.expect("GET", "/api/profile/api-keys", nil, 200)["keys"].([]any)
+	scopes := map[string]string{}
+	for _, k := range list {
+		k := k.(map[string]any)
+		scopes[k["name"].(string)] = fmt.Sprint(k["scopes"])
+	}
+	if scopes["iPhone"] != "[upload]" || scopes["script"] != "[write]" {
+		t.Errorf("listed scopes %v", scopes)
+	}
+
+	var created []string
+	for _, r := range newEntries(t, f.st, n) {
+		if r.Action == "api_key.create" {
+			created = append(created, r.TargetName+"="+fmt.Sprint(details(t, r)["scopes"]))
+		}
+	}
+	if strings.Join(created, " ") != "iPhone=[upload] script=[write]" {
+		t.Errorf("api_key.create entries: %v", created)
+	}
+
+	// An unknown scope or none is refused, naming the three.
+	for _, bad := range [][]string{{"admin"}, {}} {
+		out := f.expect("POST", "/api/profile/api-keys", map[string]any{"name": "bad", "scopes": bad, "currentPassword": keyPassword}, 400)
+		if out["error"] != "choose one or more of the scopes read, upload and write" {
+			t.Errorf("%v: %v", bad, out)
+		}
 	}
 }
 

@@ -74,6 +74,9 @@ export function NewKeyPanel({ created, done }: { created: NewApiKey; done: () =>
   );
 }
 
+// The scopes in the order the server stores them.
+const scopeOrder: ApiKeyScope[] = ["read", "upload", "write"];
+
 /** The user's API keys on the profile page: list, create, revoke. */
 export function ApiKeySection() {
   const [list, setList] = useState<ApiKeyList | null>(null);
@@ -97,10 +100,14 @@ export function ApiKeySection() {
 
   const active = list.keys.filter((k) => k.state === "active").length;
   const toggle = (s: ApiKeyScope, on: boolean) => setScopes((cur) => (on ? [...cur.filter((x) => x !== s), s] : cur.filter((x) => x !== s)));
+  // write includes upload: the box is ticked and fixed, and only write is
+  // sent, so the key is stored as [write].
+  const writes = scopes.includes("write");
+  const sent = scopeOrder.filter((s) => scopes.includes(s) && !(s === "upload" && writes));
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
-    if (scopes.length === 0) {
+    if (sent.length === 0) {
       setError(t.apiKeyNoScope);
       return;
     }
@@ -108,7 +115,7 @@ export function ApiKeySection() {
     setError("");
     setCreated(null);
     try {
-      setCreated(await apiKeyApi.create({ name: name.trim(), scopes, expiresInDays: expiry, currentPassword: password, code }));
+      setCreated(await apiKeyApi.create({ name: name.trim(), scopes: sent, expiresInDays: expiry, currentPassword: password, code }));
       setName("");
       load();
     } catch (err) {
@@ -149,6 +156,10 @@ export function ApiKeySection() {
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={scopes.includes("read")} onChange={(e) => toggle("read", e.target.checked)} />
               {t.apiKeyScopeRead}
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={writes || scopes.includes("upload")} disabled={writes} onChange={(e) => toggle("upload", e.target.checked)} />
+              {t.apiKeyScopeUpload}
             </label>
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={scopes.includes("write")} onChange={(e) => toggle("write", e.target.checked)} />

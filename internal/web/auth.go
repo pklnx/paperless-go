@@ -230,7 +230,8 @@ func (s *Server) sessionWithToken(r *http.Request) (*store.Session, string, erro
 // authenticate lets a request through only with a valid session or API
 // key, except to routes whose access in the route table is public, and to
 // login routes for requests without a key. A key works only on routes
-// with accessRead or accessWrite and the matching scope (requiredScope).
+// with accessRead, accessUpload or accessWrite and the matching scope
+// (requiredScope, APIKey.Allows).
 // A path without a route, or with a method no route takes, counts as
 // session-only, so it answers 401 without a login. New endpoints are
 // protected by default (accessSession is the zero value). /healthz and the

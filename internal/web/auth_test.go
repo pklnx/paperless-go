@@ -298,7 +298,7 @@ func TestRouteTable(t *testing.T) {
 			resp, out = f.do(method, path, map[string]string{})
 		}
 		switch rt.access {
-		case accessSession, accessRead, accessWrite:
+		case accessSession, accessRead, accessUpload, accessWrite:
 			if resp.StatusCode != 401 || out["error"] != "login required" {
 				t.Errorf("%s: %d %v, want 401 without a session", rt.pattern, resp.StatusCode, out)
 			}
