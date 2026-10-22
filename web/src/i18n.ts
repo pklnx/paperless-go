@@ -7,7 +7,7 @@ const en = {
   tagline: "Your documents, scanned, recognized and searchable, on your own server.",
   buildingTitle: "Setting up",
   buildingText:
-    "Uploads work; text recognition, search and the full document list follow step by step. See the roadmap in the documentation.",
+    "Uploads, text recognition and a first search work; the full document list with filters follows step by step. See the roadmap in the documentation.",
   serverStatus: "Server",
   statusChecking: "checking…",
   statusOk: "running, database connected",
@@ -48,6 +48,15 @@ const en = {
   recentEmpty: "No documents yet.",
   download: "Download",
   untitled: "Untitled",
+
+  // Search (start page)
+  searchLabel: "Search documents",
+  searchPlaceholder: "Search, e.g. Rechnung tag:Steuer date:2024",
+  searchButton: "Search",
+  searchResults: "Search results",
+  searchEmpty: "No documents found.",
+  searchMore: "Load more",
+  searchTooLong: "The search is too long: at most 1000 characters and 32 words or filters.",
 
   // Login
   userName: "User name",
@@ -220,8 +229,8 @@ const en = {
   log: "Log",
   logTitle: "Log",
   logOwnNote:
-    "Your logins, failed logins and logouts, the changes you made to your password, two-factor login, passkeys and API keys, and what your API keys did, and the changes an admin or the command line made to your account (locking, role, password reset, two-factor login, passkeys, imports into your account, exports of your log). Admins see these entries too.",
-  logAdminNote: "Every user's logins, failed logins and logouts, and every change of users, passwords, two-factor logins, passkeys and API keys, also from the command line.",
+    "Your logins, failed logins and logouts, your document searches, the changes you made to your password, two-factor login, passkeys and API keys, and what your API keys did, and the changes an admin or the command line made to your account (locking, role, password reset, two-factor login, passkeys, imports into your account, exports of your log). Admins see these entries too.",
+  logAdminNote: "Every user's logins, failed logins, logouts and document searches, and every change of users, passwords, two-factor logins, passkeys and API keys, also from the command line.",
   logFrom: "From",
   logTo: "To",
   logAction: "Action",
@@ -284,6 +293,7 @@ const en = {
       "profile.passkey_remove": "Removed passkey",
       "audit.export": "Exported log",
       "document.create": "Uploaded document",
+      "document.search": "Searched documents",
       "api_key.create": "Created API key",
       "api_key.revoke": "Revoked API key",
     })[a] ?? a,
@@ -296,7 +306,7 @@ const de: Messages = {
   tagline: "Deine Dokumente, gescannt, erkannt und durchsuchbar, auf deinem eigenen Server.",
   buildingTitle: "Im Aufbau",
   buildingText:
-    "Hochladen funktioniert; Texterkennung, Suche und die vollständige Dokumentliste kommen Schritt für Schritt. Siehe die Roadmap in der Dokumentation.",
+    "Hochladen, Texterkennung und eine erste Suche funktionieren; die vollständige Dokumentliste mit Filtern kommt Schritt für Schritt. Siehe die Roadmap in der Dokumentation.",
   serverStatus: "Server",
   statusChecking: "wird geprüft …",
   statusOk: "läuft, Datenbank verbunden",
@@ -336,6 +346,15 @@ const de: Messages = {
   recentEmpty: "Noch keine Dokumente.",
   download: "Herunterladen",
   untitled: "Ohne Titel",
+
+  // Suche (Startseite)
+  searchLabel: "Dokumente durchsuchen",
+  searchPlaceholder: "Suchen, z. B. Rechnung tag:Steuer date:2024",
+  searchButton: "Suchen",
+  searchResults: "Suchergebnisse",
+  searchEmpty: "Keine Dokumente gefunden.",
+  searchMore: "Mehr laden",
+  searchTooLong: "Die Suche ist zu lang: höchstens 1000 Zeichen und 32 Wörter oder Filter.",
 
   userName: "Benutzername",
   fieldPassword: "Passwort",
@@ -500,9 +519,9 @@ const de: Messages = {
   log: "Protokoll",
   logTitle: "Protokoll",
   logOwnNote:
-    "Deine Anmeldungen, fehlgeschlagenen Anmeldungen und Abmeldungen, die Änderungen, die du an deinem Passwort, deiner Zwei-Faktor-Anmeldung, deinen Passkeys und API-Schlüsseln vorgenommen hast, was deine API-Schlüssel getan haben, und die Änderungen, die ein Admin oder die Kommandozeile an deinem Konto vorgenommen hat (Sperren, Rolle, Zurücksetzen des Passworts, Zwei-Faktor-Anmeldung, Passkeys, Importe in dein Konto, Exporte deines Protokolls). Admins sehen diese Einträge ebenfalls.",
+    "Deine Anmeldungen, fehlgeschlagenen Anmeldungen und Abmeldungen, deine Dokumentsuchen, die Änderungen, die du an deinem Passwort, deiner Zwei-Faktor-Anmeldung, deinen Passkeys und API-Schlüsseln vorgenommen hast, was deine API-Schlüssel getan haben, und die Änderungen, die ein Admin oder die Kommandozeile an deinem Konto vorgenommen hat (Sperren, Rolle, Zurücksetzen des Passworts, Zwei-Faktor-Anmeldung, Passkeys, Importe in dein Konto, Exporte deines Protokolls). Admins sehen diese Einträge ebenfalls.",
   logAdminNote:
-    "Die Anmeldungen, fehlgeschlagenen Anmeldungen und Abmeldungen aller Benutzer und jede Änderung an Benutzern, Passwörtern, Zwei-Faktor-Anmeldungen, Passkeys und API-Schlüsseln, auch über die Kommandozeile.",
+    "Die Anmeldungen, fehlgeschlagenen Anmeldungen, Abmeldungen und Dokumentsuchen aller Benutzer und jede Änderung an Benutzern, Passwörtern, Zwei-Faktor-Anmeldungen, Passkeys und API-Schlüsseln, auch über die Kommandozeile.",
   logFrom: "Von",
   logTo: "Bis",
   logAction: "Aktion",
@@ -564,6 +583,7 @@ const de: Messages = {
       "profile.passkey_remove": "Passkey entfernt",
       "audit.export": "Protokoll exportiert",
       "document.create": "Dokument hochgeladen",
+      "document.search": "Dokumente durchsucht",
       "api_key.create": "API-Schlüssel erstellt",
       "api_key.revoke": "API-Schlüssel widerrufen",
     })[a] ?? a,

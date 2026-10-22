@@ -5,9 +5,29 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/pklnx/paperless-go/internal/search"
 	"github.com/pklnx/paperless-go/internal/store/db"
 )
+
+// SearchFilterIDs resolves q's filters as SearchDocuments does and returns
+// the IDs they stand for, so a test can check name resolution on its own:
+// the search query's owner predicate would hide a resolution that leaks.
+func SearchFilterIDs(ctx context.Context, s *Store, sc Scope, q search.Query) (tags, notTags, correspondents, types []string, none bool, err error) {
+	var args searchArgs
+	if none, err = s.searchFilters(ctx, sc, q, &args); err != nil || none {
+		return nil, nil, nil, nil, none, err
+	}
+	str := func(ids []pgtype.UUID) []string {
+		out := []string{}
+		for _, id := range ids {
+			out = append(out, idString(id))
+		}
+		return out
+	}
+	return str(args.TagIds), str(args.NotTagIds), str(args.Correspondents), str(args.Types), false, nil
+}
 
 // RecordSearchSQL makes s hand the SQL and arguments of each search query
 // to rec before running it, so a test can EXPLAIN exactly what the store

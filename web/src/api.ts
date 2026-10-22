@@ -311,12 +311,42 @@ export interface DocumentSummary {
   originalMime: string;
   originalSize: number;
   hasArchive: boolean;
+  /**
+   * Only in a search with words: up to two fragments of the text, each
+   * match between SNIPPET_START and SNIPPET_STOP. Plain text, never HTML.
+   */
+  snippet?: string;
+}
+
+/** A page of GET /api/documents; nextCursor is missing on the last page. */
+export interface DocumentPage {
+  documents: DocumentSummary[];
+  nextCursor?: string;
+  maxUploadSize: number;
+}
+
+/** The query string of a search: the query, the page size, the browser's time zone (for date: and added:) and the cursor. */
+export function searchQuery(q: string, limit: number, cursor = "", timeZone = browserTimeZone()): string {
+  const p = new URLSearchParams({ q, limit: String(limit) });
+  if (timeZone) p.set("tz", timeZone);
+  if (cursor) p.set("cursor", cursor);
+  return p.toString();
+}
+
+/** The browser's IANA time zone, or "" if it has none (the server then uses UTC). */
+export function browserTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
+  } catch {
+    return "";
+  }
 }
 
 export const documentsApi = {
   /** The caller's newest documents (an admin's: everyone's), at most limit (the server caps it at 100), and the upload limit in bytes. */
-  list: (limit: number, signal?: AbortSignal) =>
-    getJSON<{ documents: DocumentSummary[]; maxUploadSize: number }>(`/api/documents?limit=${limit}`, signal),
+  list: (limit: number, signal?: AbortSignal) => getJSON<DocumentPage>(`/api/documents?limit=${limit}`, signal),
+  /** One page of a search (docs/guide/search.md), best match first; cursor continues after the previous page. */
+  search: (q: string, limit: number, cursor = "", signal?: AbortSignal) => getJSON<DocumentPage>(`/api/documents?${searchQuery(q, limit, cursor)}`, signal),
   /** The download URL of a document's original file or archive PDF. */
   fileURL: (id: string, kind: "original" | "archive" = "original") => `/api/documents/${encodeURIComponent(id)}/file?kind=${kind}`,
 };

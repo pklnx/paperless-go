@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"slices"
 	"strconv"
 	"time"
 
@@ -86,6 +87,13 @@ func encodeCursor(c searchCursor) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// minCursorAt is the earliest instant PostgreSQL's timestamptz holds
+// (4714-11-24 BC, UTC) in Unix microseconds. A cursor time before it would
+// fail in the database (22008), and near math.MinInt64 pgx's conversion
+// would wrap around to another time. Every int64 above it is in range: the
+// type ends in the year 294276.
+const minCursorAt = -210866803200000000
+
 func decodeCursor(s string, sort search.Sort, asc bool) (searchCursor, pgtype.UUID, error) {
 	var c searchCursor
 	b, err := base64.RawURLEncoding.DecodeString(s)
@@ -102,6 +110,15 @@ func decodeCursor(s string, sort search.Sort, asc bool) (searchCursor, pgtype.UU
 	if (sort == search.SortRelevance) != (c.Rank != nil) || (sort == search.SortRelevance) == (c.At != nil) {
 		return c, pgtype.UUID{}, ErrInvalidCursor
 	}
+	if c.At != nil && *c.At < minCursorAt {
+		return c, pgtype.UUID{}, ErrInvalidCursor
+	}
+	// A rank is a finite number: ts_rank_cd never gives NaN or infinity.
+	if c.Rank != nil {
+		if r := float64(math.Float32frombits(*c.Rank)); math.IsNaN(r) || math.IsInf(r, 0) {
+			return c, pgtype.UUID{}, ErrInvalidCursor
+		}
+	}
 	return c, id, nil
 }
 
@@ -113,12 +130,17 @@ type searchArgs = db.SearchDocumentsAddedDescParams
 // without their extracted text. Without free text or filters it lists the
 // newest documents. Free text comes with snippets.
 //
-// The sort is q.Sort, by default relevance with free text and newest added
-// otherwise; relevance falls back to newest added when no free-text item
-// is left (only stop words or punctuation). Errors: ErrInvalidCursor,
-// ErrInvalidSort, and a *ValidationError (ErrInvalid) for text that is not
-// valid UTF-8 or holds NUL, or a malformed ID.
+// The sort is q.Sort, by default relevance with free text that is not
+// only negated, and newest added otherwise; relevance falls back to newest
+// added when no free-text item is left (only stop words or punctuation). Errors: ErrInvalidCursor,
+// ErrInvalidSort, search.ErrTooLong for a query over search.MaxItems or
+// search.MaxBytes (also one not built by search.Parse), and a
+// *ValidationError (ErrInvalid) for text that is not valid UTF-8 or holds
+// NUL, or a malformed ID.
 func (s *Store) SearchDocuments(ctx context.Context, sc Scope, q search.Query) (*DocumentPage, error) {
+	if err := q.CheckLimits(); err != nil {
+		return nil, err
+	}
 	limit := q.Limit
 	if limit <= 0 {
 		limit = search.DefaultLimit
@@ -139,9 +161,15 @@ func (s *Store) SearchDocuments(ctx context.Context, sc Scope, q search.Query) (
 		}
 	}
 
+	// Only a word the documents contain gives a rank: with negated items
+	// alone every match ranks 0, and ranking them all (a scan of most of
+	// the index) only to sort by id is slow (searchbench: 4-5 s against
+	// 45 ms by added on 100 000 documents). Such a search lists the
+	// newest first, like one without words.
+	positive := slices.ContainsFunc(q.Text, func(t search.Text) bool { return !t.Negated })
 	sort := q.Sort
 	switch {
-	case sort == "" && args.Query != nil && !q.Ascending:
+	case sort == "" && args.Query != nil && positive && !q.Ascending:
 		sort = search.SortRelevance
 	case sort == "" || sort == search.SortRelevance && args.Query == nil:
 		sort = search.SortAdded

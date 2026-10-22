@@ -20,7 +20,8 @@ export function targetLabel(e: AuditEntry): string {
 /**
  * The detail worth a glance: a login's method, passkey, second factor and
  * reason, a failed login's name, the role of a new user, the factor that
- * confirmed a 2FA change, the passkey added or removed.
+ * confirmed a 2FA change, the passkey added or removed, the text of a
+ * search.
  */
 export function entryDetail(e: AuditEntry, m: Messages = t): string {
   const d = e.details;
@@ -31,6 +32,7 @@ export function entryDetail(e: AuditEntry, m: Messages = t): string {
       .filter(Boolean)
       .join(", ");
   if (e.action === "profile.passkey_add" || e.action === "profile.passkey_remove") return str(d.name) && m.logTriedName(str(d.name));
+  if (e.action === "document.search") return str(d.q) && m.logTriedName(str(d.q));
   if (e.action === "user.passkeys_removed" && typeof d.count === "number") return m.passkeyCount(d.count);
   if (e.action === "user.password_reset" && typeof d.passkeysRemoved === "number" && d.passkeysRemoved > 0) return `${m.removePasskeys}: ${d.passkeysRemoved}`;
   if (e.action === "profile.2fa_disable" || e.action === "profile.recovery_codes") return code(d.factor);

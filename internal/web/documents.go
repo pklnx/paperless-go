@@ -84,44 +84,185 @@ func (s *Server) documentsAvailable(w http.ResponseWriter, r *http.Request) bool
 }
 
 type documentListJSON struct {
-	Documents []documentJSON `json:"documents"`
+	Documents []documentListItemJSON `json:"documents"`
+	// NextCursor continues the list (the cursor parameter); it is left
+	// out on the last page.
+	NextCursor string `json:"nextCursor,omitempty"`
 	// MaxUploadSize is the upload limit in bytes, so the UI can refuse a
 	// larger file before sending it.
 	MaxUploadSize int64 `json:"maxUploadSize"`
 }
 
-// Page size of GET /api/documents: the newest documents only; paging and
-// filters come with the document list (#7).
+// documentListItemJSON is a listed document. A search with free text adds
+// the snippet: up to two fragments of the text, each match between
+// store.SnippetStart and store.SnippetStop (U+E000, U+E001). It is plain
+// text, never HTML.
+type documentListItemJSON struct {
+	documentJSON
+	Snippet *string `json:"snippet,omitempty"`
+}
+
+// Limits of GET /api/documents: the page size (default and maximum 100),
+// the IDs per filter parameter, a time zone name and a cursor.
 const (
-	documentListDefault = 100
-	documentListMax     = 100
+	documentListDefault = search.DefaultLimit
+	documentListMax     = search.MaxLimit
+	maxFilterIDs        = 100
+	maxTimeZoneLen      = 64
+	maxCursorLen        = 512
 )
 
-// handleListDocuments lists the scope's newest documents (at most limit,
-// default and maximum 100), without their text.
+// listError is a refused parameter of GET /api/documents: always 400, with
+// fixed wording.
+type listError string
+
+func (e listError) Error() string { return string(e) }
+
+// listQuery reads the parameters of GET /api/documents into a query. It
+// reports whether the request is a search (text, a filter or an ID
+// parameter, on the first page): only these are audited.
+func listQuery(v url.Values) (q search.Query, isSearch bool, err error) {
+	q.Limit = documentListDefault
+	if s := v.Get("limit"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 {
+			return q, false, listError("limit must be a positive number")
+		}
+		q.Limit = min(n, documentListMax)
+	}
+	var loc *time.Location
+	if tz := v.Get("tz"); tz != "" {
+		// "Local" would be the server's zone, not one the browser named.
+		if len(tz) > maxTimeZoneLen || tz == "Local" {
+			return q, false, listError("invalid time zone")
+		}
+		if loc, err = time.LoadLocation(tz); err != nil {
+			return q, false, listError("invalid time zone")
+		}
+	}
+	if text := v.Get("q"); text != "" {
+		parsed, err := search.Parse(text, loc)
+		switch {
+		case errors.Is(err, search.ErrTooLong):
+			return q, false, listError("query too long")
+		case err != nil:
+			return q, false, listError("invalid query")
+		}
+		parsed.Limit = q.Limit
+		q = parsed
+	}
+	q.Location = loc
+	sort, ok := search.ParseSort(v.Get("sort"))
+	if !ok {
+		return q, false, listError("invalid sort")
+	}
+	q.Sort = sort
+	switch v.Get("order") {
+	case "", "desc":
+	case "asc":
+		q.Ascending = true
+	default:
+		return q, false, listError("invalid order")
+	}
+	for _, p := range []struct {
+		name string
+		dst  *[]string
+	}{{"tag", &q.TagIDs}, {"correspondent", &q.CorrespondentIDs}, {"type", &q.TypeIDs}} {
+		ids := v[p.name]
+		if len(ids) > maxFilterIDs {
+			return q, false, listError("too many " + p.name + " ids")
+		}
+		*p.dst = ids
+	}
+	switch v.Get("inbox") {
+	case "":
+	case "true", "false":
+		q.Filters = append(q.Filters, search.Filter{Field: search.FieldIs, Negated: v.Get("inbox") == "false", Values: []string{search.IsInbox}})
+	default:
+		return q, false, listError("inbox must be true or false")
+	}
+	if err := q.CheckLimits(); err != nil {
+		return q, false, listError("query too long")
+	}
+	q.Cursor = v.Get("cursor")
+	if len(q.Cursor) > maxCursorLen {
+		return q, false, listError("invalid cursor")
+	}
+	isSearch = q.Cursor == "" && (len(q.Text) > 0 || len(q.Filters) > 0 ||
+		len(q.TagIDs) > 0 || len(q.CorrespondentIDs) > 0 || len(q.TypeIDs) > 0)
+	return q, isSearch, nil
+}
+
+// searchAuditParams are the parameters a document.search entry records:
+// the query as typed and the filters, not the paging and sort options.
+var searchAuditParams = []string{"q", "tag", "correspondent", "type", "inbox"}
+
+// searchEntry is the audit entry of the first page of a search.
+func (s *Server) searchEntry(r *http.Request) *store.AuditEntry {
+	e := s.auditEntry(r, "document.search")
+	v := r.URL.Query()
+	for _, k := range searchAuditParams {
+		switch vals := v[k]; {
+		case len(vals) == 0:
+		case k == "tag" || k == "correspondent" || k == "type":
+			e.Detail(k, vals)
+		default:
+			e.Detail(k, vals[0])
+		}
+	}
+	return e
+}
+
+// handleListDocuments lists and searches the scope's documents, without
+// their text: by default the newest added first, with free text the best
+// match first, each with a snippet. Parameters: q (the search syntax),
+// tag, correspondent and type (UUIDs, repeatable, any of them), inbox,
+// sort (relevance, added, date), order (desc, asc), tz (an IANA zone for
+// the days of date filters, default UTC), limit (1 to 100, default 100)
+// and cursor (nextCursor of the previous page). Invalid input answers 400
+// with fixed wording. The first page of a search writes document.search;
+// without the audit log it answers 503.
 func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 	if !s.documentsAvailable(w, r) {
 		return
 	}
-	limit := documentListDefault
-	if v := r.URL.Query().Get("limit"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			s.fail(w, r, http.StatusBadRequest, "limit must be a positive number", nil)
-			return
-		}
-		limit = min(n, documentListMax)
-	}
-	page, err := s.store.SearchDocuments(r.Context(), requestScope(r), search.Query{Limit: limit})
+	q, isSearch, err := listQuery(r.URL.Query())
 	if err != nil {
-		s.failStore(w, r, err)
+		s.fail(w, r, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
-	out := documentListJSON{Documents: make([]documentJSON, len(page.Hits)), MaxUploadSize: s.importer.MaxSize()}
+	page, err := s.store.SearchDocuments(r.Context(), requestScope(r), q)
+	if err != nil {
+		s.failSearch(w, r, err)
+		return
+	}
+	if isSearch {
+		if err := s.store.Audit(r.Context(), *s.searchEntry(r)); err != nil {
+			s.failAudit(w, r, err)
+			return
+		}
+	}
+	out := documentListJSON{Documents: make([]documentListItemJSON, len(page.Hits)), NextCursor: page.NextCursor, MaxUploadSize: s.importer.MaxSize()}
 	for i, h := range page.Hits {
-		out.Documents[i] = toDocumentJSON(h.Document)
+		out.Documents[i] = documentListItemJSON{documentJSON: toDocumentJSON(h.Document)}
+		if q.HasText() {
+			snippet := h.Snippet
+			out.Documents[i].Snippet = &snippet
+		}
 	}
 	s.writeJSON(w, http.StatusOK, out)
+}
+
+// failSearch answers an error of SearchDocuments: refused input with fixed
+// wording, everything else as failStore does.
+func (s *Server) failSearch(w http.ResponseWriter, r *http.Request, err error) {
+	var ve *store.ValidationError
+	switch {
+	case errors.As(err, &ve) && (ve.Field == "tag" || ve.Field == "correspondent" || ve.Field == "type"):
+		s.fail(w, r, http.StatusBadRequest, "invalid "+ve.Field+" id", nil)
+	default:
+		s.failStore(w, r, err)
+	}
 }
 
 // handleGetDocument returns one document of the scope; another user's
