@@ -30,9 +30,11 @@ describe("messages", () => {
       }
     }
   });
-  it("tells a user that changes by admins are in their log", () => {
-    expect(messagesFor("en").logOwnNote).toContain("an admin or the command line made to your account");
-    expect(messagesFor("de").logOwnNote).toContain("ein Admin oder die Kommandozeile an deinem Konto");
+  it("tells a user that changes by admins and the server are in their log", () => {
+    expect(messagesFor("en").logOwnNote).toContain("an admin, the command line or the server made to your account");
+    expect(messagesFor("de").logOwnNote).toContain("ein Admin, die Kommandozeile oder der Server an deinem Konto");
+    expect(messagesFor("en").logOwnNote).toContain("consume folder");
+    expect(messagesFor("de").logOwnNote).toContain("Eingangsordner");
     expect(messagesFor("en").logByAdmin("root")).toBe("by root");
     expect(messagesFor("de").logByAdmin("root")).toBe("von root");
   });

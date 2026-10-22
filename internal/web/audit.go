@@ -119,7 +119,8 @@ type auditEntryJSON struct {
 	UserAgent string           `json:"userAgent,omitempty"`
 	Details   json.RawMessage  `json:"details"`
 	// ByOther marks an entry about the viewer made by someone else (an
-	// admin or the command line), for a viewer who is not an admin.
+	// admin, the command line or the server), for a viewer who is not an
+	// admin.
 	ByOther bool `json:"byOther,omitempty"`
 }
 
@@ -163,10 +164,10 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch actor {
-	case "", store.ActorSession, store.ActorAPIKey, store.ActorCLI:
+	case "", store.ActorSession, store.ActorAPIKey, store.ActorCLI, store.ActorSystem:
 		p.Actor = actor
 	default:
-		s.fail(w, r, http.StatusBadRequest, "actor must be session, api_key or cli", nil)
+		s.fail(w, r, http.StatusBadRequest, "actor must be session, api_key, cli or system", nil)
 		return
 	}
 	if userName != "" {
@@ -236,9 +237,9 @@ var foreignDetails = map[string]bool{
 	"format": true, "since": true, "until": true, "actions": true,
 }
 
-// redactForeign reduces an entry about a non-admin viewer made by an admin
-// or the command line to what the viewer may see: who made it (the
-// admin's name, or the actor cli for the command line) and the
+// redactForeign reduces an entry about a non-admin viewer made by an admin,
+// the command line or the server to what the viewer may see: who made it
+// (the admin's name, or the actor cli or system) and the
 // foreignDetails, without the admin's client, user agent or API key.
 func redactForeign(e *auditEntryJSON) {
 	e.ByOther = true

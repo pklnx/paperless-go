@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/pklnx/paperless-go/internal/store"
 	"github.com/pklnx/paperless-go/internal/store/storetest"
@@ -843,5 +844,121 @@ func TestListAuditForUserPlan(t *testing.T) {
 		if !used {
 			t.Errorf("%s not used:\n%s", idx, plan)
 		}
+	}
+}
+
+// systemEntry is an entry by the server about the user id.
+func systemEntry(id int64) store.AuditEntry {
+	e := store.AuditEntry{Actor: store.ActorSystem, Action: "document.consume"}
+	e.SetTarget(store.TargetUser, fmt.Sprint(id), "alice")
+	e.Detail("imported", 1)
+	return e
+}
+
+// constraintOf is the check an insert broke, or "" for none.
+func constraintOf(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23514" {
+		return pgErr.ConstraintName
+	}
+	return ""
+}
+
+// The actor system (00015): by no user and from no client, about a user.
+// The other actors' rules are unchanged, and later partitions have the
+// checks too.
+func TestAuditSystemActor(t *testing.T) {
+	st, url := storetest.NewWithURL(t)
+	conn := connect(t, url)
+	ctx := context.Background()
+	if err := st.Audit(ctx, systemEntry(7)); err != nil {
+		t.Fatalf("system entry: %v", err)
+	}
+	rows := auditRows(t, conn)
+	if len(rows) != 1 || rows[0].Actor != "system" || rows[0].UserID != nil || *rows[0].TargetID != "7" || rows[0].Details["imported"] != float64(1) {
+		t.Fatalf("rows %+v", rows)
+	}
+
+	uid := int64(3)
+	withUser := systemEntry(7)
+	withUser.UserID = &uid
+	withIP := systemEntry(7)
+	withIP.ClientIP = netip.MustParseAddr("192.0.2.1")
+	withUA := systemEntry(7)
+	withUA.UserAgent = "curl/8.0"
+	cliIP := store.AuditEntry{Actor: store.ActorCLI, Action: "user.add", ClientIP: netip.MustParseAddr("192.0.2.1")}
+	for name, c := range map[string]struct {
+		e          store.AuditEntry
+		constraint string
+	}{
+		"system with a user":       {withUser, "audit_log_system_no_user"},
+		"system with a client":     {withIP, "audit_log_actor_no_client"},
+		"system with a user agent": {withUA, "audit_log_actor_no_client"},
+		"cli with a client":        {cliIP, "audit_log_actor_no_client"},
+	} {
+		err := st.Audit(ctx, c.e)
+		if got := constraintOf(err); got != c.constraint {
+			t.Errorf("%s: %v (check %q), want check %s", name, err, got, c.constraint)
+		}
+	}
+	session := store.AuditEntry{Actor: store.ActorSession, Action: "auth.login", ClientIP: netip.MustParseAddr("192.0.2.1"), UserAgent: "curl/8.0"}
+	session.SetUser(3, "alice")
+	keyID := int64(5)
+	viaKey := store.AuditEntry{Actor: store.ActorAPIKey, Action: "user.lock", APIKeyID: &keyID, ClientIP: netip.MustParseAddr("192.0.2.1")}
+	viaKey.SetUser(3, "alice")
+	for _, e := range []store.AuditEntry{session, viaKey, {Actor: store.ActorCLI, Action: "user.add"}} {
+		if err := st.Audit(ctx, e); err != nil {
+			t.Errorf("%s: %v", e.Actor, err)
+		}
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO audit_log (actor, action) VALUES ('robot', 'x.y')`); constraintOf(err) != "audit_log_actor_check" {
+		t.Errorf("unknown actor: %v", err)
+	}
+
+	// A partition created after the migration has the checks.
+	if _, err := st.EnsureAuditPartitions(ctx, 5); err != nil {
+		t.Fatal(err)
+	}
+	const later = `now() + interval '4 months'`
+	if _, err := conn.Exec(ctx, `INSERT INTO audit_log (at, actor, action, client_ip) VALUES (`+later+`, 'system', 'x.y', '192.0.2.1')`); constraintOf(err) != "audit_log_actor_no_client" {
+		t.Errorf("system with a client in a later partition: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO audit_log (at, actor, action, user_id) VALUES (`+later+`, 'system', 'x.y', 3)`); constraintOf(err) != "audit_log_system_no_user" {
+		t.Errorf("system with a user in a later partition: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO audit_log (at, actor, action) VALUES (`+later+`, 'system', 'x.y')`); err != nil {
+		t.Errorf("system in a later partition: %v", err)
+	}
+}
+
+// Rolling 00015 back restores the old checks while there are no system
+// entries, and refuses with a hint once there are.
+func TestAuditSystemActorMigrationDown(t *testing.T) {
+	ctx := context.Background()
+	st := storetest.New(t)
+	if err := st.Audit(ctx, store.AuditEntry{Actor: store.ActorCLI, Action: "user.add"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MigrateDownTo(ctx, 14); err != nil {
+		t.Fatalf("down without system entries: %v", err)
+	}
+	if err := st.Audit(ctx, systemEntry(7)); constraintOf(err) != "audit_log_actor_check" {
+		t.Fatalf("system entry after the rollback: %v", err)
+	}
+	if err := st.Audit(ctx, store.AuditEntry{Actor: store.ActorCLI, Action: "user.add", ClientIP: netip.MustParseAddr("192.0.2.1")}); err == nil {
+		t.Fatal("cli with a client after the rollback: written")
+	}
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+	if err := st.Audit(ctx, systemEntry(7)); err != nil {
+		t.Fatalf("system entry after the reapply: %v", err)
+	}
+	err := st.MigrateDownTo(ctx, 14)
+	if err == nil || !strings.Contains(err.Error(), "entries by the server") {
+		t.Fatalf("down with a system entry: %v", err)
+	}
+	if err := st.Audit(ctx, systemEntry(7)); err != nil {
+		t.Fatalf("system entry after the refused rollback: %v", err)
 	}
 }

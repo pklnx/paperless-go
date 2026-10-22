@@ -37,7 +37,7 @@ func newConsumer(a *app, log *slog.Logger) (*consume.Consumer, error) {
 		log.Warn("the consume folder is not writable: consumed files cannot be deleted or moved; make it writable for UID "+
 			fmt.Sprint(os.Getuid()), "dir", dir, "err", err)
 	}
-	return consume.New(dir, a.store, im, consume.Options{Log: log}), nil
+	return consume.New(dir, a.store, im, consume.Options{Log: log, Audit: a.store.Audit}), nil
 }
 
 // checkSeparate refuses a consume folder that is the data directory, inside

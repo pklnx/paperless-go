@@ -490,3 +490,60 @@ func TestAuditNeedsLogin(t *testing.T) {
 	f := newAuthFixture(t)
 	f.expect("GET", "/api/audit", nil, 401)
 }
+
+// The server's entries (actor system): admins filter by the actor, the
+// user they are about sees them with only the counts, others do not.
+func TestAuditPageSystemEntries(t *testing.T) {
+	f := newAuthFixture(t)
+	ctx := context.Background()
+	f.addUser("admin", "correct horse battery", true)
+	alice := f.addUser("alice", "correct horse battery", false)
+	f.addUser("bob", "correct horse battery", false)
+	e := store.AuditEntry{Actor: store.ActorSystem, Action: "document.consume"}
+	e.SetTarget(store.TargetUser, strconv.FormatInt(alice.ID, 10), "alice")
+	e.Detail("imported", 2)
+	e.Detail("duplicates", 1)
+	e.Detail("failed", 0)
+	e.Detail("interrupted", true)
+	e.Detail("future_key", "secret")
+	if err := f.st.Audit(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.Audit(ctx, store.AuditEntry{Actor: store.ActorCLI, Action: "user.add"}); err != nil {
+		t.Fatal(err)
+	}
+
+	f.loginOK("admin", "correct horse battery")
+	rows := auditEntries(t, f.expect("GET", "/api/audit?actor=system", nil, 200))
+	if len(rows) != 1 || rows[0]["actor"] != "system" || rows[0]["action"] != "document.consume" || rows[0]["user"] != nil || rows[0]["byOther"] != nil {
+		t.Fatalf("actor=system: %v", rows)
+	}
+	if d, _ := rows[0]["details"].(map[string]any); d["future_key"] != "secret" {
+		t.Errorf("admin's details: %v", d)
+	}
+
+	a := f.as()
+	a.loginOK("alice", "correct horse battery")
+	a.expect("GET", "/api/audit?actor=system", nil, 403)
+	var mine []map[string]any
+	for _, r := range auditEntries(t, a.expect("GET", "/api/audit", nil, 200)) {
+		if r["action"] == "document.consume" {
+			mine = append(mine, r)
+		}
+	}
+	if len(mine) != 1 || mine[0]["actor"] != "system" || mine[0]["byOther"] != true || mine[0]["user"] != nil {
+		t.Fatalf("alice's log: %v", mine)
+	}
+	got, _ := json.Marshal(mine[0]["details"])
+	if want := `{"duplicates":1,"failed":0,"imported":2,"interrupted":true}`; string(got) != want {
+		t.Errorf("alice's details %s, want %s", got, want)
+	}
+
+	b := f.as()
+	b.loginOK("bob", "correct horse battery")
+	for _, r := range auditEntries(t, b.expect("GET", "/api/audit", nil, 200)) {
+		if r["action"] == "document.consume" {
+			t.Errorf("bob sees alice's entry: %v", r)
+		}
+	}
+}

@@ -32,9 +32,11 @@ change or delete entries.
 | `correspondent.create`, `correspondent.update`, `correspondent.delete` | Likewise for a correspondent. |
 | `document_type.create`, `document_type.update`, `document_type.delete` | Likewise for a document type. |
 | `document.import` | `import` added documents: one entry per run that imported something, naming the user who owns them, the path and the counts of imported, duplicate and failed files. |
+| `document.consume` | The [consume folder](./import#consume-folder) changed a user's folder: one entry per scan and user that imported, deleted or moved files, made by the server, naming the user and with the counts: files imported, duplicates deleted, files moved to `failed/`, and `interrupted` when the scan stopped early (the server stopped, or the database was down). File names are only in the server log. If the entry cannot be written, the files are handled anyway and the counts go into the user's next entry. |
 
 Each entry has the time, the user (by the name they had then), how they
-acted (a session, an API key with its name, or the command line), the
+acted (a session, an API key with its name, the command line, or the
+server on its own, as for the consume folder), the
 client address and browser in the web UI, the user an admin action was about, and
 details such as a failed login's reason. Passwords, TOTP secrets and codes
 and API keys are never recorded. Reads are not recorded, except searches
@@ -52,15 +54,16 @@ Removing a user keeps their entries.
 
 The **Log** page in the web UI shows your own entries, newest first, for the
 last 30 days by default; choose a period and a kind of action to see others.
-It also shows the entries about you that an admin or the command line made:
-your account being locked, unlocked, promoted or demoted, your password or
-two-factor login reset, your passkeys removed, documents imported into your
-account and exports of your log. Such an entry names the admin, or says
-"command line", and shows only counts, the format and the period from its
+It also shows the entries about you that an admin, the command line or the
+server made: your account being locked, unlocked, promoted or demoted, your
+password or two-factor login reset, your passkeys removed, documents
+imported into your account, files imported from your consume folder and
+exports of your log. Such an entry names the admin, or says "command line"
+or "by the server", and shows only counts, the format and the period from its
 details: never the admin's address, browser or API key, or who ran the
 command and with which paths.
 Admins see every user's entries and can narrow them to one user, to the
-command line or to requests made with API keys. A removed user's entries stay, under the name the user had, and
+command line, to requests made with API keys or to the server. A removed user's entries stay, under the name the user had, and
 the filter by name still finds them.
 
 Admins can export a period as CSV or JSON lines:

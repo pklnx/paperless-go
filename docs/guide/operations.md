@@ -245,6 +245,16 @@ can trigger it first: the line then names that client's address, not the
 proxy's. So when the warning names an unexpected address, check the proxy
 setup anyway.
 
+**Audit entries by the server (#49).** Run `./pgo migrate` before `docker
+compose up -d web`. The consume folder now writes a `document.consume`
+entry to the audit log for each scan that imported, deleted or moved files
+in a user's folder; the Log page names the server as who made it. Going
+back to an older version after the first such entry needs a [backup
+restore](#backups) from before the upgrade: the log is append-only, so the
+migration (`00015_audit_system_actor.sql`) cannot be rolled back while it
+holds entries by the server, and `migrate down` refuses with that hint.
+Before the first one, `migrate down` rolls it back.
+
 **Tags, correspondents and document types in the API (#7).** Run `./pgo
 migrate` before `docker compose up -d web`. The migration lets the audit log
 record changes of tags, correspondents and document types. Rolling it back

@@ -262,7 +262,7 @@ export const usersApi = {
 export interface AuditEntry {
   id: number;
   at: string;
-  actor: "session" | "api_key" | "cli";
+  actor: "session" | "api_key" | "cli" | "system";
   /** The user's name at the time. */
   user?: string;
   /** The name of the API key, for actor api_key. */
@@ -272,11 +272,14 @@ export interface AuditEntry {
   clientIp?: string;
   userAgent?: string;
   details: Record<string, unknown>;
-  /** Set for a user who is not an admin on an entry about them made by an admin or the command line. */
+  /** Set for a user who is not an admin on an entry about them made by an admin, the command line or the server. */
   byOther?: boolean;
 }
 
-/** The filter of the log page. who is a user name, "cli" or "api_key" (admins only). */
+/**
+ * The filter of the log page. who (admins only) is a user name, or an actor
+ * after "@": "@cli", "@api_key", "@system". No user name starts with "@".
+ */
 export interface AuditFilter {
   since: string;
   until: string;
@@ -290,7 +293,7 @@ export function auditQuery(f: AuditFilter, cursor = ""): string {
   if (f.since) p.set("since", f.since);
   if (f.until) p.set("until", f.until);
   if (f.group) p.set("action", f.group);
-  if (f.who === "cli" || f.who === "api_key") p.set("actor", f.who);
+  if (f.who.startsWith("@")) p.set("actor", f.who.slice(1));
   else if (f.who) p.set("user", f.who);
   if (cursor) p.set("cursor", cursor);
   return p.toString();
