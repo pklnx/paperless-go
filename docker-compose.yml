@@ -48,6 +48,8 @@ services:
     image: ${PAPERLESS_GO_IMAGE:-paperless-go:local}
     restart: unless-stopped
     command: ["serve", "--listen", ":8080"]
+    # No process in the container may gain privileges (setuid binaries).
+    security_opt: ["no-new-privileges:true"]
     # Time to stop the OCR tools and give running jobs back (up to 10 s
     # each) before Docker kills the server.
     stop_grace_period: 30s
@@ -91,6 +93,7 @@ services:
     image: ${PAPERLESS_GO_IMAGE:-paperless-go:local}
     # One-shot CLI: not started by `docker compose up`, use `docker compose run`.
     profiles: ["cli"]
+    security_opt: ["no-new-privileges:true"]
     depends_on:
       postgres:
         condition: service_healthy

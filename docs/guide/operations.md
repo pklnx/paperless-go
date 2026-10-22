@@ -262,6 +262,19 @@ record changes of tags, correspondents and document types. Rolling it back
 append-only and the old checks would refuse those entries, so after that,
 going back needs a restore of a backup made before the upgrade.
 
+**Hardening for the internet (#93).** Every refused login is now logged as
+one line, `login refused`, with `method`, `reason`, `addr` and, where
+known, `user` (see [Refused logins in the log](../reference/security#refused-logins-in-the-log)).
+It replaces the lines `login failed`, `login failed: second factor`,
+`login failed: unknown passkey` and `login failed: passkey`; log filters
+that match those need the new line. An unknown API key is recorded in the
+audit log once per client address and minute, no longer on every request.
+Over HTTPS the server sends `Strict-Transport-Security: max-age=31536000`.
+A request now has 30 seconds for its body instead of 5 minutes (uploads
+and downloads keep an hour) and at most 64 KiB of headers. Compose runs
+`web` and the command line with `no-new-privileges`; pull the new
+`docker-compose.yml` with the release.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build

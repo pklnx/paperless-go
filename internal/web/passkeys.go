@@ -151,11 +151,17 @@ func (s *Server) handleBeginPasskeyLogin(w http.ResponseWriter, r *http.Request)
 	}
 	keys := s.clientKeys(r)
 	addr := keys.Addr
-	if wait := s.limiter.BlockedAddr(addr); wait > 0 {
+	if wait, first := s.limiter.BlockedAddrFirst(addr); wait > 0 {
+		if first {
+			s.logRefused(r, "passkey", reasonRateLimited, "")
+		}
 		s.tooMany(w, wait, errTooManyPasskey)
 		return
 	}
-	if ok, wait := s.passkeyBegins.Allow(addr); !ok {
+	if ok, wait, first := s.passkeyBegins.AllowFirst(addr); !ok {
+		if first {
+			s.logRefused(r, "passkey", reasonRateLimited, "")
+		}
 		s.tooMany(w, wait, errTooManyPasskey)
 		return
 	}
@@ -173,7 +179,12 @@ func (s *Server) handleBeginPasskeyLogin(w http.ResponseWriter, r *http.Request)
 	token, err := s.store.BeginPasskeyLogin(r.Context(), keys, passkeyLoginTokens(r), data, now, now.Add(passkeyCeremonyTTL))
 	if errors.Is(err, store.ErrTooManyCeremonies) || errors.Is(err, store.ErrTooManyClientCeremonies) ||
 		errors.Is(err, store.ErrTooManyNetworkCeremonies) {
-		s.log.Warn("too many passkey logins in progress", "addr", s.clientIP(r), "err", err)
+		// Logged once per client and minute, the time the answer asks
+		// the client to wait.
+		if ok, _ := s.openLoginLog.Allow(addr); ok {
+			s.log.Warn("too many passkey logins in progress", "addr", s.clientIP(r), "err", err)
+			s.logRefused(r, "passkey", reasonRateLimited, "")
+		}
 		s.tooMany(w, time.Minute, errTooManyOpenPasskey)
 		return
 	}
@@ -200,7 +211,10 @@ func (s *Server) handleFinishPasskeyLogin(w http.ResponseWriter, r *http.Request
 		return
 	}
 	addr := s.clientAddr(r)
-	if wait := s.limiter.BlockedAddr(addr); wait > 0 {
+	if wait, first := s.limiter.BlockedAddrFirst(addr); wait > 0 {
+		if first {
+			s.logRefused(r, "passkey", reasonRateLimited, "")
+		}
 		s.tooMany(w, wait, errTooManyPasskey)
 		return
 	}
@@ -261,7 +275,6 @@ func (s *Server) handleFinishPasskeyLogin(w http.ResponseWriter, r *http.Request
 		return
 	case errors.Is(err, store.ErrPasskeyUnknown):
 		s.limiter.FailAddr(addr)
-		s.log.Info("login failed: unknown passkey", "addr", s.clientIP(r))
 		s.auditLoginFailed(r, "passkey", reasonUnknownPasskey, "", nil)
 		s.writeJSON(w, http.StatusUnauthorized, unknownPasskeyJSON{
 			Error: "this passkey is not registered", UnknownCredential: true,
@@ -270,7 +283,7 @@ func (s *Server) handleFinishPasskeyLogin(w http.ResponseWriter, r *http.Request
 		return
 	case errors.Is(err, store.ErrPasskeyInvalid):
 		s.limiter.FailAddr(addr)
-		s.log.Info("login failed: passkey", "addr", s.clientIP(r), "err", err)
+		s.log.Debug("passkey not accepted", "err", err)
 		s.auditLoginFailed(r, "passkey", reasonPasskeyInvalid, "", nil)
 		s.fail(w, r, http.StatusUnauthorized, "the passkey was not accepted", nil)
 		return
@@ -347,7 +360,7 @@ func validCredentialName(name string) bool {
 func (s *Server) checkOwnLogin(w http.ResponseWriter, r *http.Request, attempted, password, code string) (factor string, ok bool) {
 	sess := currentSession(r)
 	addr := s.clientAddr(r)
-	if s.blocked(w, r, sess.UserName) {
+	if s.blocked(w, r, sess.UserName, "") {
 		return "", false
 	}
 	u, err := s.store.GetUserByID(r.Context(), sess.UserID)

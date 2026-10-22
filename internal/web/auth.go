@@ -352,7 +352,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	name := auth.NormalizeUserName(in.Username)
 	addr := s.clientAddr(r)
-	if wait := s.limiter.Blocked(name, addr); wait > 0 {
+	if wait, first := s.limiter.BlockedFirst(name, addr); wait > 0 {
+		if first {
+			s.logRefused(r, "password", reasonRateLimited, name)
+		}
 		s.tooMany(w, wait, "too many failed logins; try again later")
 		return
 	}
@@ -382,7 +385,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		s.limiter.Fail(name, addr)
-		s.log.Info("login failed", "user", loggableUserName(name), "addr", s.clientIP(r))
 		if u == nil {
 			s.auditLoginFailed(r, "password", reasonUnknownUser, name, nil)
 		} else {
