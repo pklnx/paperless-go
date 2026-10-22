@@ -640,6 +640,10 @@ func TestBulkUpdateRetriesDeadlockWithDeleteTag(t *testing.T) {
 	var attempts atomic.Int32
 	locked, release := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
+	// The retry locks only once the delete has finished: DeleteTag's
+	// trigger updates the documents in its own order, so a retry racing it
+	// for the locks could deadlock again.
+	deleteFinished := make(chan struct{})
 	go func() {
 		held := store.WithAfterLock(ctx, func() {
 			if attempts.Add(1) > 1 {
@@ -648,6 +652,15 @@ func TestBulkUpdateRetriesDeadlockWithDeleteTag(t *testing.T) {
 			close(locked)
 			select {
 			case <-release:
+			case <-ctx.Done():
+			}
+		})
+		held = store.WithBeforeLock(held, func() {
+			if attempts.Load() == 0 {
+				return
+			}
+			select {
+			case <-deleteFinished:
 			case <-ctx.Done():
 			}
 		})
@@ -661,7 +674,11 @@ func TestBulkUpdateRetriesDeadlockWithDeleteTag(t *testing.T) {
 		t.Fatalf("bulk change finished before it locked: %v", err)
 	}
 	deleted := make(chan error, 1)
-	go func() { deleted <- deleter.DeleteTag(ctx, alice, tag.ID) }()
+	go func() {
+		err := deleter.DeleteTag(ctx, alice, tag.ID)
+		close(deleteFinished)
+		deleted <- err
+	}()
 	waitForLock(ctx, t, conn, "deleter", deleted)
 	close(release)
 	if err := <-done; err != nil {
@@ -829,7 +846,7 @@ func TestBulkUpdateByMatchRecheckedAfterLock(t *testing.T) {
 	var changed []string
 	go func() {
 		e := &store.AuditEntry{Actor: store.ActorCLI, Action: "document.bulk_update"}
-		held := store.WithAfterMatch(store.WithAudit(ctx, e), func() {
+		held := store.WithBeforeLock(store.WithAudit(ctx, e), func() {
 			if attempts.Add(1) > 1 {
 				return
 			}

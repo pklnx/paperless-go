@@ -777,7 +777,12 @@ another user's document answers `404` and an admin sees all.
   then `503` with `Retry-After: 1`); a bulk change by search resolves its
   matches again. `TestBulkUpdateRetriesDeadlockWithDeleteTag` makes the
   bulk change the victim (its connection's `deadlock_timeout` is 10 ms,
-  the delete's an hour) and checks the retry succeeds.
+  the delete's an hour) and checks the retry succeeds. A retry can
+  deadlock again: the delete's trigger updates the documents in its own
+  order while the retry locks them in id order, so a retry that wins
+  some of the locks before the delete finishes repeats the cycle (seen in
+  about 1 of 20 runs with `FOR NO KEY UPDATE`). The test therefore lets
+  the retry lock only after the delete finished (`WithBeforeLock`).
 
   **Audit.** One `document.bulk_update` per change (no target; `count`,
   `fields`, `selection` `ids` or `match`, `ids` of the changed documents,

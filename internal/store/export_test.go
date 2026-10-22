@@ -75,9 +75,10 @@ func WithAfterLock(ctx context.Context, f func()) context.Context {
 	return context.WithValue(ctx, afterLockKey{}, f)
 }
 
-// WithAfterMatch makes each attempt of a bulk change of documents by
-// search call f after it ran the search and before it locks the matches:
-// a test holds it there to change a match concurrently.
-func WithAfterMatch(ctx context.Context, f func()) context.Context {
-	return context.WithValue(ctx, afterMatchKey{}, f)
+// WithBeforeLock makes each attempt of a bulk change of documents call f
+// right before it locks the documents, by search after it ran the search:
+// a test holds it there to change a match concurrently, or to let a
+// concurrent transaction finish before a retry locks.
+func WithBeforeLock(ctx context.Context, f func()) context.Context {
+	return context.WithValue(ctx, beforeLockKey{}, f)
 }

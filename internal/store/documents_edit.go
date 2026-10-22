@@ -501,8 +501,8 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 				for i, r := range rows {
 					want[i] = r.ID
 				}
-				afterMatch(ctx)
 			}
+			beforeLock(ctx)
 			locked, err := q.LockDocuments(ctx, db.LockDocumentsParams{Ids: want, Owner: lsc.owner()})
 			if err != nil {
 				return err
@@ -584,13 +584,13 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 	return changed, nil
 }
 
-// afterMatchKey carries a test seam: a function a bulk change by search
-// calls after the match, before it locks the documents (see
-// export_test.go).
-type afterMatchKey struct{}
+// beforeLockKey carries a test seam: a function each attempt of a bulk
+// change calls right before it locks the documents, by search after the
+// match (see export_test.go).
+type beforeLockKey struct{}
 
-func afterMatch(ctx context.Context) {
-	if f, ok := ctx.Value(afterMatchKey{}).(func()); ok {
+func beforeLock(ctx context.Context) {
+	if f, ok := ctx.Value(beforeLockKey{}).(func()); ok {
 		f()
 	}
 }
