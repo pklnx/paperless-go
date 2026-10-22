@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { ApiKeyItems } from "./ApiKeys";
 import { apiKeyApi, ownsData, usersApi, type ApiKey, type GeneratedPassword, type ManagedUser } from "./api";
+import { sortByName } from "./collate";
 import { lang, t } from "./i18n";
 import { button, input, primary } from "./styles";
 
@@ -23,7 +24,7 @@ export function UsersPage() {
   const reload = useCallback(() => {
     usersApi.list().then(
       (u) => {
-        setUsers(u);
+        setUsers(sortByName(u, (x) => x.name));
         setError("");
       },
       (err: unknown) => setError(message(err)),

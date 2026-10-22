@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { sortByName } from "./collate";
 import { auditApi, usersApi, type AuditEntry, type AuditFilter, type ManagedUser } from "./api";
 import { auditGroups, commandOperator, defaultFilter, entryDetail, shortUserAgent, targetLabel } from "./auditLog";
 import { lang, t } from "./i18n";
@@ -21,7 +22,7 @@ export function LogPage({ admin }: { admin: boolean }) {
   const [users, setUsers] = useState<ManagedUser[]>([]);
 
   useEffect(() => {
-    if (admin) usersApi.list().then(setUsers, () => setUsers([]));
+    if (admin) usersApi.list().then((u) => setUsers(sortByName(u, (x) => x.name)), () => setUsers([]));
   }, [admin]);
 
   useEffect(() => {
