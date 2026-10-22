@@ -226,11 +226,11 @@ is `VOLATILE` (plpgsql) on purpose: each statement takes a fresh snapshot,
 so a trigger that waited for the document's row lock sees tags committed
 meanwhile. Every writer of `document_tags` locks the document row first
 (`SetDocumentTags` through `LockDocument`; the bulk edit (#7) and automatic
-tagging must do the same), so two rebuilds of one document never interleave. A tag's delete takes the locks the other way round (`document_tags`,
-then the documents), so it can deadlock with a concurrent `SetDocumentTags`
-on the same document; PostgreSQL then fails one of them (`40P01`), nothing
-hangs or is half-written. `document_tags` rows are never updated, so there
-is no `UPDATE` trigger. Down drops `unaccent` only when the current user
+tagging must do the same), so two rebuilds of one document never interleave. A tag's delete locks the tag's documents before its cascade
+reaches their `document_tags` rows (see Lock order below), so its trigger
+only updates documents the delete already holds; this replaces the order
+the comments in `00011_search.sql` describe. `document_tags` rows are never
+updated, so there is no `UPDATE` trigger. Down drops `unaccent` only when the current user
 owns it and nothing outside the extension uses it.
 
 **Reads.** No query reads the vectors back: `GetDocument` and
@@ -300,6 +300,57 @@ tags.
 
 A deadlock (`40P01`, see Concurrency) maps to `store.ErrRetry`; the call
 can be repeated.
+
+**Lock order** (#99). Every writer that links a document to metadata
+takes those rows first; the deletes lock the row, then its documents in
+id order. In detail:
+
+- **Linkers** (`PatchDocument`, `BulkUpdateDocuments`) start their
+  transaction with `lockLinkTargets`: `FOR KEY SHARE` on each tag to add
+  or set and on a correspondent or type that is set (the lock the
+  foreign-key check would take later), then they lock the documents in id
+  order (`LockDocument`, `LockDocuments`). Unlinking (removing a tag,
+  clearing a field) takes no metadata lock. The key share is taken by ID
+  in any owner's scope; nothing is read, and ownership is still decided by
+  `CountOwnedTags` and the foreign keys. A row deleted meanwhile is skipped
+  (READ COMMITTED rechecks it after the wait) and the link then fails with
+  `owner_mismatch` as before.
+- **Deletes** (`DeleteTag`, `DeleteCorrespondent`, `DeleteDocumentType`)
+  lock the row `FOR UPDATE` (`Lock*ForDelete`; it waits for linkers that
+  hold a key share and keeps new links out), a tag also its direct
+  children (`LockTagChildren`, `FOR NO KEY UPDATE`; its `SET NULL
+  (parent_id)` updates them), then the linked documents in id order
+  (`LockTagDocuments`, `Lock*Documents`, `FOR NO KEY UPDATE`), and only
+  then run the `DELETE`, whose cascade, `SET NULL` and search triggers
+  touch only rows the transaction holds.
+- **Why no cycle is left.** Key shares never conflict with each other or
+  with `FOR NO KEY UPDATE`; a linker waits for a delete only while it
+  takes its key shares and holds no documents. A delete waits for a
+  linker at its row lock, before it holds any documents. Two deletes hold
+  one row each, a tag delete also its children, then wait only for
+  documents in id order; a child's delete never waits for its parent, so a
+  parent's delete that waits for a child holds no documents yet.
+  `PatchCorrespondent/Type/Tag` (`FOR NO KEY UPDATE`, no document) are
+  compatible with the key shares and meet a delete only at its row lock.
+  `DeleteDocument`, the job writers and `CreateDocument` (a new document
+  is invisible to the delete; its foreign-key check either waits for the
+  delete and fails with `owner_mismatch`, or the delete waits for it) need
+  no change.
+- `UpdateDocument` and `SetDocumentTags` (no caller outside the store
+  tests) still link in the old order; automatic tagging and any new
+  linker must follow this rule. `retryDeadlock` stays on all of them as a
+  safety net. The tests (`TestBulkUpdateNoDeadlockWithDeleteTag`,
+  `TestBulkAddTagNoDeadlockWithDeleteTag`,
+  `TestBulkSetLinkNoDeadlockWithDelete`,
+  `TestPatchDocumentNoDeadlockWithDelete`,
+  `TestMetadataDeleteLocksDocumentsFirst`,
+  `TestDeleteParentAndChildTagNoDeadlock`) hold one side after its locks
+  (`WithAfterLock`), wait for the other in `pg_stat_activity`, and give
+  the side that would lose a deadlock a 10 ms `deadlock_timeout` (the
+  other an hour), so one attempt each proves there was no cycle.
+- Cost: a delete locks the same documents its cascade locked before, held
+  to commit either way, with one more indexed pass; `DeleteTag` of a tag
+  on 5 000 documents took a median of 313 ms before and after.
 
 ## Blob durability
 
@@ -721,7 +772,8 @@ another user's document answers `404` and an admin sees all.
   `isInbox`, `archiveSerialNumber`, `correspondentId`, `documentTypeId`
   (`null` clears these three) and `tagIds` (replaces the tags). `null` for
   any other field answers `400` `invalid_field`, an empty body `400`
-  `nothing_to_change`. One transaction locks the row (`LockDocument`,
+  `nothing_to_change`. One transaction takes the key shares of the rows
+  it links (Lock order, under Search index), locks the row (`LockDocument`,
   `FOR NO KEY UPDATE`: no key column changes, so a foreign-key check of a
   row referencing the document, such as a new job, does not wait),
   updates the given
@@ -772,21 +824,20 @@ another user's document answers `404` and an admin sees all.
   in between is left alone; `TestBulkUpdateByMatchRecheckedAfterLock`
   holds the bulk change between match and lock), removes and
   adds the tags (one `DELETE`, one `INSERT … ON CONFLICT DO NOTHING`),
-  updates the columns and touches `modified_at` of every document. Against
-  a metadata delete it can still deadlock: `DeleteTag` deletes the tag's
-  `document_tags` rows, then its statement trigger waits for the locked
-  documents, while the bulk change waits for those rows (or, setting the
-  deleted correspondent or type, for its key share). Whichever transaction
-  PostgreSQL aborts is retried as a whole (`retryDeadlock`, 3 attempts,
-  then `503` with `Retry-After: 1`); a bulk change by search resolves its
-  matches again. `TestBulkUpdateRetriesDeadlockWithDeleteTag` makes the
-  bulk change the victim (its connection's `deadlock_timeout` is 10 ms,
-  the delete's an hour) and checks the retry succeeds. A retry can
-  deadlock again: the delete's trigger updates the documents in its own
-  order while the retry locks them in id order, so a retry that wins
-  some of the locks before the delete finishes repeats the cycle (seen in
-  about 1 of 20 runs with `FOR NO KEY UPDATE`). The test therefore lets
-  the retry lock only after the delete finished (`WithBeforeLock`).
+  updates the columns and touches `modified_at` of every document. The
+  recheck runs over the locked IDs only (`only_ids` in
+  `MatchDocumentIDs`, outside the filter block), so it returns at most
+  those and the limit cannot cut any off (#99,
+  `TestBulkUpdateByMatchRecheckKeepsLockedMatches`). The selection is
+  fixed at the first match, which the user confirmed in the dry run and
+  the limit was checked on: documents that start matching between the
+  match and the lock are neither added nor a reason to refuse. Before its
+  documents the bulk change takes the key shares of the rows it links,
+  so it and a metadata delete lock in one order (see Lock order under
+  Search index); a deadlock all the same (a writer outside that order) is
+  retried as a whole (`retryDeadlock`, 3 attempts, then `503` with
+  `Retry-After: 1`), and a bulk change by search resolves its matches
+  again.
 
   **Audit.** One `document.bulk_update` per change (no target; `count`,
   `fields`, `selection` `ids` or `match`, `ids` of the changed documents,
@@ -831,9 +882,10 @@ answers `404` and an admin may change everyone's (the row keeps its owner).
   trimming, so a trailing newline is refused) (`invalid_name`), a colour `#RRGGBB` (`invalid_color`); an
   imported name that is longer does not block a colour change.
 - **`DELETE`** answers `204`; documents keep everything else, a deleted
-  tag's children become root tags. A deadlock with a concurrent change of
-  the documents (`40P01`) is retried up to 3 times (`retryDeadlock`), then
-  answers `503` with `Retry-After: 1`.
+  tag's children become root tags. The delete locks the row, a tag's
+  children, then the documents in id order (Lock order, under Search
+  index); a deadlock all the same (`40P01`) is retried up to 3 times
+  (`retryDeadlock`), then answers `503` with `Retry-After: 1`.
 - **Errors** carry `error` and `code`: `409` `name_taken` (case-insensitive
   per owner, per parent for tags), `409` `tag_cycle`, `409`
   `tag_name_conflict` (a child would clash with a root tag on delete;

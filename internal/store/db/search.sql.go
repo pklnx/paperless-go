@@ -52,8 +52,13 @@ WHERE
       AND ($21::boolean IS NULL OR d.is_inbox = $21::boolean)
       AND ($22::boolean IS NULL OR d.is_favorite = $22::boolean)
       -- filters:end
+      -- Outside the filter block on purpose (TestSearchFilterCopies): the
+      -- recheck after the lock passes the locked ids, so it returns at
+      -- most those and the limit cannot cut any off; the match and the
+      -- dry run pass NULL.
+      AND ($23::uuid[] IS NULL OR d.id = ANY ($23::uuid[]))
 ORDER BY d.id
-LIMIT $23
+LIMIT $24
 `
 
 type MatchDocumentIDsParams struct {
@@ -79,6 +84,7 @@ type MatchDocumentIDsParams struct {
 	NotAddedTo        []time.Time
 	Inbox             *bool
 	Favorite          *bool
+	OnlyIds           []pgtype.UUID
 	Lim               int32
 }
 
@@ -90,7 +96,8 @@ type MatchDocumentIDsRow struct {
 
 // The ids of the documents a bulk change by search covers (store.
 // BulkUpdateDocuments): every match of the filters, in id order, at most
-// lim, each with the number of all matches and their owners.
+// lim, each with the number of all matches and their owners; with only_ids
+// only those among them.
 func (q *Queries) MatchDocumentIDs(ctx context.Context, arg MatchDocumentIDsParams) ([]MatchDocumentIDsRow, error) {
 	rows, err := q.db.Query(ctx, matchDocumentIDs,
 		arg.Owner,
@@ -115,6 +122,7 @@ func (q *Queries) MatchDocumentIDs(ctx context.Context, arg MatchDocumentIDsPara
 		arg.NotAddedTo,
 		arg.Inbox,
 		arg.Favorite,
+		arg.OnlyIds,
 		arg.Lim,
 	)
 	if err != nil {

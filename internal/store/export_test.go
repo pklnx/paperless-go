@@ -68,9 +68,11 @@ func SetReindexLockTimeout(t *testing.T, d time.Duration) {
 }
 
 // WithAfterLock makes the next patch of a tag, correspondent, document
-// type or document, and each attempt of a bulk change of documents, call f
-// with the rows locked, before it writes: a test holds the
-// patch there to make a concurrent one wait for the lock.
+// type or document, and each attempt of a bulk change of documents or of
+// a delete of a tag, correspondent or document type, call f with the rows
+// locked, before it writes (a delete: the row, a tag's children and the
+// linked documents, before the DELETE): a test holds the change there to
+// make a concurrent one wait for the lock, or counts the attempts.
 func WithAfterLock(ctx context.Context, f func()) context.Context {
 	return context.WithValue(ctx, afterLockKey{}, f)
 }

@@ -111,6 +111,25 @@ FOR NO KEY UPDATE;
 
 -- name: CountOwnedTags :one
 SELECT count(*) FROM tags WHERE owner_id = sqlc.arg(owner_id) AND id = ANY (sqlc.arg(ids)::uuid[]);
+-- KeyShareTags, KeyShareCorrespondent and KeyShareDocumentType take the
+-- key share a link's foreign-key check takes, before a writer that links
+-- documents to these rows locks the documents (store.lockLinkTargets): a
+-- delete of one of them locks the row first, then its documents, so both
+-- take the locks in one order. A row deleted meanwhile is skipped; the
+-- link then fails as before (ErrOwnerMismatch).
+-- name: KeyShareTags :exec
+SELECT id FROM tags WHERE id = ANY (sqlc.arg(ids)::uuid[])
+ORDER BY id
+FOR KEY SHARE;
+
+-- name: KeyShareCorrespondent :exec
+SELECT id FROM correspondents WHERE id = sqlc.arg(id)::uuid
+FOR KEY SHARE;
+
+-- name: KeyShareDocumentType :exec
+SELECT id FROM document_types WHERE id = sqlc.arg(id)::uuid
+FOR KEY SHARE;
+
 
 -- name: BulkRemoveDocumentTags :exec
 DELETE FROM document_tags

@@ -159,8 +159,9 @@ func (p DocumentPatch) validate() error {
 // row that is not the document owner's (also in an admin's scope); an
 // *ASNTakenError (ErrASNTaken) for an archive serial number another
 // document of the owner has; a *ValidationError (ErrInvalid) for refused
-// text or nothing to change. A deadlock with a concurrent change is
-// retried (see retryDeadlock), then ErrRetry.
+// text or nothing to change. The key shares of the rows it links are
+// taken before the document's lock (lockLinkTargets). A deadlock with a
+// concurrent change is retried (see retryDeadlock), then ErrRetry.
 func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p DocumentPatch) (*Document, error) {
 	u, ok := parseID(id)
 	if !ok {
@@ -184,6 +185,13 @@ func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p Docume
 	var owner int64
 	err = s.retryDeadlock(func() error {
 		return s.inTx(ctx, func(q *db.Queries) error {
+			var linkTags []pgtype.UUID
+			if p.SetTags {
+				linkTags = tags
+			}
+			if err := lockLinkTargets(ctx, q, linkTags, p.SetCorrespondent, corr, p.SetDocumentType, typ); err != nil {
+				return err
+			}
 			var err error
 			if owner, err = q.LockDocument(ctx, db.LockDocumentParams{ID: u, Owner: sc.owner()}); err != nil {
 				return err
@@ -340,8 +348,9 @@ func (s *Store) resolveMatch(ctx context.Context, sc Scope, q search.Query) (res
 }
 
 // match runs the search of m on d: the matches in id order, at most
-// MaxBulkMatches+1, and the number of all of them.
-func (s *Store) match(ctx context.Context, d db.DBTX, m resolvedMatch) ([]db.MatchDocumentIDsRow, int, error) {
+// MaxBulkMatches+1, and the number of all of them. With only, a non-nil
+// list, it returns only matches among those IDs.
+func (s *Store) match(ctx context.Context, d db.DBTX, m resolvedMatch, only []pgtype.UUID) ([]db.MatchDocumentIDsRow, int, error) {
 	if m.none {
 		return nil, 0, nil
 	}
@@ -352,7 +361,7 @@ func (s *Store) match(ctx context.Context, d db.DBTX, m resolvedMatch) ([]db.Mat
 		Types: a.Types, NotTypes: a.NotTypes, Asns: a.Asns, NotAsns: a.NotAsns, DateFrom: a.DateFrom,
 		DateTo: a.DateTo, NotDateFrom: a.NotDateFrom, NotDateTo: a.NotDateTo, AddedFrom: a.AddedFrom,
 		AddedTo: a.AddedTo, NotAddedFrom: a.NotAddedFrom, NotAddedTo: a.NotAddedTo, Inbox: a.Inbox,
-		Favorite: a.Favorite, Lim: MaxBulkMatches + 1,
+		Favorite: a.Favorite, OnlyIds: only, Lim: MaxBulkMatches + 1,
 	})
 	if err != nil || len(rows) == 0 {
 		return nil, 0, err
@@ -376,7 +385,7 @@ func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelectio
 	if err != nil {
 		return BulkMatch{}, err
 	}
-	rows, total, err := s.match(ctx, s.pool, m)
+	rows, total, err := s.match(ctx, s.pool, m, nil)
 	if err != nil {
 		return BulkMatch{}, err
 	}
@@ -395,9 +404,10 @@ func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelectio
 // in one transaction, and returns the IDs of the changed documents in id
 // order. It locks the documents in id order (so two bulk changes over
 // overlapping sets wait for each other); by search it then runs the
-// search again and keeps only the locked documents that still match, so a
-// document changed between the match and the lock so that it no longer
-// matches is left alone. It checks them, removes and adds the
+// search again over the locked documents and keeps those that still
+// match, so a document changed between the match and the lock so that it
+// no longer matches is left alone (one that matches only now is not
+// added). It checks them, removes and adds the
 // tags (adding a tag a document has, or removing one it lacks, is no
 // error), sets the fields and touches modified_at of every one.
 //
@@ -414,8 +424,9 @@ func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelectio
 // ErrSeveralOwners when tags, a correspondent or a type are set on
 // documents of several owners; ErrOwnerMismatch for a tag to add, a
 // correspondent or a type that is not the owner's (a tag to remove that
-// the documents do not have is no error). A deadlock, for example
-// with a concurrent delete of one of the tags, is retried (see
+// the documents do not have is no error). It takes the key shares of
+// the rows it links first (lockLinkTargets), so it and a metadata delete
+// lock in one order; a deadlock all the same is retried (see
 // retryDeadlock), then ErrRetry. A search that matches nothing changes
 // nothing and writes no audit entry.
 func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelection, c BulkChange, perDocument string) ([]string, error) {
@@ -485,9 +496,12 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 	err = s.retryDeadlock(func() error {
 		changed = nil
 		return s.inTxWith(ctx, func(tx pgx.Tx, q *db.Queries) error {
+			if err := lockLinkTargets(ctx, q, add, c.SetCorrespondent, corr, c.SetDocumentType, typ); err != nil {
+				return err
+			}
 			want := ids
 			if sel.Match != nil {
-				rows, total, err := s.match(ctx, tx, m)
+				rows, total, err := s.match(ctx, tx, m, nil)
 				if err != nil {
 					return err
 				}
@@ -584,6 +598,35 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 	return changed, nil
 }
 
+// lockLinkTargets takes a key share on each row a change links documents
+// to: tags to add (or to set), and a correspondent or type that is set.
+// It runs first in the transaction, before the documents are locked, so a
+// linker and a metadata delete (the row, then its documents) take their
+// locks in one order (architecture.md, "Lock order"); the foreign-key
+// check would take the same key share only after the documents. Unlinking
+// needs none. The rows are locked by ID in any owner's scope: nothing is
+// read, and ownership is still decided by CountOwnedTags and the foreign
+// keys. A row deleted meanwhile is skipped, and the link then fails with
+// ErrOwnerMismatch as before.
+func lockLinkTargets(ctx context.Context, q *db.Queries, tags []pgtype.UUID, setCorr bool, corr pgtype.UUID, setType bool, typ pgtype.UUID) error {
+	if len(tags) > 0 {
+		if err := q.KeyShareTags(ctx, tags); err != nil {
+			return err
+		}
+	}
+	if setCorr && corr.Valid {
+		if err := q.KeyShareCorrespondent(ctx, corr); err != nil {
+			return err
+		}
+	}
+	if setType && typ.Valid {
+		if err := q.KeyShareDocumentType(ctx, typ); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // beforeLockKey carries a test seam: a function each attempt of a bulk
 // change calls right before it locks the documents, by search after the
 // match (see export_test.go).
@@ -600,9 +643,21 @@ func beforeLock(ctx context.Context) {
 var errNothingMatched = errors.New("store: nothing matched")
 
 // stillMatching returns the rows of locked that the search of m matches
-// now, in their order.
+// now, in their order. The search runs over the locked IDs only: over the
+// whole scope, documents that started matching after the first match
+// would count against the limit and could push locked ones past it, which
+// would then be left out without an error. Those new matches were not
+// part of the selection the caller confirmed, so they neither join it nor
+// make it fail (architecture.md, bulk "Locking").
 func (s *Store) stillMatching(ctx context.Context, tx pgx.Tx, m resolvedMatch, locked []db.LockDocumentsRow) ([]db.LockDocumentsRow, error) {
-	rows, _, err := s.match(ctx, tx, m)
+	if len(locked) == 0 {
+		return locked, nil
+	}
+	only := make([]pgtype.UUID, len(locked))
+	for i, l := range locked {
+		only[i] = l.ID
+	}
+	rows, _, err := s.match(ctx, tx, m, only)
 	if err != nil {
 		return nil, err
 	}
