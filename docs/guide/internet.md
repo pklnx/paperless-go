@@ -173,7 +173,7 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
-        proxy_set_header Host              $host;
+        proxy_set_header Host              $http_host;
         proxy_set_header X-Forwarded-For   $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
@@ -387,6 +387,7 @@ Points to check:
   `invalid`) and `rate_limited`. It leaves out `locked`, `revoked` and
   `expired`, which come from a known account or key and are usually a
   mistake, not guessing.
+- `<ADDR>` needs fail2ban 0.10 or newer.
 - `docker compose logs` is not a file. Either run the containers with
   Docker's `journald` log driver and use fail2ban's `systemd` backend as
   above (check the container name with `docker ps`), or point `logpath`
