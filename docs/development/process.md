@@ -87,8 +87,9 @@ repository secret `ANTHROPIC_API_KEY`:
 Only users with write access start it (the Action checks the user who added
 the label or wrote the comment; `@claude` also needs the author association
 owner, member or collaborator). Planner and reviewers run with a read-only
-token and read tools only; a separate step posts their comment and sets the
-labels. All jobs use the workflow's `GITHUB_TOKEN` with per-job permissions;
+token and read tools only; they pass their comment on as a one-day artifact
+(never as a job output, which GitHub silently drops when it contains a masked
+value), and a separate job with write access posts it and sets the labels. All jobs use the workflow's `GITHUB_TOKEN` with per-job permissions;
 no GitHub App is needed. A missing `ANTHROPIC_API_KEY` fails the run with a
 clear error.
 
@@ -96,7 +97,7 @@ Labels set with a user's token (the maintainer's, also through Claude
 sessions) start the workflow; labels set with `GITHUB_TOKEN` (the labeler
 workflow, this workflow) start nothing, so there are no loops. Its comments
 come from `github-actions[bot]`, with at-mentions broken so they notify
-nobody. A failed run (no result, turn limit, timeout) posts a short comment
+nobody. A failed run (no result, missing artifact, turn limit, timeout) posts a short comment
 and removes its trigger label; adding the label again retries. Issue, pull
 request and comment content is data to the Action, never instructions. Its texts end with `— Claude (Action), <role>`.
 After changes to the workflow, the coordinator tests each trigger once.
