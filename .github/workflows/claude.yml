@@ -158,7 +158,10 @@ jobs:
             echo "::error::Claude returned no structured output with a body"; exit 1
           fi
           # The artifact is readable with read access: never put a secret in it.
-          if grep -qF -e "$ANTHROPIC_API_KEY" -e "$GITHUB_TOKEN" <<<"$RESULT" ||
+          # Also the forms GitHub masks for the token, like checkout's
+          # basic-auth header.
+          AUTH_B64=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
+          if grep -qF -e "$ANTHROPIC_API_KEY" -e "$GITHUB_TOKEN" -e "$AUTH_B64" <<<"$RESULT" ||
              grep -qE 'sk-ant-|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_' <<<"$RESULT"; then
             echo "::error::Result looks like it contains a secret; not passed on"; exit 1
           fi
