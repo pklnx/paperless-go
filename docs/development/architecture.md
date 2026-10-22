@@ -37,7 +37,7 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 | `internal/store/storetest` | A throwaway, migrated database per test. |
 | `internal/web` | HTTP server: the route table with each route's access, login and sessions, user management, the Host and same-origin checks, `/healthz`. |
 | `internal/web/ui` | Embeds the built web UI (`web/` → `internal/web/ui/dist`) and serves it with a strict CSP. |
-| `web` | React UI (TypeScript, Vite, Tailwind CSS). The view (sidebar filter, search, sort, page, an admin's "Everyone's documents") lives in the URL query (`urlState.ts`), so back, reload and bookmarks work and `GET /` serves every view. The sidebar's filters go to `GET /api/documents` as parameters (`tag`, `correspondent`, `type`, `inbox`, `favorite`), never as `q`, so only a typed search is a search for the audit log. |
+| `web` | React UI (TypeScript, Vite, Tailwind CSS). The view (sidebar filter, search, sort, page, an admin's "Everyone's documents") lives in the URL query (`urlState.ts`), so back, reload and bookmarks work and `GET /` serves every view. The sidebar's filters go to `GET /api/documents` as parameters (`tag`, `correspondent`, `type`, `inbox`, `favorite`), never as `q`, so only a typed search is a search for the audit log. `?doc=<id>` opens a document's detail with the PDF viewer (see [PDF viewer](#pdf-viewer)). |
 | `docs` | This site (VitePress). |
 
 ## Data model
@@ -1040,6 +1040,47 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   key name, and only allowlisted detail keys; a new key stays admin-only
   until it is added to the allowlist. Paging is by a `(at, id)` cursor, newest
   first. Reading the log writes no entry.
+
+## PDF viewer
+
+The document detail (`web/src/DocumentDetail.tsx`) draws PDFs with pdf.js
+(`pdfjs-dist`, maintainer decision on #7), never as a document of its own:
+the file endpoint keeps `Content-Disposition: attachment` and
+`Content-Security-Policy: sandbox`, and the PDF is fetched with the session
+cookie and drawn into canvases.
+
+- **Loading.** `pdfViewer.ts` is the interface (`loadPdf(url) → {numPages,
+  pageSize, renderPage}`); it imports `pdfjsLoader.ts` with `import()`, so
+  pdf.js (about 0.5 MB, plus its 1.3 MB worker) is a chunk of its own,
+  loaded only when a detail opens.
+- **Legacy build.** The loader uses `pdfjs-dist/legacy/build`. The modern
+  build needs the newest JavaScript (`Map.prototype.getOrInsertComputed`)
+  and draws nothing in browsers a year old, iOS Safari among them.
+- **Same origin only.** The worker is a file of the build
+  (`pdf.worker.min.mjs?url`). The cMaps, the standard fonts and the
+  JavaScript decoders for JPEG 2000 and JBIG2 are copied by a plugin in
+  `web/vite.config.ts` to `/assets/pdfjs-<version>/` (`/assets/` is cached as
+  immutable, so the version is in the path) and served by `pnpm dev` too.
+- **CSP unchanged.** Workers fall back to `script-src 'self'`. pdf.js 6 has
+  no eval (`isEvalSupported` is gone); `pdfViewer.test.ts` checks the
+  shipped files for `eval(` and `new Function(` (the legacy build's core-js
+  has only its `Function("return this")` fallback, reached without
+  `globalThis`). WebAssembly is off (`useWasm: false`), so `'wasm-unsafe-eval'`
+  is not needed: JPEG 2000, JBIG2 and CCITT images use the decoders'
+  JavaScript versions, and ICC colour profiles fall back to their alternate
+  colour space. `TestContentSecurityPolicy` (`internal/web/ui`) pins the
+  policy.
+- **What is drawn.** Pages are drawn while near the visible part (an
+  IntersectionObserver), with a text layer of text nodes (select, find).
+  No annotation layer, no XFA, no PDF scripts. Unprocessed JPEG and PNG
+  originals show as a plain `<img>` of the file endpoint (`img-src 'self'`;
+  the sandbox header does not apply to images); HEIC shows a note and the
+  download.
+- **Dependencies.** `pdfjs-dist` is pinned exactly, like every web
+  dependency, and Dependabot updates it. Its optional dependency
+  `@napi-rs/canvas` (native binaries, used only when pdf.js runs in Node)
+  is removed by an override in `web/pnpm-workspace.yaml`, which the
+  Dockerfile copies with the lockfile.
 
 ## Container
 

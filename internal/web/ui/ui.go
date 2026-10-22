@@ -16,7 +16,10 @@ import (
 var dist embed.FS
 
 // contentSecurityPolicy for the UI: only same-origin scripts, styles and
-// requests.
+// requests. The PDF viewer (pdf.js) works under it unchanged: its worker is
+// a file of the build (workers fall back to script-src), its data files are
+// under /assets/, it needs no eval, and it runs without WebAssembly (which
+// would need 'wasm-unsafe-eval'). TestContentSecurityPolicy pins this.
 const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
 	"connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
