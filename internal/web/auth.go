@@ -95,17 +95,32 @@ func (s *Server) secureRequest(r *http.Request) bool {
 // cookies, the __Host- one first. A browser can hold both: a __Host- cookie
 // from a time the server saw HTTPS and a plain one from after, for example
 // when X-Forwarded-Proto stopped counting because the proxy is not trusted.
+//
+// Each token costs a database lookup, so at most maxSessionCookies distinct
+// tokens per name are returned, however many cookies a request carries.
 func sessionTokens(r *http.Request) []string {
 	var tokens []string
+	seen := make(map[string]bool)
 	for _, name := range []string{secureCookieName, cookieName} {
+		n := 0
 		for _, c := range r.Cookies() {
-			if c.Name == name && c.Value != "" {
-				tokens = append(tokens, c.Value)
+			if c.Name != name || c.Value == "" || seen[c.Value] {
+				continue
 			}
+			if n == maxSessionCookies {
+				break
+			}
+			seen[c.Value] = true
+			tokens = append(tokens, c.Value)
+			n++
 		}
 	}
 	return tokens
 }
+
+// maxSessionCookies is how many cookies of one session cookie name count.
+// A browser sends one per name and path; more are junk or an attack.
+const maxSessionCookies = 2
 
 // sessionToken returns the token of the request's valid session, as found
 // by authenticate, and without one the first session cookie's token.

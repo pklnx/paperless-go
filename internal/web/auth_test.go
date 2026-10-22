@@ -832,3 +832,19 @@ func TestLoginRateLimitIPv6Prefix(t *testing.T) {
 		t.Fatalf("other /64: %d", code)
 	}
 }
+
+// However many session cookies a request carries, only a few distinct
+// tokens per name are looked up.
+func TestSessionTokensAreCapped(t *testing.T) {
+	r := httptest.NewRequest("GET", "/api/session", nil)
+	for i := range 100 {
+		r.AddCookie(&http.Cookie{Name: cookieName, Value: fmt.Sprintf("junk%d", i)})
+	}
+	r.AddCookie(&http.Cookie{Name: secureCookieName, Value: "same"})
+	r.AddCookie(&http.Cookie{Name: secureCookieName, Value: "same"})
+	got := sessionTokens(r)
+	want := []string{"same", "junk0", "junk1"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("tokens %v, want %v", got, want)
+	}
+}
