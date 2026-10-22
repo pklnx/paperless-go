@@ -5,7 +5,7 @@ Specification: the "## Plan" comment on #{{ISSUE}} with reviews and maintainer d
 Read `gh pr view`, `gh pr diff` and the changed files in full on branch {{BRANCH}}. Look for: plan fidelity, data loss, crashes, hangs, security/privacy, tests that would fail without the change, time-based waits in tests.
 Blocking only per the CLAUDE.md list; everything else is a follow-up. Each finding: file:line, scenario, why, fix. Don't invent problems.
 
-Checks: read CI once with `gh pr checks <n>` (don't watch); locally run the tests of the changed code (`TEST_DATABASE_URL=postgres://paperless:paperless@localhost:5432/paperless?sslmode=disable go test -race -count=1 ./internal/<pkg>/ -run <filter>`); for a regression test, verify it fails without the fix.
+Checks: read CI once with `gh pr checks <n>` (don't watch); locally run the tests of the changed code (`TEST_DATABASE_URL=<PostgreSQL 17+, e.g. a postgres:18 container> go test -race -count=1 ./internal/<pkg>/ -run <filter>`); for a regression test, verify it fails without the fix.
 
 Post one comment: "## Review", "Verdict: approve" / "approve, pending CI" / "changes requested", numbered findings, "## Follow-ups", "## Test report" (head SHA, checks table), `— Claude, reviewer`.
 As the second reviewer on a risky PR (`second-review`): review independently; do not read the first review before you post yours.
