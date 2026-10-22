@@ -275,6 +275,14 @@ and downloads keep an hour) and at most 64 KiB of headers. Compose runs
 `web` and the command line with `no-new-privileges`; pull the new
 `docker-compose.yml` with the release.
 
+**Upload-only API keys (#87).** Run `./pgo migrate` before `docker compose
+up -d web`. API keys get a third scope, `upload`: it adds documents and
+reads nothing, for a phone or a scanner. `write` includes it, so existing
+keys keep their rights. Rolling the migration back
+(`migrate down`, `00017_api_key_upload_scope.sql`) removes `upload` from
+keys that have another scope too and deletes the keys that have only
+`upload`; their scripts need new keys after going back.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build

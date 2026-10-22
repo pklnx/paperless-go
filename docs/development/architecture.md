@@ -642,7 +642,8 @@ another user's document answers `404` and an admin sees all.
   `document.create` is written in the creating transaction
   (`store.WithAudit` through the importer's context). Answers: `201` with the
   document, `200` with `{"duplicate": true, "existing": {id, title}}`
-  (`existing` left out if the lookup failed), `413` `too_large`, `415`
+  (`existing` left out if the lookup failed, and for an API key without
+  `read`, so an `upload` key learns only that the file is there), `413` `too_large`, `415`
   `unsupported`, `422` `unreadable` or `too_many_pixels` (with `reason`),
   `400` for a body that broke off, `503` without the audit log.
 - **`GET /api/documents`** lists and searches the scope's documents
@@ -857,13 +858,15 @@ and `internal/store`, `cmd/paperless-go/users.go`).
 - **Route table.** `internal/web/routes.go` lists every route with its
   `access`: `accessPublic` (`GET /healthz`, `GET /{$}`, `GET /assets/`),
   `accessLogin` (`/api/session`: read, log in, log out, and `/api/session/2fa`),
-  `accessSession`, `accessRead` or `accessWrite` (a session, or an API key
-  with that scope: the document routes; the upload is `accessWrite`).
+  `accessSession`, `accessRead`, `accessUpload` or `accessWrite` (a
+  session, or an API key with that scope: the document and metadata
+  routes; the upload alone is `accessUpload`, which a `write` key passes
+  too).
   The zero value is `accessSession`, so a route that forgets it gets the
   strictest rule, and so does every path without a route (the JSON `404`
   under `/api/` comes only after the login). `authenticate` enforces the
   table; one test walks it and expects `401` without a session, another
-  calls every route with a `read`, a `write` and a both-scopes key.
+  calls every route with a key of every scope combination.
 - **Sessions.** The cookie `paperless_go_session` (`__Host-` prefixed over
   HTTPS) holds a random token; `sessions` stores its SHA-256 with the user,
   creation, last use and absolute expiry. Sessions end after 7 days unused
@@ -891,18 +894,20 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   `Server` (one per process) for an `X-Forwarded-For` from any other peer,
   loopback included, with the peer's address only.
 - **API keys** (`internal/auth/apikey.go`, `internal/store/api_keys.go`,
-  `internal/web/api_keys.go`, migration `00009_api_keys.sql`). A key is
+  `internal/web/api_keys.go`, migrations `00009_api_keys.sql` and
+  `00017_api_key_upload_scope.sql`). A key is
   `pl_` and 32 random bytes in lower-case base32; `api_keys` stores its
   SHA-256 (unique index; the lookup compares hashes), the last 4
   characters, name (unique among a user's keys that are not revoked),
-  scopes (`read`, `write`), creation, expiry, last use (written at most once
+  scopes (`read`, `upload`, `write`; `NormalizeScopes` stores a `write` key
+  without `upload`, which `write` includes), creation, expiry, last use (written at most once
   a minute) and revocation, all on the server clock. `authenticate` treats
   every request with `Authorization: Bearer pl_…` as a key request and
   never reads its cookie; `protect` skips the Origin and content type checks
   for it. `authenticateKey` checks the key (invalid: `401`, 30 per client and
   minute, then `429`), the per-key rate (600 a minute), the owner's gates
   (must change password, 2FA required), and the route's scope
-  (`requiredScope`; `403` for every other access). The key's user becomes
+  (`requiredScope` and `APIKey.Allows`; `403` for every other access). The key's user becomes
   the request's session, so `requestScope` and the audit entry (actor
   `api_key`, `api_key_id`, `api_key_name`) follow. Creating a key
   (`POST /api/profile/api-keys`) checks password and second factor like a

@@ -15,6 +15,7 @@ const (
 	accessLogin                 // the login endpoints: no session needed, refused with a key
 	accessPublic                // no login: the health check and the UI code
 	accessRead                  // a session or an API key with "read"
+	accessUpload                // a session or an API key with "upload" or "write" (the upload only)
 	accessWrite                 // a session or an API key with "write"
 )
 
@@ -69,7 +70,7 @@ func (s *Server) routes() []route {
 		// Users see their own entries, admins everyone's.
 		h("GET /api/audit", s.handleAudit, accessSession),
 
-		{pattern: "POST /api/documents", handler: http.HandlerFunc(s.handleUpload), access: accessWrite, body: bodyFile},
+		{pattern: "POST /api/documents", handler: http.HandlerFunc(s.handleUpload), access: accessUpload, body: bodyFile},
 		h("GET /api/documents", s.handleListDocuments, accessRead),
 		h("GET /api/documents/{id}", s.handleGetDocument, accessRead),
 		h("PATCH /api/documents/{id}", s.handlePatchDocument, accessWrite),

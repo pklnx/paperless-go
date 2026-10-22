@@ -22,15 +22,17 @@ import (
 // revoked nor expired.
 const MaxAPIKeys = 20
 
-// API key scopes: read for the GET routes, write for the routes that
-// change documents.
+// API key scopes: read for the GET routes, upload for the upload only
+// (POST /api/documents; it reads nothing), write for every route that
+// changes documents or metadata. write includes upload (Allows).
 const (
-	ScopeRead  = "read"
-	ScopeWrite = "write"
+	ScopeRead   = "read"
+	ScopeUpload = "upload"
+	ScopeWrite  = "write"
 )
 
 // APIKeyScopes are all scopes, in the order they are stored.
-var APIKeyScopes = []string{ScopeRead, ScopeWrite}
+var APIKeyScopes = []string{ScopeRead, ScopeUpload, ScopeWrite}
 
 // apiKeyRetention is how long revoked and expired keys stay listed.
 const apiKeyRetention = 30 * 24 * time.Hour
@@ -81,17 +83,26 @@ func (k *APIKey) State(now time.Time) string {
 // HasScope reports whether the key has scope.
 func (k *APIKey) HasScope(scope string) bool { return slices.Contains(k.Scopes, scope) }
 
+// Allows reports whether the key may use a route that needs scope: it has
+// the scope, or the route needs upload and the key has write.
+func (k *APIKey) Allows(scope string) bool {
+	return k.HasScope(scope) || (scope == ScopeUpload && k.HasScope(ScopeWrite))
+}
+
 // NormalizeScopes removes duplicates and sorts scopes in their stored order.
-// It fails with ErrAPIKeyScope for an unknown one or none.
+// upload is dropped next to write, which includes it, so a write key is
+// stored as [write] and a rollback of the upload scope keeps it. It fails
+// with ErrAPIKeyScope for an unknown one or none.
 func NormalizeScopes(scopes []string) ([]string, error) {
 	for _, s := range scopes {
 		if !slices.Contains(APIKeyScopes, s) {
 			return nil, ErrAPIKeyScope
 		}
 	}
+	write := slices.Contains(scopes, ScopeWrite)
 	out := make([]string, 0, len(APIKeyScopes))
 	for _, s := range APIKeyScopes {
-		if slices.Contains(scopes, s) {
+		if slices.Contains(scopes, s) && (s != ScopeUpload || !write) {
 			out = append(out, s)
 		}
 	}

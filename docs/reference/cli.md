@@ -36,7 +36,7 @@ see every user's documents.
 | `user unlock NAME` | Lets a locked user log in again. |
 | `user reset-2fa NAME` | Turns the user's two-factor login off: deletes the TOTP secret and the recovery codes and logs them out everywhere. Works for the last admin too, for an admin who lost both the authenticator and the recovery codes; admins set it up again at the next login. |
 | `user remove-passkeys NAME` | Removes all passkeys of a user, for a lost or stolen device, and logs them out everywhere. They log in with their password (and second factor) again. |
-| `user api-keys NAME` | Lists a user's [API keys](./security#api-keys): name, the last characters of the key, scopes, creation, expiry, last use and state. Revoked and expired keys stay listed for 30 days. Keys are created in the web UI's profile, with the password and the second factor. |
+| `user api-keys NAME` | Lists a user's [API keys](./security#api-keys): name, the last characters of the key, scopes (`read`, `upload`, `write`; `write` includes `upload`), creation, expiry, last use and state. Revoked and expired keys stay listed for 30 days. Keys are created in the web UI's profile, with the password and the second factor. |
 | `user revoke-api-keys NAME` | Revokes all API keys of a user, for a leaked key or a script that should stop. |
 | `user remove NAME` | Deletes a user and their logins, passkeys and API keys. Refused while the user owns documents, tags, correspondents, document types or saved views: the message names how many of each. Delete them first, or lock the user instead. |
 

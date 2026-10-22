@@ -8,7 +8,7 @@
 | User passwords | Only stored as Argon2id hashes (64 MiB, 3 passes). |
 | TOTP secrets, recovery codes | Secrets encrypted with `PAPERLESS_GO_SECRET_KEY`; recovery codes only as keyed hashes (see [Secret key](#secret-key)). |
 | Passkeys | Only public keys are stored; the private key never leaves the user's device. |
-| API keys | Only their SHA-256 and last 4 characters are stored; the key is shown once. A key reaches only the document read (`read`) and upload (`write`) endpoints, with its owner's rights. See [API keys](#api-keys). |
+| API keys | Only their SHA-256 and last 4 characters are stored; the key is shown once. A key reaches only the document and metadata endpoints its scopes allow (`read`, `upload`, `write`), with its owner's rights. See [API keys](#api-keys). |
 | Documents | Each document has one owner; other users get `404`, admins see all. |
 | The audit log | Logins, changes of users and logins, API keys and uploads are recorded; the database refuses changes and deletions. See [Audit log](#audit-log). |
 | Database | Published on `127.0.0.1` only; password in `.env`. |
@@ -256,12 +256,19 @@ only over HTTPS or on `localhost`, so they do not work this way.
 ## API keys
 
 - **What a key can do.** Scripts send `Authorization: Bearer pl_…`. A key
-  has the scope `read` (list, show and download documents), `write` (upload
-  documents) or both, and nothing else: logins, the profile (password, 2FA,
-  passkeys, API keys), user management and the audit log stay with the
-  session and the command line, and answer `403` to a key. Every
-  state-changing route a key may use needs `write`. A key with the wrong
-  scope gets `403` with the missing `scope`.
+  has one or more of the scopes `read` (list, show and download documents),
+  `upload` (add documents, `POST /api/documents` only; it reads nothing) and
+  `write` (add, change and delete documents, tags, correspondents and
+  document types; it includes `upload`), and nothing else: logins, the
+  profile (password, 2FA, passkeys, API keys), user management and the audit
+  log stay with the session and the command line, and answer `403` to a key.
+  Every state-changing route a key may use needs `write`, except the upload,
+  which needs `upload` or `write`. A key with the wrong scope gets `403`
+  with the missing `scope`. A key for a phone or a scanner gets `upload`
+  only: whoever finds it can add documents, but not read or change any.
+  For a file that is already in the archive, a key without `read` gets
+  only `200` `{"duplicate": true}`, not which document it is (id and
+  title); sessions and keys with `read` get both.
 - **Creating one** happens on the profile page and needs the password and,
   with 2FA on, a current TOTP or recovery code, like adding a passkey;
   wrong ones count towards the login limits. A key gets a name (unique
@@ -434,7 +441,7 @@ of that type, not the one the file was uploaded with.
 
 The server makes no network connections on a user's behalf: no URL or host
 given in a request is ever fetched, and OCR runs locally. Every logged-in
-user and every key with `write` can upload files that the server's OCR
+user and every key with `upload` or `write` can upload files that the server's OCR
 tools (OCRmyPDF, Tesseract, Ghostscript, libheif) parse, with the container
 user's rights (UID 65532; Compose adds `no-new-privileges`), so only give
 logins and keys to people and scripts you trust.

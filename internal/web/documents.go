@@ -637,7 +637,8 @@ func (b *bodyReader) Read(p []byte) (int, error) {
 
 type duplicateJSON struct {
 	Duplicate bool `json:"duplicate"`
-	// Existing is omitted when the existing document could not be named.
+	// Existing is omitted when the existing document could not be named,
+	// and for an API key without read.
 	Existing *documentRefJSON `json:"existing,omitempty"`
 }
 
@@ -673,7 +674,8 @@ func (s *Server) refuseUpload(w http.ResponseWriter, reason ingest.Reason) {
 // handleUpload imports the request body as a new document of the caller,
 // also for an admin. The body is the raw file (see uploadContentTypes),
 // the name is in X-File-Name. Answers: 201 with the document, 200 with
-// duplicate (and the existing document, if it can be named), 413, 415 or
+// duplicate (and the existing document, if it can be named and the caller
+// may read: a session or a key with read), 413, 415 or
 // 422 with the reason of a refusal.
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if !s.documentsAvailable(w, r) {
@@ -741,7 +743,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, http.StatusCreated, out)
 	case ingest.Duplicate:
 		out := duplicateJSON{Duplicate: true}
-		if res.Existing.ID != "" {
+		// A key that cannot read (upload or write only) learns only that
+		// the file is in the archive, not which document it is.
+		if k := currentAPIKey(r); res.Existing.ID != "" && (k == nil || k.Allows(store.ScopeRead)) {
 			out.Existing = &documentRefJSON{ID: res.Existing.ID, Title: res.Existing.Title}
 		}
 		s.writeJSON(w, http.StatusOK, out)
