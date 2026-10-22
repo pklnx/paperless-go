@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,40 @@ import (
 
 // passkeyCeremonyTTL is how long a registration or login may take.
 const passkeyCeremonyTTL = 5 * time.Minute
+
+// passkeyCookieName holds the token of the browser's open passkey login
+// (over HTTPS with the __Host- prefix). A new login from the same browser
+// replaces it and a password login drops it, so reloading the login page,
+// which starts an autofill login each time, does not pile up open logins.
+// Clients without the cookie count in full against every cap.
+const passkeyCookieName = "paperless_go_passkey_login" //nolint:gosec // a cookie name, not a credential
+
+// passkeyLoginTokens returns the tokens of the request's passkey login
+// cookies, the __Host- one first; one per name. A browser can hold both
+// names, as with the session cookie (sessionTokens).
+func passkeyLoginTokens(r *http.Request) []string {
+	var tokens []string
+	for _, name := range []string{"__Host-" + passkeyCookieName, passkeyCookieName} {
+		if c, err := r.Cookie(name); err == nil && c.Value != "" && !slices.Contains(tokens, c.Value) {
+			tokens = append(tokens, c.Value)
+		}
+	}
+	return tokens
+}
+
+// dropPasskeyLogin deletes the open passkey login of the request's cookie
+// and expires the cookie. A failure is only logged: the login expires
+// anyway.
+func (s *Server) dropPasskeyLogin(w http.ResponseWriter, r *http.Request) {
+	tokens := passkeyLoginTokens(r)
+	if len(tokens) == 0 {
+		return
+	}
+	if _, err := s.store.DropPasskeyLogins(r.Context(), tokens); err != nil {
+		s.log.Warn("drop unused passkey login", "err", err)
+	}
+	s.clearHostCookies(w, r, passkeyCookieName)
+}
 
 // Starting a passkey login needs no session; this bounds it per address.
 const (
@@ -112,7 +147,8 @@ func (s *Server) handleBeginPasskeyLogin(w http.ResponseWriter, r *http.Request)
 	if !s.passkeysReady(w, r) {
 		return
 	}
-	addr := s.clientAddr(r)
+	keys := s.clientKeys(r)
+	addr := keys.Addr
 	if wait := s.limiter.BlockedAddr(addr); wait > 0 {
 		s.tooMany(w, wait, errTooManyPasskey)
 		return
@@ -132,8 +168,9 @@ func (s *Server) handleBeginPasskeyLogin(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	now := s.now()
-	token, err := s.store.BeginPasskeyLogin(r.Context(), addr, data, now, now.Add(passkeyCeremonyTTL))
-	if errors.Is(err, store.ErrTooManyCeremonies) || errors.Is(err, store.ErrTooManyClientCeremonies) {
+	token, err := s.store.BeginPasskeyLogin(r.Context(), keys, passkeyLoginTokens(r), data, now, now.Add(passkeyCeremonyTTL))
+	if errors.Is(err, store.ErrTooManyCeremonies) || errors.Is(err, store.ErrTooManyClientCeremonies) ||
+		errors.Is(err, store.ErrTooManyNetworkCeremonies) {
 		s.log.Warn("too many passkey logins in progress", "addr", s.clientIP(r), "err", err)
 		s.tooMany(w, time.Minute, errTooManyOpenPasskey)
 		return
@@ -142,6 +179,8 @@ func (s *Server) handleBeginPasskeyLogin(w http.ResponseWriter, r *http.Request)
 		s.failStore(w, r, err)
 		return
 	}
+	// Only a stored login sets the cookie; a refused one leaves it.
+	s.setHostCookie(w, r, passkeyCookieName, token, passkeyCeremonyTTL)
 	s.writeJSON(w, http.StatusOK, ceremonyJSON{Token: token, PublicKey: assertion.Response})
 }
 
@@ -203,6 +242,11 @@ func (s *Server) handleFinishPasskeyLogin(w http.ResponseWriter, r *http.Request
 	e.Detail("method", "passkey")
 	login, err := s.store.CompletePasskeyLogin(withAudit(r, e), in.Token, parsed.RawID, now, verify,
 		hash, now.Add(auth.MaxSessionAge), truncateUserAgent(r.UserAgent()))
+	// The login is used up now, whatever the outcome; the cookie that
+	// named it goes too.
+	if len(passkeyLoginTokens(r)) > 0 {
+		s.clearHostCookies(w, r, passkeyCookieName)
+	}
 	switch {
 	case errors.Is(err, store.ErrCeremonyExpired):
 		s.fail(w, r, http.StatusUnauthorized, "the passkey login has expired; try again", nil)

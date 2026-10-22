@@ -240,8 +240,17 @@ func TestPasskeyRegistrationNeedsSecondFactor(t *testing.T) {
 	f.expect("POST", "/api/profile/passkeys/begin", map[string]string{"name": "Phone", "currentPassword": "correct horse battery"}, 401)
 	f.expect("POST", "/api/profile/passkeys/begin", map[string]string{"name": "Phone", "currentPassword": "correct horse battery", "code": "000000"}, 401)
 	k := newSoftKey(t)
-	f.addPasskey(k, "Phone", "correct horse battery", f.code(secret))
+	code := f.code(secret)
+	f.addPasskey(k, "Phone", "correct horse battery", code)
 	f.addPasskey(newSoftKey(t), "Key", "correct horse battery", recovery[0])
+
+	// Each code confirms one change: neither the TOTP code of the same step
+	// nor the recovery code works again.
+	f.expect("POST", "/api/profile/passkeys/begin", map[string]string{"name": "Laptop", "currentPassword": "correct horse battery", "code": code}, 401)
+	f.expect("POST", "/api/profile/passkeys/begin", map[string]string{"name": "Laptop", "currentPassword": "correct horse battery", "code": recovery[0]}, 401)
+	// Fresh codes do, so the refusals above came from the used-up codes.
+	f.beginRegistration("Laptop", "correct horse battery", f.code(secret))
+	f.beginRegistration("Tablet", "correct horse battery", recovery[1])
 
 	// The passkey replaces password and TOTP.
 	f.as().passkeyLogin(k, 200)
@@ -300,9 +309,10 @@ func TestPasskeyLoginFailuresCountPerAddress(t *testing.T) {
 }
 
 // The begin limit counts every request, also those the open-login cap
-// refuses (which come first: the cap is lower).
+// refuses (which come first: the cap is lower). A client without cookies
+// counts every begin against the cap.
 func TestPasskeyBeginRateLimit(t *testing.T) {
-	f := newPasskeyFixture(t)
+	f := newPasskeyFixture(t).noCookies()
 	for range store.MaxOpenLoginCeremoniesPerClient {
 		f.beginPasskeyLogin()
 	}
@@ -381,8 +391,10 @@ func TestPasskeyConcurrentLogins(t *testing.T) {
 	const n = 6
 	bodies := make([]map[string]any, n)
 	start := k.count
+	// Separate begins without the ceremony cookie, so none replaces another.
+	script := f.noCookies()
 	for i := range bodies {
-		token, pk := f.beginPasskeyLogin()
+		token, pk := script.beginPasskeyLogin()
 		k.count = start // all report the same next count
 		bodies[i] = map[string]any{"token": token, "credential": k.get(pk)}
 	}
@@ -688,7 +700,7 @@ func (f *authFixture) doFrom(client, method, path string, body any) (*http.Respo
 // One client cannot hold more than its share of open passkey logins, so it
 // cannot lock everybody else out; addresses in one IPv6 /64 share it.
 func TestPasskeyLoginCapPerClient(t *testing.T) {
-	f := newAuthFixtureOpts(t, Options{PublicURL: testPublicURL, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}})
+	f := newAuthFixtureOpts(t, Options{PublicURL: testPublicURL, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}}).noCookies()
 	begin := func(client string) int {
 		resp, _ := f.doFrom(client, "POST", "/api/session/passkey/begin", nil)
 		return resp.StatusCode

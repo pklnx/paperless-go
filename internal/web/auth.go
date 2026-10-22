@@ -144,9 +144,19 @@ func (s *Server) deleteOldSessions(r *http.Request) {
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, maxAge time.Duration) {
+	s.setHostCookie(w, r, cookieName, token, maxAge)
+}
+
+func (s *Server) clearSessionCookies(w http.ResponseWriter, r *http.Request) {
+	s.clearHostCookies(w, r, cookieName)
+}
+
+// setHostCookie sets the cookie name, over HTTPS as "__Host-" + name; a
+// negative maxAge expires it.
+func (s *Server) setHostCookie(w http.ResponseWriter, r *http.Request, name, value string, maxAge time.Duration) {
 	c := &http.Cookie{
-		Name:     cookieName,
-		Value:    token,
+		Name:     name,
+		Value:    value,
 		Path:     "/",
 		MaxAge:   int(maxAge.Seconds()),
 		HttpOnly: true,
@@ -156,23 +166,24 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token 
 		c.MaxAge = -1 // expire now; a sub-second duration would round to no Max-Age
 	}
 	if s.secureRequest(r) {
-		c.Name, c.Secure = secureCookieName, true
+		c.Name, c.Secure = "__Host-"+name, true
 	}
 	http.SetCookie(w, c)
 	if !c.Secure {
 		// Drop a __Host- cookie from a time the server saw HTTPS, so it
-		// does not outlive its session next to the plain one. A browser
-		// that is on HTTPS (behind a proxy that no longer counts) removes
-		// it; one on plain HTTP ignores a Secure cookie, which does no harm.
-		http.SetCookie(w, &http.Cookie{Name: secureCookieName, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+		// does not outlive its value next to the plain one. A browser that
+		// is on HTTPS (behind a proxy that no longer counts) removes it;
+		// one on plain HTTP ignores a Secure cookie, which does no harm.
+		http.SetCookie(w, &http.Cookie{Name: "__Host-" + name, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	}
 }
 
-func (s *Server) clearSessionCookies(w http.ResponseWriter, r *http.Request) {
-	s.setSessionCookie(w, r, "", -1)
+// clearHostCookies expires both names of the cookie name.
+func (s *Server) clearHostCookies(w http.ResponseWriter, r *http.Request, name string) {
+	s.setHostCookie(w, r, name, "", -1)
 	if s.secureRequest(r) {
 		// Also drop a cookie set before HTTPS was in front of the server.
-		http.SetCookie(w, &http.Cookie{Name: cookieName, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+		http.SetCookie(w, &http.Cookie{Name: name, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	}
 }
 
@@ -371,6 +382,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusUnauthorized, errWrongLogin, nil)
 		return
 	}
+	// The browser's passkey login (autofill) stays unused after a correct
+	// password, also when a second factor follows: the UI stops offering
+	// it then.
+	s.dropPasskeyLogin(w, r)
 	if u.LockedAt != nil {
 		s.auditLoginFailed(r, "password", reasonLocked, name, u)
 		s.fail(w, r, http.StatusForbidden, "this user is locked", nil)

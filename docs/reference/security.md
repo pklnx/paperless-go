@@ -60,6 +60,10 @@ whose `X-Forwarded-Proto` is believed. The server takes the last address in
 `X-Forwarded-For` that is not a trusted proxy; a missing or malformed header
 means the peer.
 
+When a request carries `X-Forwarded-For` from a peer that is not a
+trusted proxy (loopback included), the server logs a warning with the
+peer's address, once per start; the header's own value is never logged.
+
 To find the address, log in through the proxy before setting it and look at
 the client address of that login on the **Log** page: that is the proxy as
 the server sees it (in Docker Compose usually the gateway of the Compose
@@ -207,11 +211,23 @@ only over HTTPS or on `localhost`, so they do not work this way.
   the server clock, are used up by the first answer, also a wrong one, and
   only their token's hash is stored. Starting a login needs no session, so
   it is limited to 30 per minute and address, to 20 open logins per
-  address and to 1000 open logins in total, so one client cannot use up
-  the total for everybody (IPv6 per `/64`, as for the login limits);
-  failed passkey logins count towards the address limit of the login
-  limits. Concurrent logins with one passkey are serialized, so a
-  replayed answer with the same sign count fails.
+  address (IPv6 per `/64`, as for the login limits), to 100 per IPv6 `/56`
+  or IPv4 `/24`, to 250 per IPv6 `/48` and to 1000 open logins in total,
+  so neither one client nor one site with many addresses can use up the
+  total for everybody; failed passkey logins count towards the address
+  limit of the login limits. Concurrent logins with one passkey are
+  serialized, so a replayed answer with the same sign count fails.
+- **The browser's open login.** The login page starts an autofill login
+  each time it loads. The server keeps its token in a cookie
+  (`paperless_go_passkey_login`, `__Host-` over HTTPS; `HttpOnly`,
+  `SameSite=Strict`, 5 minutes): the next login from that browser
+  replaces it, a correct password drops it (also when a second factor
+  follows) and a passkey login expires the cookie. So reloading the page
+  holds one open login, not one per load. The cookie only names the
+  browser's own login, which needs the authenticator to finish; clients
+  without it count in full against every cap. Two tabs share it: a login
+  started in the second tab replaces the first tab's, whose autofill then
+  answers "expired" once and starts a new one.
 - **Removing.** A user removes a passkey on the profile page; that ends
   their other sessions. An admin removes all of a user's passkeys on the
   Users page (or `./pgo user remove-passkeys NAME`), which logs the user

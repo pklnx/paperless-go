@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+
+	"github.com/pklnx/paperless-go/internal/store"
 )
 
 // clientIP is the client's address: the peer, or behind a trusted proxy
@@ -52,17 +54,26 @@ func (s *Server) trustedProxy(a netip.Addr) bool {
 // IPv4-mapped IPv6) counts per address. Logs and the audit log keep the
 // full address (clientIP).
 func (s *Server) clientAddr(r *http.Request) string {
-	if a := s.clientIP(r); a.IsValid() {
-		return limitKey(a)
-	}
-	return r.RemoteAddr
+	return s.clientKeys(r).Addr
 }
 
-// limitKey groups an address for the limits: IPv6 by /64.
-func limitKey(a netip.Addr) string {
-	a = a.Unmap()
-	if a.Is6() {
-		return netip.PrefixFrom(a.WithZone(""), 64).Masked().String()
+// clientKeys are clientAddr and the client's networks, for the caps on
+// open passkey logins. Without an address there are no networks.
+func (s *Server) clientKeys(r *http.Request) store.ClientKeys {
+	if a := s.clientIP(r); a.IsValid() {
+		return limitKeys(a)
 	}
-	return a.String()
+	return store.ClientKeys{Addr: r.RemoteAddr}
+}
+
+// limitKeys groups an address for the limits: IPv6 by /64, with its /56
+// and /48 as networks; IPv4 by address, with its /24 as the middle network
+// and no wide one.
+func limitKeys(a netip.Addr) store.ClientKeys {
+	a = a.Unmap().WithZone("")
+	prefix := func(bits int) string { return netip.PrefixFrom(a, bits).Masked().String() }
+	if a.Is6() {
+		return store.ClientKeys{Addr: prefix(64), NetMid: prefix(56), NetWide: prefix(48)}
+	}
+	return store.ClientKeys{Addr: a.String(), NetMid: prefix(24)}
 }

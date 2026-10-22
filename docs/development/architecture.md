@@ -51,7 +51,7 @@ app and the server through the app's archive folder format:
 
 | App (SwiftData) | Server table |
 |---|---|
-| — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`, `webauthn_handle` in `00008_passkeys.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges`, `passkeys`, `webauthn_ceremonies`, `api_keys` (`00009_api_keys.sql`) |
+| — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`, `webauthn_handle` in `00008_passkeys.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges`, `passkeys`, `webauthn_ceremonies` (network columns in `00014_ceremony_networks.sql`), `api_keys` (`00009_api_keys.sql`) |
 | — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; actor `system` in `00015_audit_system_actor.sql`; see [Audit log](#audit-log)) |
 | `Document`: id (UUID), title, documentDate, createdAt, modifiedAt, notes, isFavorite, isInbox, archiveSerialNumber, pageCount, fileSize, extractedText, source, originalFileName, textSource, contentHash | `documents`, with the UUID as primary key; the original file (`original_sha256`, size, MIME type) and the archive PDF (`archive_sha256`, size) |
 | `Tag`: name, colorHex, symbol, parent, matchText, matchMode | `tags`, `document_tags` (nested through `parent_id`) |
@@ -740,7 +740,9 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   address (IPv6 per `/64`; logs and the audit log keep the full address);
   `X-Forwarded-For` counts only from `PAPERLESS_GO_TRUSTED_PROXIES`, and
   `X-Forwarded-Proto` (`secureRequest`: the `__Host-` cookie with
-  `Secure`) only from those or loopback.
+  `Secure`) only from those or loopback. `Handler` logs one warning per
+  `Server` (one per process) for an `X-Forwarded-For` from any other peer,
+  loopback included, with the peer's address only.
 - **API keys** (`internal/auth/apikey.go`, `internal/store/api_keys.go`,
   `internal/web/api_keys.go`, migration `00009_api_keys.sql`). A key is
   `pl_` and 32 random bytes in lower-case base32; `api_keys` stores its
@@ -790,8 +792,14 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   (`/api/profile/passkeys/begin|finish`) checks password and second factor
   first and locks the user row (limit 10, unique name per user); the login
   (`/api/session/passkey/begin|finish`, `accessLogin`, discoverable, user
-  verification required; at most 20 open logins per client and 1000 in
-  all, checked under an advisory lock in the insert's transaction) locks user, then passkey row, rejects a sign
+  verification required; at most 20 open logins per client (`client_key`:
+  IPv4 address or IPv6 `/64`), 100 per `client_net_mid` (IPv6 `/56` or
+  IPv4 `/24`), 250 per `client_net_wide` (IPv6 `/48`; none for IPv4,
+  `00014_ceremony_networks.sql`) and 1000 in all, checked under an
+  advisory lock in the insert's transaction; the ceremony cookie
+  `paperless_go_passkey_login` names the browser's open login, which its
+  next begin replaces in that transaction and a correct password deletes)
+  locks user, then passkey row, rejects a sign
   count that did not increase, and stores the new count, the session and
   `auth.login` in one transaction. The session it creates is restricted
   like a password login's. Removing one passkey ends the user's other

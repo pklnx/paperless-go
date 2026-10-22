@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -43,6 +44,9 @@ type Server struct {
 	limiter      *auth.Limiter
 	// trustedProxies may name the client in X-Forwarded-For.
 	trustedProxies []netip.Prefix
+	// forwardedWarned is set once the ignored X-Forwarded-For has been
+	// logged; serve runs one Server, so that is once per process.
+	forwardedWarned atomic.Bool
 	// sealer and secretKey protect TOTP secrets and recovery codes.
 	sealer     *crypto.Sealer
 	secretKey  []byte
@@ -168,7 +172,28 @@ func (s *Server) Handler() http.Handler {
 		_, pattern := mux.Handler(r)
 		return bodyOf[pattern]
 	}
-	return s.protect(s.authenticate(mux, accessOf), routeBody)
+	h := s.protect(s.authenticate(mux, accessOf), routeBody)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.warnIgnoredForwardedFor(r)
+		h.ServeHTTP(w, r)
+	})
+}
+
+// warnIgnoredForwardedFor logs once when a request carries X-Forwarded-For
+// from a peer that is not a trusted proxy, also from loopback: behind a
+// reverse proxy without PAPERLESS_GO_TRUSTED_PROXIES every client gets the
+// proxy's address and all share one login limit. Only the peer is logged;
+// the header comes from the client and could be anything.
+func (s *Server) warnIgnoredForwardedFor(r *http.Request) {
+	if s.forwardedWarned.Load() || len(r.Header.Values("X-Forwarded-For")) == 0 {
+		return
+	}
+	peer := peerAddr(r)
+	if s.trustedProxy(peer) || !s.forwardedWarned.CompareAndSwap(false, true) {
+		return
+	}
+	s.log.Warn("X-Forwarded-For from a peer that is not a trusted proxy is ignored; behind a reverse proxy set "+
+		config.EnvTrustedProxies+", else all clients share one login limit", "peer", peer)
 }
 
 // handleHealth answers 200 while the database answers, for container

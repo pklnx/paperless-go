@@ -223,6 +223,19 @@ docker compose up -d web
 Restoring a backup made before the upgrade works too and needs no
 `REINDEX`.
 
+**Passkey login caps (#48).** Run `./pgo migrate` before `docker compose
+up -d web`. Open passkey logins are now also capped per network: 100 per
+IPv6 `/56` or IPv4 `/24` and 250 per IPv6 `/48`, on top of 20 per client
+and 1000 in total. The browser keeps its open passkey login in a cookie
+(`paperless_go_passkey_login`, `__Host-` over HTTPS), so reloading the
+login page no longer piles up open logins. When a request carries
+`X-Forwarded-For` from a peer that is not a trusted proxy (also from
+loopback), the web server logs one warning, once after each start: behind
+a reverse proxy set `PAPERLESS_GO_TRUSTED_PROXIES` (see [Trusted
+proxies](../reference/security#trusted-proxies)), else all clients share
+one login limit. Rolling the migration back (`migrate down`) only drops the
+network caps.
+
 **Audit entries by the server (#49).** Run `./pgo migrate` before `docker
 compose up -d web`. The consume folder now writes a `document.consume`
 entry to the audit log for each scan that imported, deleted or moved files
