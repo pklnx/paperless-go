@@ -30,6 +30,12 @@ describe("messages", () => {
       }
     }
   });
+  it("tells a user that changes by admins are in their log", () => {
+    expect(messagesFor("en").logOwnNote).toContain("an admin or the command line made to your account");
+    expect(messagesFor("de").logOwnNote).toContain("ein Admin oder die Kommandozeile an deinem Konto");
+    expect(messagesFor("en").logByAdmin("root")).toBe("by root");
+    expect(messagesFor("de").logByAdmin("root")).toBe("von root");
+  });
   it("names each language in itself", () => {
     expect(messagesFor("de").languageName).toBe("Deutsch");
     expect(messagesFor("en").languageName).toBe("English");

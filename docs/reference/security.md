@@ -298,7 +298,9 @@ are written in one transaction: if the entry cannot be written, the change
 is not made. The log is append-only: the database refuses to change or
 delete entries, also for the database owner unless it is a superuser.
 Removing a user keeps their entries under the name they had. Users see their
-own entries on the Log page; admins see everyone's and can export them with
+own entries on the Log page, and the changes an admin or the command line
+made to their account, without the admin's address, browser, API key or
+the command's operator; admins see everyone's and can export them with
 `audit export`. Entries are kept for good; there is no retention yet.
 
 ## Browser protections

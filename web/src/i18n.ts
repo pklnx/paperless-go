@@ -219,7 +219,8 @@ const en = {
   // Log page
   log: "Log",
   logTitle: "Log",
-  logOwnNote: "Your logins, failed logins and logouts, and the changes you made to your password, two-factor login, passkeys and API keys, and what your API keys did. Admins see these entries too.",
+  logOwnNote:
+    "Your logins, failed logins and logouts, the changes you made to your password, two-factor login, passkeys and API keys, and what your API keys did, and the changes an admin or the command line made to your account (locking, role, password reset, two-factor login, passkeys, imports into your account, exports of your log). Admins see these entries too.",
   logAdminNote: "Every user's logins, failed logins and logouts, and every change of users, passwords, two-factor logins, passkeys and API keys, also from the command line.",
   logFrom: "From",
   logTo: "To",
@@ -235,6 +236,7 @@ const en = {
   logMore: "Load more",
   logCLI: "command line",
   logCLIBy: (who: string) => `command line (${who})`,
+  logByAdmin: (name: string) => `by ${name}`,
   logViaKey: (name: string) => `with API key “${name}”`,
   logTriedName: (name: string) => `“${name}”`,
   /** A code in an entry's details: a login method, the reason of a failed login, a role. */
@@ -498,7 +500,7 @@ const de: Messages = {
   log: "Protokoll",
   logTitle: "Protokoll",
   logOwnNote:
-    "Deine Anmeldungen, fehlgeschlagenen Anmeldungen und Abmeldungen und die Änderungen, die du an deinem Passwort, deiner Zwei-Faktor-Anmeldung, deinen Passkeys und API-Schlüsseln vorgenommen hast, und was deine API-Schlüssel getan haben. Admins sehen diese Einträge ebenfalls.",
+    "Deine Anmeldungen, fehlgeschlagenen Anmeldungen und Abmeldungen, die Änderungen, die du an deinem Passwort, deiner Zwei-Faktor-Anmeldung, deinen Passkeys und API-Schlüsseln vorgenommen hast, was deine API-Schlüssel getan haben, und die Änderungen, die ein Admin oder die Kommandozeile an deinem Konto vorgenommen hat (Sperren, Rolle, Zurücksetzen des Passworts, Zwei-Faktor-Anmeldung, Passkeys, Importe in dein Konto, Exporte deines Protokolls). Admins sehen diese Einträge ebenfalls.",
   logAdminNote:
     "Die Anmeldungen, fehlgeschlagenen Anmeldungen und Abmeldungen aller Benutzer und jede Änderung an Benutzern, Passwörtern, Zwei-Faktor-Anmeldungen, Passkeys und API-Schlüsseln, auch über die Kommandozeile.",
   logFrom: "Von",
@@ -515,6 +517,7 @@ const de: Messages = {
   logMore: "Mehr laden",
   logCLI: "Kommandozeile",
   logCLIBy: (who) => `Kommandozeile (${who})`,
+  logByAdmin: (name) => `von ${name}`,
   logViaKey: (name) => `mit API-Schlüssel „${name}“`,
   logTriedName: (name) => `„${name}“`,
   auditCode: (c) =>

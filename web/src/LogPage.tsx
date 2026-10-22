@@ -129,7 +129,10 @@ export function LogPage({ admin }: { admin: boolean }) {
 }
 
 function EntryLine({ entry: e, admin }: { entry: AuditEntry; admin: boolean }) {
-  const target = targetLabel(e);
+  // An entry about a user by an admin or the command line: name who made
+  // it; the target is the user themself.
+  const byOther = !admin && e.byOther === true;
+  const target = byOther ? "" : targetLabel(e);
   const detail = entryDetail(e);
   const failed = e.action === "auth.login_failed";
   const operator = e.actor === "cli" ? commandOperator(e) : "";
@@ -139,6 +142,7 @@ function EntryLine({ entry: e, admin }: { entry: AuditEntry; admin: boolean }) {
       <span className="min-w-0">
         <span className={`font-medium ${failed ? "text-danger" : ""}`}>{t.auditAction(e.action)}</span>
         {admin && e.user && <span className="text-ink-muted"> · {e.user}</span>}
+        {byOther && e.actor !== "cli" && e.user && <span className="text-ink-muted"> · {t.logByAdmin(e.user)}</span>}
         {e.actor === "cli" && <span className="text-ink-muted"> · {operator ? t.logCLIBy(operator) : t.logCLI}</span>}
         {e.apiKey && <span className="text-ink-muted"> · {t.logViaKey(e.apiKey)}</span>}
         {target && <span> · {target}</span>}

@@ -93,4 +93,41 @@ describe("LogPage", () => {
     expect(screen.queryByText(/· alice/)).toBeNull();
     expect(urls).not.toContain("/api/users");
   });
+
+  it("names who changed a user's account, without the target", async () => {
+    stubServer({
+      "": {
+        entries: [
+          {
+            id: 5,
+            at: "2026-10-21T10:05:00Z",
+            actor: "session",
+            user: "root",
+            action: "user.lock",
+            target: { type: "user", id: "2", name: "alice" },
+            details: {},
+            byOther: true,
+          },
+          {
+            id: 4,
+            at: "2026-10-21T10:04:00Z",
+            actor: "cli",
+            action: "user.password_set",
+            target: { type: "user", id: "2", name: "alice" },
+            details: {},
+            byOther: true,
+          },
+        ],
+      },
+    });
+    render(<LogPage admin={false} />);
+    expect(await screen.findByText(t.auditAction("user.lock"))).toBeTruthy();
+    expect(screen.getByText(t.logOwnNote)).toBeTruthy();
+    expect(screen.getByText(`· ${t.logByAdmin("root")}`, { exact: false })).toBeTruthy();
+    // The command line without an operator, and no "by" for it.
+    expect(screen.getByText(`· ${t.logCLI}`, { exact: false })).toBeTruthy();
+    expect(screen.queryAllByText(/by |von /).length).toBe(1);
+    // The target is the user themself and is not shown.
+    expect(screen.queryByText(/alice/)).toBeNull();
+  });
 });

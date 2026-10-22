@@ -57,16 +57,37 @@ ORDER BY l.at DESC, l.id DESC
 LIMIT @lim;
 
 -- name: ListAuditEntriesForUser :many
--- A page of one user's own entries, newest first. A separate query rather
--- than "user_id IS NULL OR", so that a cached generic plan still uses
--- audit_log_user_idx.
+-- A page of one user's log, newest first: the entries by the user and the
+-- entries about them (target user, by an admin or the command line). A
+-- UNION ALL of two branches rather than an OR, so that each branch uses its
+-- index (audit_log_user_idx, audit_log_target_user_idx) also in a cached
+-- generic plan; the literal target_type = 'user' matches the partial
+-- index. An entry both by and about the user comes from the first branch
+-- only. Each branch is limited on its own, then the union.
 SELECT l.id, l.at, l.actor, l.user_id, l.user_name, l.api_key_name, l.action,
        l.target_type, l.target_id, l.target_name, l.client_ip, ua.user_agent, l.details
-FROM audit_log l
+FROM (
+    (SELECT a.id, a.at, a.actor, a.user_id, a.user_name, a.api_key_name, a.action,
+            a.target_type, a.target_id, a.target_name, a.client_ip, a.user_agent_id, a.details
+     FROM audit_log a
+     WHERE a.user_id = @user_id::bigint
+       AND a.at >= @since AND a.at < @until
+       AND a.action LIKE ANY (@patterns::text[])
+       AND (sqlc.narg(cursor_at)::timestamptz IS NULL OR (a.at, a.id) < (sqlc.narg(cursor_at), @cursor_id::bigint))
+     ORDER BY a.at DESC, a.id DESC
+     LIMIT @lim)
+    UNION ALL
+    (SELECT b.id, b.at, b.actor, b.user_id, b.user_name, b.api_key_name, b.action,
+            b.target_type, b.target_id, b.target_name, b.client_ip, b.user_agent_id, b.details
+     FROM audit_log b
+     WHERE b.target_type = 'user' AND b.target_id = (@user_id::bigint)::text
+       AND b.user_id IS DISTINCT FROM @user_id::bigint
+       AND b.at >= @since AND b.at < @until
+       AND b.action LIKE ANY (@patterns::text[])
+       AND (sqlc.narg(cursor_at)::timestamptz IS NULL OR (b.at, b.id) < (sqlc.narg(cursor_at), @cursor_id::bigint))
+     ORDER BY b.at DESC, b.id DESC
+     LIMIT @lim)
+) l
 LEFT JOIN audit_user_agents ua ON ua.id = l.user_agent_id
-WHERE l.user_id = @user_id::bigint
-  AND l.at >= @since AND l.at < @until
-  AND l.action LIKE ANY (@patterns::text[])
-  AND (sqlc.narg(cursor_at)::timestamptz IS NULL OR (l.at, l.id) < (sqlc.narg(cursor_at), @cursor_id::bigint))
 ORDER BY l.at DESC, l.id DESC
 LIMIT @lim;
