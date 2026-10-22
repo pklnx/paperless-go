@@ -55,17 +55,34 @@ func (s *Store) Close() { s.pool.Close() }
 // Ping checks that the database answers.
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
-// Migrate applies all pending schema migrations.
+// Migrate applies all pending schema migrations and rebuilds the
+// collation-dependent indexes if the database locale changed (see
+// collation.go).
 func (s *Store) Migrate(ctx context.Context) ([]string, error) {
-	var applied []string
-	err := s.withMigrations(func(p *goose.Provider) error {
+	applied, _, err := s.MigrateAndRebuild(ctx)
+	return applied, err
+}
+
+// MigrateAndRebuild is Migrate that also returns the indexes it rebuilt.
+// They are rebuilt before the migrations run, so these work on indexes in
+// order, and the fingerprint is stored after them, once its table exists.
+func (s *Store) MigrateAndRebuild(ctx context.Context) (applied, rebuilt []string, err error) {
+	builtFor, rebuilt, err := s.ensureCollation(ctx, "")
+	if err != nil {
+		return nil, rebuilt, err
+	}
+	err = s.withMigrations(func(p *goose.Provider) error {
 		results, err := p.Up(ctx)
 		for _, r := range results {
 			applied = append(applied, r.Source.Path)
 		}
 		return err
 	})
-	return applied, err
+	if err != nil {
+		return applied, rebuilt, err
+	}
+	_, more, err := s.ensureCollation(ctx, builtFor)
+	return applied, append(rebuilt, more...), err
 }
 
 // MigrateDown rolls back the most recently applied migration. This usually

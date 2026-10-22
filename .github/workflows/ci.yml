@@ -17,11 +17,13 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:18-alpine
+        # The image and locale of docker-compose.yml.
+        image: postgres:18
         env:
           POSTGRES_USER: paperless
           POSTGRES_PASSWORD: paperless
           POSTGRES_DB: paperless
+          POSTGRES_INITDB_ARGS: --locale-provider=builtin --locale=C.UTF-8
         # Random host port on loopback; the test step reads it below.
         ports: ["127.0.0.1::5432"]
         options: >-

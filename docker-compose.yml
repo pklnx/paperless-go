@@ -10,12 +10,19 @@ name: paperless-go
 
 services:
   postgres:
-    image: postgres:18-alpine
+    # Debian, not Alpine: full-text ranking is about four times slower on
+    # musl. Changing the image of an existing database changes how it sorts
+    # text; ./pgo migrate then rebuilds the affected indexes.
+    image: postgres:18
     restart: unless-stopped
     environment:
       POSTGRES_DB: paperless
       POSTGRES_USER: paperless
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Only read when a new database is created: PostgreSQL's own locale
+      # (code point order), so no future image or C library can change how
+      # text sorts. An existing database keeps the locale it was created with.
+      POSTGRES_INITDB_ARGS: --locale-provider=builtin --locale=C.UTF-8
     volumes:
       # PostgreSQL 18+ images keep data in a versioned subdirectory
       # (/var/lib/postgresql/<major>/docker), so the volume is mounted one

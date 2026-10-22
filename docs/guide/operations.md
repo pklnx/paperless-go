@@ -121,6 +121,58 @@ index, and the extension too if the paperless-go database user owns it
 (it created it) and nothing else uses it; one an administrator created
 stays.
 
+**PostgreSQL image: Debian instead of Alpine.** Compose now runs
+`postgres:18` instead of `postgres:18-alpine`: on Alpine's C library (musl)
+broad full-text searches ranked about four times slower (2.3 s instead of
+0.6 s on 30 000 documents). The data volume stays; no dump is needed. But
+the database sorts text with the C library's locale (`en_US.utf8`), and
+glibc sorts differently from musl, so the indexes on names (users, tags,
+correspondents, document types, passkeys, API keys) and a few other text
+columns are out of order on the new image: lookups miss rows and unique
+names can be added twice. PostgreSQL does not warn about it. `./pgo
+migrate` rebuilds those indexes (seconds; the search index is not
+affected), and the web server and `process` refuse to start until it has.
+Stop the web server first, so nothing is written in between:
+
+```sh
+docker compose stop web
+./pgo migrate              # starts postgres:18, prints "rebuilt index ..." per index
+docker compose up -d web
+```
+
+If `./pgo migrate` stops with `could not create unique index` (only when
+something wrote to the database on the new image before the rebuild), two
+rows now have the same name. The message names the index and the
+duplicate key: rename or delete one of the two rows with
+`docker compose exec postgres psql -U paperless -d paperless` and run
+`./pgo migrate` again.
+
+Lists sorted by name (tags, correspondents, users) now follow glibc's
+order, which ignores case and accents (`apfel`, `Ärzte`, `Zebra`) instead
+of musl's byte order (`Zebra`, `apfel`, `Ärzte`). A new installation uses
+PostgreSQL's own locale instead (`POSTGRES_INITDB_ARGS` in
+`docker-compose.yml`): code point order, the same as before, and no image
+or C library can change it. To move an existing database to it, recreate
+the database volume from a backup:
+
+```sh
+./pgo backup ./backups
+docker compose stop web
+docker compose rm -sf postgres
+docker volume rm paperless-go_pgdata   # the database; ./backups has it
+docker compose up -d --wait postgres   # a new, empty database with the new locale
+docker compose exec -T postgres pg_restore --clean --if-exists -U paperless -d paperless < backups/paperless-YYYYMMDDTHHMMSSZ.dump
+./pgo migrate
+docker compose up -d web
+```
+
+Going back to an older paperless-go version on the Alpine image needs the
+rebuild by hand, as the older version does not do it:
+`docker compose exec -T postgres psql -U paperless -d paperless -c 'REINDEX DATABASE paperless'`.
+With your own PostgreSQL server, the first `./pgo migrate` of this version
+rebuilds the same indexes once, as it does not know which C library built
+them.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build

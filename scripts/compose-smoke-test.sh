@@ -92,6 +92,12 @@ if [ "$(uname -s)" = Linux ]; then
 	fi
 fi
 
+# A new database gets PostgreSQL's builtin locale (docker-compose.yml).
+echo "== database locale"
+docker compose --progress quiet exec -T postgres psql -U paperless -d paperless -Atc \
+	"SELECT datlocprovider, datlocale FROM pg_database WHERE datname = 'paperless'" | tee "$work/out"
+expect "$work/out" '^b\|C\.UTF-8$'
+
 echo "== migrate again"
 ./pgo migrate | tee "$work/out"
 expect "$work/out" "database schema is up to date"
