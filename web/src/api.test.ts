@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, UNAUTHORIZED_EVENT, apiKeyApi, ownsData, passkeyApi, profileApi, retryAfter, sessionApi, unknownPasskey, usersApi, type ManagedUser } from "./api";
+import { ApiError, UNAUTHORIZED_EVENT, apiKeyApi, searchQuery, ownsData, passkeyApi, profileApi, retryAfter, sessionApi, unknownPasskey, usersApi, type ManagedUser } from "./api";
 
 const reply = (status: number, body?: unknown) =>
   vi
@@ -195,5 +195,12 @@ describe("users and profile", () => {
     });
     expect(ownsData(u({}))).toBe(false);
     expect(ownsData(u({ savedViews: 1 }))).toBe(true);
+  });
+});
+
+describe("searchQuery", () => {
+  it("sends the query, the page size, the time zone and the cursor", () => {
+    expect(searchQuery("Rechnung tag:Steuer", 25, "", "Europe/Berlin")).toBe("q=Rechnung+tag%3ASteuer&limit=25&tz=Europe%2FBerlin");
+    expect(searchQuery("a&b", 25, "abc", "")).toBe("q=a%26b&limit=25&cursor=abc");
   });
 });

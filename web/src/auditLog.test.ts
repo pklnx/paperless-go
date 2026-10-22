@@ -42,6 +42,8 @@ describe("entry texts", () => {
     expect(entryDetail(entry("api_key.revoke", { user: "root", details: { owner: "alice", reason: "admin" } }), en)).toBe("“alice”, admin");
     expect(entryDetail(entry("api_key.revoke", { actor: "cli", user: undefined, details: { apiKeysRevoked: 2, reason: "cli" } }), en)).toBe("2 API keys, command line");
     expect(entryDetail(entry("auth.login_failed", { details: { method: "api_key", reason: "revoked" } }), en)).toBe("API key, revoked");
+    expect(entryDetail(entry("document.search", { details: { q: "Rechnung tag:Steuer" } }), en)).toBe("“Rechnung tag:Steuer”");
+    expect(entryDetail(entry("document.search", { details: { tag: ["x"] } }), en)).toBe("");
   });
 
   it("shows a login's method, reason and tried name, translated", () => {

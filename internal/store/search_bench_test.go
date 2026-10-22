@@ -160,6 +160,11 @@ func TestSearchBench(t *testing.T) {
 	measure("broad (50 %), sort=date", 20, search1(query("Rechnung", search.SortDate)))
 	measure("broad (50 %), relevance", 10, search1(query("Rechnung", "")))
 	measure("broad AND selective, relevance", 20, search1(query("Rechnung Zahlungserinnerung", "")))
+	// Only negated items (#54): every hit ranks 0, so the default is
+	// newest added; relevance on request.
+	measure("negation only -rechnung (50 %), default sort", 20, search1(query("-Rechnung", "")))
+	measure("negation only -zahlungserinnerung (99 %), default sort", 20, search1(query("-Zahlungserinnerung", "")))
+	measure("negation only -zahlungserinnerung, sort=relevance", 10, search1(query("-Zahlungserinnerung", search.SortRelevance)))
 	measure("tag:Steuer (10 %), sort=added", 20, search1(query("tag:Steuer", "")))
 	measure("plain list, first page", 40, search1(search.Query{Limit: 25}))
 

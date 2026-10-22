@@ -1,11 +1,15 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { documentsApi, type DocumentSummary } from "./api";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { ApiError, documentsApi, type DocumentSummary } from "./api";
 import { lang, t } from "./i18n";
-import { button, primary } from "./styles";
+import { snippetParts } from "./snippet";
+import { button, input, primary } from "./styles";
 import { displayName, formatSize, stateText, type UploadItem, type UploadQueue } from "./uploads";
 
 /** How many documents the start page lists; the document list (#7) shows all. */
 const recentCount = 10;
+
+/** How many search results a page holds. */
+export const searchPageSize = 25;
 
 function useQueue(queue: UploadQueue): UploadItem[] {
   return useSyncExternalStore(
@@ -100,30 +104,165 @@ export function DocumentsHome({ queue }: { queue: UploadQueue }) {
   return (
     <div className="flex flex-col gap-6">
       <UploadPanel queue={queue} items={items} limit={limit} />
-      <section className="flex flex-col gap-2">
-        <h2 className="font-semibold">{t.recentTitle}</h2>
-        {error && (
-          <p role="alert" className="text-sm text-danger">
-            {error}
-          </p>
-        )}
-        {!docs && !error && <p className="text-sm text-ink-muted">{t.loading}</p>}
-        {docs && docs.length === 0 && <p className="text-sm text-ink-muted">{t.recentEmpty}</p>}
-        {docs && docs.length > 0 && (
-          <ul aria-label={t.recentTitle} className="flex flex-col divide-y divide-line rounded-lg border border-line">
-            {docs.map((d) => (
-              <li key={d.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-3 py-2">
-                <span className="min-w-0 basis-full wrap-anywhere sm:basis-0 sm:flex-1">{displayName(d.title) || t.untitled}</span>
-                <span className="text-sm text-ink-muted">{new Date(d.createdAt).toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" })}</span>
-                <a className="text-sm text-accent-ink hover:underline" href={documentsApi.fileURL(d.id)} download>
-                  {t.download}
-                </a>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      <DocumentSearch>
+        <RecentDocuments docs={docs} error={error} />
+      </DocumentSearch>
     </div>
+  );
+}
+
+function RecentDocuments({ docs, error }: { docs: DocumentSummary[] | null; error: string }) {
+  return (
+    <section className="flex flex-col gap-2">
+      <h2 className="font-semibold">{t.recentTitle}</h2>
+      {error && (
+        <p role="alert" className="text-sm text-danger">
+          {error}
+        </p>
+      )}
+      {!docs && !error && <p className="text-sm text-ink-muted">{t.loading}</p>}
+      {docs && docs.length === 0 && <p className="text-sm text-ink-muted">{t.recentEmpty}</p>}
+      {docs && docs.length > 0 && <DocumentList label={t.recentTitle} docs={docs} />}
+    </section>
+  );
+}
+
+function DocumentList({ label, docs }: { label: string; docs: DocumentSummary[] }) {
+  return (
+    <ul aria-label={label} className="flex flex-col divide-y divide-line rounded-lg border border-line">
+      {docs.map((d) => (
+        <li key={d.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-3 py-2">
+          <span className="min-w-0 basis-full wrap-anywhere sm:basis-0 sm:flex-1">{displayName(d.title) || t.untitled}</span>
+          <span className="text-sm text-ink-muted">{new Date(d.createdAt).toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" })}</span>
+          <a className="text-sm text-accent-ink hover:underline" href={documentsApi.fileURL(d.id)} download>
+            {t.download}
+          </a>
+          {d.snippet && <Snippet text={d.snippet} />}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** A search snippet: its matches as <mark>, everything else as text. */
+export function Snippet({ text }: { text: string }) {
+  const parts = snippetParts(text);
+  if (parts.length === 0) return null;
+  return (
+    <p className="basis-full text-sm wrap-anywhere text-ink-muted">
+      {parts.map((p, i) =>
+        p.mark ? (
+          <mark key={i} className="rounded-sm bg-highlight px-0.5 text-ink">
+            {p.text}
+          </mark>
+        ) : (
+          <span key={i}>{p.text}</span>
+        ),
+      )}
+    </p>
+  );
+}
+
+const searchError = (err: unknown) =>
+  err instanceof ApiError && err.status === 400 && err.message === "query too long" ? t.searchTooLong : t.failed(err instanceof Error ? err.message : String(err));
+
+interface SearchState {
+  q: string;
+  docs: DocumentSummary[] | null;
+  cursor: string;
+  loading: boolean;
+  error: string;
+}
+
+/**
+ * The search field of the start page. It searches on Enter (each search is
+ * a document.search entry in the log, so not on every key) and shows the
+ * results with snippets and "Load more" in place of children; an empty
+ * field shows children again.
+ */
+function DocumentSearch({ children }: { children: ReactNode }) {
+  const [text, setText] = useState("");
+  const [search, setSearch] = useState<SearchState | null>(null);
+  const ctl = useRef<AbortController | null>(null);
+  useEffect(() => () => ctl.current?.abort(), []);
+
+  const load = (q: string, cursor: string) => {
+    ctl.current?.abort();
+    const c = new AbortController();
+    ctl.current = c;
+    setSearch((s) => (cursor && s ? { ...s, loading: true, error: "" } : { q, docs: null, cursor: "", loading: true, error: "" }));
+    documentsApi.search(q, searchPageSize, cursor, c.signal).then(
+      (page) => {
+        if (c.signal.aborted) return;
+        setSearch((s) => ({
+          q,
+          docs: cursor && s?.docs ? [...s.docs, ...page.documents] : page.documents,
+          cursor: page.nextCursor ?? "",
+          loading: false,
+          error: "",
+        }));
+      },
+      (err: unknown) => {
+        if (c.signal.aborted) return;
+        setSearch((s) => ({ q, docs: cursor ? (s?.docs ?? null) : null, cursor: cursor ? (s?.cursor ?? "") : "", loading: false, error: searchError(err) }));
+      },
+    );
+  };
+
+  const clear = () => {
+    ctl.current?.abort();
+    setSearch(null);
+  };
+
+  return (
+    <>
+      <form
+        role="search"
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (text.trim()) load(text, "");
+          else clear();
+        }}
+      >
+        <input
+          className={input}
+          type="search"
+          aria-label={t.searchLabel}
+          placeholder={t.searchPlaceholder}
+          maxLength={1000}
+          enterKeyHint="search"
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            if (e.target.value === "") clear();
+          }}
+        />
+        <button type="submit" className={button}>
+          {t.searchButton}
+        </button>
+      </form>
+      {search ? (
+        <section className="flex flex-col gap-2">
+          <h2 className="font-semibold">{t.searchResults}</h2>
+          {search.error && (
+            <p role="alert" className="text-sm text-danger">
+              {search.error}
+            </p>
+          )}
+          {search.loading && !search.docs && <p className="text-sm text-ink-muted">{t.loading}</p>}
+          {search.docs && search.docs.length === 0 && <p className="text-sm text-ink-muted">{t.searchEmpty}</p>}
+          {search.docs && search.docs.length > 0 && <DocumentList label={t.searchResults} docs={search.docs} />}
+          {search.cursor && (
+            <button type="button" className={`${button} self-start`} disabled={search.loading} onClick={() => load(search.q, search.cursor)}>
+              {t.searchMore}
+            </button>
+          )}
+        </section>
+      ) : (
+        children
+      )}
+    </>
   );
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"os"
 	"regexp"
@@ -614,11 +615,52 @@ func TestSearchDocumentsPaging(t *testing.T) {
 		{search.SortAdded, false, base64.RawURLEncoding.EncodeToString([]byte(`{"s":"added","i":"00000000-0000-0000-0000-000000000000"}`))},
 		{search.SortRelevance, false, base64.RawURLEncoding.EncodeToString([]byte(`{"s":"relevance","i":"00000000-0000-0000-0000-000000000000","t":1}`))},
 		{search.SortAdded, false, base64.RawURLEncoding.EncodeToString([]byte(`[]`))},
+		// Times PostgreSQL cannot hold, and math.MinInt64, which pgx's
+		// conversion would wrap around.
+		{search.SortAdded, false, rawCursor(`{"s":"added","i":"00000000-0000-0000-0000-000000000000","t":-210866803200000001}`)},
+		{search.SortDate, false, rawCursor(`{"s":"date","i":"00000000-0000-0000-0000-000000000000","t":-1152921504606846976}`)},
+		{search.SortAdded, true, rawCursor(`{"s":"added","a":true,"i":"00000000-0000-0000-0000-000000000000","t":-9223372036854775808}`)},
+		{search.SortAdded, false, rawCursor(`{"s":"added","i":"00000000-0000-0000-0000-000000000000","t":9223372036854775808}`)},
+		// A rank that is not a finite number: NaN and +Inf.
+		{search.SortRelevance, false, rawCursor(`{"s":"relevance","i":"00000000-0000-0000-0000-000000000000","r":2143289344}`)},
+		{search.SortRelevance, false, rawCursor(`{"s":"relevance","i":"00000000-0000-0000-0000-000000000000","r":2139095040}`)},
 	} {
 		q := parseQuery(t, "Rechnung", nil)
 		q.Sort, q.Ascending, q.Cursor = c.sort, c.asc, c.cursor
 		if _, err := st.SearchDocuments(ctx, alice, q); !errors.Is(err, store.ErrInvalidCursor) {
 			t.Errorf("cursor %q with sort %s asc=%v: %v", c.cursor, c.sort, c.asc, err)
+		}
+	}
+	// The ends of PostgreSQL's range are valid cursors: newest first from
+	// the latest time finds everything, oldest first from the earliest too.
+	for _, c := range []struct {
+		sort  search.Sort
+		asc   bool
+		at    int64
+		total int
+	}{
+		{search.SortAdded, false, math.MaxInt64, 1},
+		{search.SortDate, false, math.MaxInt64, 1},
+		{search.SortAdded, true, -210866803200000000, 1},
+		{search.SortDate, true, -210866803200000000, 1},
+	} {
+		q := parseQuery(t, "Rechnung", nil)
+		q.Sort, q.Ascending, q.Limit = c.sort, c.asc, 1
+		q.Cursor = rawCursor(fmt.Sprintf(`{"s":%q,"a":%v,"i":"00000000-0000-0000-0000-000000000000","t":%d}`, c.sort, c.asc, c.at))
+		page, err := st.SearchDocuments(ctx, alice, q)
+		if err != nil || len(page.Hits) != c.total {
+			t.Errorf("cursor at %d, sort %s asc=%v: %v, %v", c.at, c.sort, c.asc, page, err)
+		}
+	}
+	// A query built by hand is held to the parser's limits.
+	tooMany := search.Query{}
+	for range search.MaxItems + 1 {
+		tooMany.Text = append(tooMany.Text, search.Text{Value: "Rechnung"})
+	}
+	tooLong := search.Query{Text: []search.Text{{Value: strings.Repeat("x", search.MaxBytes+1)}}}
+	for _, bad := range []search.Query{tooMany, tooLong} {
+		if _, err := st.SearchDocuments(ctx, alice, bad); !errors.Is(err, search.ErrTooLong) {
+			t.Errorf("query over the limits: %v", err)
 		}
 	}
 	for _, bad := range []search.Query{{Sort: search.SortRelevance, Ascending: true}, {Sort: "title"}} {
@@ -649,6 +691,22 @@ func TestSearchDocumentsRelevance(t *testing.T) {
 	q.Ascending = true
 	if got := hitTitles(runSearch(t, st, alice, q)); !slices.Equal(got, []string{"Brief", "Rechnung März"}) {
 		t.Fatalf("ascending: %v", got)
+	}
+	// Only negated words rank nothing: newest added first, and the cursor
+	// is one of that sort.
+	q = parseQuery(t, "-Notiz", nil)
+	q.Limit = 1
+	page := runSearch(t, st, alice, q)
+	if got := hitTitles(page); !slices.Equal(got, []string{"Rechnung März"}) || page.NextCursor == "" {
+		t.Fatalf("negation only: %v, cursor %q", got, page.NextCursor)
+	}
+	q.Sort, q.Cursor = search.SortAdded, page.NextCursor
+	if got := hitTitles(runSearch(t, st, alice, q)); !slices.Equal(got, []string{"Brief"}) {
+		t.Fatalf("negation only, next page: %v", got)
+	}
+	q.Sort = search.SortRelevance
+	if _, err := st.SearchDocuments(context.Background(), alice, q); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("negation-only cursor with relevance: %v", err)
 	}
 }
 
@@ -912,5 +970,67 @@ func TestSetDocumentTagsDeadlockIsRetry(t *testing.T) {
 	}
 	if err := <-done; !errors.Is(err, store.ErrRetry) {
 		t.Fatalf("SetDocumentTags: %v, want ErrRetry", err)
+	}
+}
+
+// rawCursor encodes a cursor's JSON as the store does.
+func rawCursor(js string) string { return base64.RawURLEncoding.EncodeToString([]byte(js)) }
+
+// Name resolution stays in the scope on its own (#64 review): a name or a
+// tag ID of another user resolves to nothing, not only because the search
+// query checks the owner again.
+func TestSearchFilterIDsOwner(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	bob := store.Scope{UserID: storetest.User(t, st, "bob", false).ID}
+	admin := store.Scope{UserID: storetest.User(t, st, "root", true).ID, All: true}
+	type ids struct{ tag, child, corr, typ string }
+	newMeta := func(sc store.Scope) ids {
+		tag, err := st.CreateTag(ctx, sc, store.TagInput{Name: "Steuer"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		child, err := st.CreateTag(ctx, sc, store.TagInput{Name: "Kfz", ParentID: &tag.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		corr, err := st.CreateCorrespondent(ctx, sc, store.CorrespondentInput{Name: "Telekom"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		typ, err := st.CreateDocumentType(ctx, sc, store.DocumentTypeInput{Name: "Rechnung"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ids{tag.ID, child.ID, corr.ID, typ.ID}
+	}
+	a, b := newMeta(alice), newMeta(bob)
+	sorted := func(s ...string) []string { slices.Sort(s); return s }
+
+	q := parseQuery(t, "tag:steuer -tag:Kfz correspondent:TELEKOM type:Rechnung", nil)
+	tags, notTags, corr, types, none, err := store.SearchFilterIDs(ctx, st, alice, q)
+	if err != nil || none {
+		t.Fatalf("alice: none=%v, %v", none, err)
+	}
+	if !slices.Equal(sorted(tags...), sorted(a.tag, a.child)) || !slices.Equal(notTags, []string{a.child}) ||
+		!slices.Equal(corr, []string{a.corr}) || !slices.Equal(types, []string{a.typ}) {
+		t.Errorf("alice resolves tags %v, not %v, correspondents %v, types %v; want only her own %+v (bob: %+v)", tags, notTags, corr, types, a, b)
+	}
+
+	// Bob's tag by ID: nothing of alice's matches it.
+	byID := search.Query{TagIDs: []string{b.tag}}
+	if _, _, _, _, none, err := store.SearchFilterIDs(ctx, st, alice, byID); err != nil || !none {
+		t.Errorf("bob's tag ID for alice: none=%v, %v", none, err)
+	}
+
+	// An admin's names resolve in every owner's metadata.
+	tags, _, corr, types, none, err = store.SearchFilterIDs(ctx, st, admin, q)
+	if err != nil || none {
+		t.Fatalf("admin: none=%v, %v", none, err)
+	}
+	if !slices.Equal(sorted(tags...), sorted(a.tag, a.child, b.tag, b.child)) || !slices.Equal(sorted(corr...), sorted(a.corr, b.corr)) ||
+		!slices.Equal(sorted(types...), sorted(a.typ, b.typ)) {
+		t.Errorf("admin resolves tags %v, correspondents %v, types %v", tags, corr, types)
 	}
 }

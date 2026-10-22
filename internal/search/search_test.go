@@ -177,6 +177,35 @@ func TestParseLimits(t *testing.T) {
 	}
 }
 
+// CheckLimits holds a query built by hand to Parse's limits.
+func TestCheckLimits(t *testing.T) {
+	words := func(n int) []Text {
+		out := make([]Text, n)
+		for i := range out {
+			out[i] = Text{Value: "a", Group: i}
+		}
+		return out
+	}
+	inbox := Filter{Field: FieldIs, Values: []string{IsInbox}}
+	for _, c := range []struct {
+		name string
+		q    Query
+		ok   bool
+	}{
+		{"empty", Query{}, true},
+		{"MaxItems words", Query{Text: words(MaxItems)}, true},
+		{"one item more", Query{Text: words(MaxItems), Filters: []Filter{inbox}}, false},
+		{"a filter's values count", Query{Text: words(MaxItems - 1), Filters: []Filter{{Field: FieldTag, Values: []string{"x", "y"}}}}, false},
+		{"MaxBytes", Query{Text: []Text{{Value: strings.Repeat("a", MaxBytes-1)}}, Filters: []Filter{{Field: FieldTag, Values: []string{"x"}}}}, true},
+		{"one byte more", Query{Text: []Text{{Value: strings.Repeat("a", MaxBytes)}}, Filters: []Filter{{Field: FieldTag, Values: []string{"x"}}}}, false},
+	} {
+		err := c.q.CheckLimits()
+		if c.ok != (err == nil) || err != nil && !errors.Is(err, ErrTooLong) {
+			t.Errorf("%s: %v", c.name, err)
+		}
+	}
+}
+
 // Day boundaries are those of the given time zone, also on a day with a
 // DST change; nil is UTC.
 func TestDateRangeTimeZones(t *testing.T) {
@@ -257,6 +286,9 @@ func FuzzParse(f *testing.F) {
 		}
 		if len(s) > MaxBytes || q.items() > MaxItems {
 			t.Fatalf("over the limits: %d bytes, %d items", len(s), q.items())
+		}
+		if err := q.CheckLimits(); err != nil {
+			t.Fatalf("a parsed query fails CheckLimits: %v", err)
 		}
 		for i, x := range q.Text {
 			if x.Value == "" || !utf8.ValidString(x.Value) {

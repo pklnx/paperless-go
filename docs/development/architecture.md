@@ -270,8 +270,13 @@ documents) has the numbers. Paging is by keyset over `(key, id)`: newest first
 breaks ties by ascending ID, matching `documents_owner_created_idx` and
 `documents_owner_date_idx`; oldest first walks them backwards. The cursor
 is base64url JSON with the sort, the direction, the key (Unix microseconds,
-or the exact bits of the `real` rank) and the ID; one from another sort is
-`ErrInvalidCursor`.
+or the exact bits of the `real` rank) and the ID; one from another sort, a
+time before PostgreSQL's earliest `timestamptz` (4714 BC; near
+`math.MinInt64` pgx's conversion would also wrap around) or a rank that is
+not finite is `ErrInvalidCursor`. `SearchDocuments` also refuses a query
+over the parser's limits with `search.ErrTooLong` (`Query.CheckLimits`),
+so a query built without `search.Parse`, such as a saved view's, is held
+to them too.
 
 Snippets: `ts_headline` over the first 100 000 characters of the text,
 with the private-use characters U+E000 and U+E001 around matches, two
@@ -586,10 +591,40 @@ another user's document answers `404` and an admin sees all.
   (`existing` left out if the lookup failed), `413` `too_large`, `415`
   `unsupported`, `422` `unreadable` or `too_many_pixels` (with `reason`),
   `400` for a body that broke off, `503` without the audit log.
-- **`GET /api/documents?limit=N`** lists the scope's newest documents
-  (default and maximum 100; the start page asks for 10), without their
-  text (`RecentDocuments` does not even read it), with `maxUploadSize` for
-  the UI. Paging and filters come with #7.
+- **`GET /api/documents`** lists and searches the scope's documents
+  through `store.SearchDocuments`, without their text, with
+  `maxUploadSize` for the UI. Parameters (`listQuery`):
+
+  | Parameter | Values |
+  |---|---|
+  | `q` | The [search syntax](../guide/search.md), parsed by `search.Parse` in the zone of `tz`. |
+  | `tag`, `correspondent`, `type` | UUIDs, repeatable (at most 100 each), any of them; joined with `q` by AND. |
+  | `inbox` | `true` or `false`: an `is:inbox` filter. |
+  | `sort` | `relevance` (the default with free text that is not only negated), `added` (the default otherwise: with only negated words every match ranks 0, and ranking them all took 4–5 s on 100 000 documents) or `date`. |
+  | `order` | `desc` (default) or `asc`; relevance has no ascending order. |
+  | `tz` | An IANA zone (`time.LoadLocation`, zones built in through `time/tzdata`) for the days of `date:` and `added:`; default UTC. `Local` is refused. |
+  | `limit` | 1 to 100, default 100 (the start page asks for 10, the search for 25); more is capped. |
+  | `cursor` | `nextCursor` of the previous page, with the same other parameters. |
+
+  The answer adds `nextCursor` (left out on the last page). With free-text
+  items each document has `snippet`, plain text with U+E000 and U+E001
+  around the matches. Without parameters the answer is the list as before.
+  Invalid input answers `400` with fixed wording: `invalid query`, `query
+  too long` (over `search.MaxBytes` or `search.MaxItems`, also with the
+  `inbox` filter added; the store checks a hand-built query the same way,
+  `Query.CheckLimits`), `invalid cursor` (malformed, from another sort or
+  order, or a time outside PostgreSQL's range), `invalid sort`, `invalid
+  order`, `invalid time zone`, `invalid tag id` (likewise for
+  `correspondent` and `type`), `too many tag ids`, `inbox must be true or
+  false`, `limit must be a positive number`. `failStore` maps the store's
+  `ErrInvalidCursor` and `ErrInvalidSort` to `400` and `ErrRetry` to `503`
+  with `Retry-After: 1`; any other error is a logged `500` with `internal
+  error`, so no database message reaches the client.
+  The first page of a search (text, a filter or an ID parameter, no
+  cursor) writes `document.search` after the search ran, with `q` as
+  typed and the `tag`, `correspondent`, `type` and `inbox` parameters; if
+  the entry cannot be written the answer is `503` and no result. Further
+  pages, plain lists and refused searches write nothing.
 - **`GET /api/documents/{id}`** returns one document with its text.
 - **`GET /api/documents/{id}/file?kind=original|archive`** sends the file
   from the blob store (`OpenHash`) with `Content-Disposition: attachment`
@@ -743,7 +778,9 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   `owner`, or for all of a user's keys the user and `apiKeysRevoked`;
   `reason` `user`, `admin` or `cli`), `audit.export` (CLI,
   written before the export starts), `document.create` (upload, with
-  `via: upload`; the target is the new document).
+  `via: upload`; the target is the new document), `document.search` (the
+  first page of a search, with `q` and the filter parameters; see
+  [Documents API](#documents-api)).
   A two-factor login records `method: 2fa` and its `factor` (`totp`,
   `recovery_code` with `recoveryCodesLeft`); a wrong code gives
   `auth.login_failed` with `reason: second_factor`. Requests refused
