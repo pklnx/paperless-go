@@ -49,12 +49,13 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
     };
   }, []);
 
-  // The sidebar's counts and names, again after each import and after
-  // each change of documents or names.
-  const [changes, setChanges] = useState(0);
-  const changed = useCallback(() => setChanges((n) => n + 1), []);
+  // The sidebar's counts and names, again after each import.
   const [counts, setCounts] = useState<DocumentCounts | null>(null);
   const [metadata, setMetadata] = useState<Loaded<Metadata>>({ data: null, error: "" });
+  // Changes after each edit in a document's detail, each bulk change and
+  // each change on the metadata page: counts and names again.
+  const [edits, setEdits] = useState(0);
+  const onChanged = useCallback(() => setEdits((n) => n + 1), []);
   useEffect(() => {
     const ctl = new AbortController();
     documentsApi.counts(ownOnly, ctl.signal).then(setCounts, () => {
@@ -68,7 +69,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
       },
     );
     return () => ctl.abort();
-  }, [ownOnly, imported, changes]);
+  }, [ownOnly, imported, edits]);
   const collapsed = useCollapsedTags(user.name, metadata.data?.tags ?? null);
 
   // "All documents" lists everything: no filter, no search. Another entry
@@ -134,10 +135,10 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
           {view === "" && (
             <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6">
               <DocumentsUpload queue={queue} maxSize={maxSize} />
-              <DocumentList state={state} update={update} query={query} user={user} metadata={metadata.data} everyone={everyone} reload={imported} onMaxUploadSize={onMaxUploadSize} onChanged={changed} />
+              <DocumentList state={state} update={update} query={query} user={user} metadata={metadata.data} everyone={everyone} reload={imported} onMaxUploadSize={onMaxUploadSize} onChanged={onChanged} />
             </div>
           )}
-          {view === "metadata" && <MetadataPage metadata={metadata} onChanged={changed} open={select} />}
+          {view === "metadata" && <MetadataPage metadata={metadata} onChanged={onChanged} open={select} />}
           {view === "profile" && <ProfilePage user={user} />}
           {view === "log" && <LogPage admin={user.admin} />}
           {view === "users" && <UsersPage />}

@@ -226,6 +226,40 @@ describe("selection", () => {
   });
 });
 
+describe("selection next to the detail link", () => {
+  it("checks a row by its checkbox without opening the document", async () => {
+    server.documents = five;
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 2") }));
+    fireEvent.click(box("Doc 4"), { shiftKey: true });
+    expect(window.location.search).toBe("");
+    expect(bar().getByText(t.selectedCount(3))).toBeTruthy();
+  });
+
+  it("selects with a long press on the title link, and the click that ends it does not open the document", async () => {
+    const fire: (() => void)[] = [];
+    vi.spyOn(longPressTimer, "set").mockImplementation((fn) => fire.push(fn));
+    server.documents = five;
+    await start();
+    const link = await screen.findByRole("link", { name: "Doc 2" });
+    fireEvent.pointerDown(link, { pointerType: "touch", clientX: 5, clientY: 5 });
+    expect(fire).toHaveLength(1);
+    act(() => fire[0]!());
+    fireEvent.pointerUp(link, { pointerType: "touch" });
+    fireEvent.click(link);
+    expect(window.location.search).toBe("");
+    expect(box("Doc 2").checked).toBe(true);
+    // A plain tap opens it as before.
+    fireEvent.pointerDown(link, { pointerType: "touch", clientX: 5, clientY: 5 });
+    fireEvent.pointerUp(link, { pointerType: "touch" });
+    fireEvent.click(link);
+    expect(window.location.search).toBe("?doc=2");
+    // The open document covers the list: the selection and its bar stay, but cannot be used.
+    expect(box("Doc 2").checked).toBe(true);
+    expect(byLabel<HTMLElement>("[role=region]", t.bulkActions).closest("[inert]")).not.toBeNull();
+  });
+});
+
 describe("errors", () => {
   it("explains several owners and keeps the selection", async () => {
     server.user = { name: "root", admin: true };

@@ -87,8 +87,10 @@ export function useLongPress(onLongPress: () => void) {
     onPointerDown: (e: React.PointerEvent) => {
       fired.current = false;
       if (e.pointerType !== "touch") return;
-      // Not on the row's own controls: links, buttons, the checkbox.
-      if ((e.target as HTMLElement).closest("a, button, input, label")) return;
+      // Not on the row's own controls (buttons, the checkbox, the download
+      // link). The title link is most of a row on a phone, so it may start
+      // one; the click that ends a long press does not open it then.
+      if ((e.target as HTMLElement).closest("a:not([data-doc-link]), button, input, label")) return;
       cancel();
       start.current = { x: e.clientX, y: e.clientY };
       timer.current = longPressTimer.set(() => {

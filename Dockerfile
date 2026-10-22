@@ -9,7 +9,8 @@ WORKDIR /src/web
 # Node 25+ no longer bundles corepack. It installs pnpm in the exact version
 # and hash from package.json ("packageManager").
 RUN npm install -g corepack@0.36.0 && corepack enable
-COPY web/package.json web/pnpm-lock.yaml ./
+# pnpm-workspace.yaml holds the overrides the lockfile was made with.
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY web/ ./
 RUN pnpm build

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError, bulkApi, bulkMatch, documentsApi, processingPending, type DocumentPage, type DocumentQuery, type DocumentSummary, type Metadata, type User } from "./api";
 import { BulkBar, bulkErrorText, type BulkTarget } from "./BulkBar";
+import { DocumentDetail } from "./DocumentDetail";
+import { documentName, ProcessingStatus } from "./DocumentParts";
 import { EmptyState } from "./EmptyState";
 import { ArrowIcon, CloseIcon, DocumentIcon, InboxIcon, SearchIcon, StarIcon } from "./icons";
 import { lang, t } from "./i18n";
@@ -8,8 +10,7 @@ import { clickSelect, maxSelection, pruneSelection, selectAll, useLongPress } fr
 import { snippetParts } from "./snippet";
 import { button, input } from "./styles";
 import { chipInk } from "./tagTree";
-import { displayName } from "./uploads";
-import { activeFilter, filterPatch, type UpdateState, type ViewState } from "./urlState";
+import { activeFilter, filterPatch, formatState, type UpdateState, type ViewState } from "./urlState";
 
 /** How many documents a page of the list holds. */
 export const pageSize = 50;
@@ -26,8 +27,6 @@ export const pollTimer = {
 const errorText = (err: unknown) =>
   err instanceof ApiError && err.status === 400 && err.message === "query too long" ? t.searchTooLong : t.failed(err instanceof Error ? err.message : String(err));
 
-/** The title a document shows: its title, else its file name, else "Untitled". Bidi controls are dropped. */
-export const documentName = (d: DocumentSummary) => displayName(d.title) || displayName(d.originalFileName) || t.untitled;
 
 interface ListState {
   /** The request these documents answer (JSON of the DocumentQuery). */
@@ -54,7 +53,7 @@ interface Props {
   reload: number;
   /** The upload limit from the server's answer. */
   onMaxUploadSize: (bytes: number) => void;
-  /** After a bulk change: the sidebar's counts and names load again. */
+  /** A document was changed in its detail, or several by a bulk change: counts and names may differ now. */
   onChanged?: () => void;
 }
 
@@ -154,6 +153,14 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   };
 
   const replaceDoc = (d: DocumentSummary) => setList((l) => l.docs ? { ...l, docs: l.docs.map((x) => (x.id === d.id ? { ...d, snippet: x.snippet } : x)) } : l);
+  // A saved document: its row follows. The inbox list drops a document
+  // that left the inbox, as its next load would.
+  const savedDoc = (d: DocumentSummary) => {
+    if (query.inbox && !d.isInbox) setList((l) => (l.docs ? { ...l, docs: l.docs.filter((x) => x.id !== d.id), first: new Set([...l.first].filter((x) => x !== d.id)) } : l));
+    else replaceDoc(d);
+    onChanged?.();
+  };
+  const openDoc = (id: string) => update({ doc: id });
 
   // After a bulk change: every loaded page again, in place, so the
   // rows and the selection stay where they were. Only the first page of
@@ -272,8 +279,13 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   const title = query.q ? t.searchResults : filter ? listName : t.allDocuments;
   const docs = list.key === key ? list.docs : null;
 
+  const detail = state.doc !== "" && state.view === "";
   return (
-    <section className="flex flex-col gap-3" aria-labelledby="list-title">
+    <>
+    {detail && (
+      <DocumentDetail id={state.doc} user={user} docs={docs ?? []} inboxList={query.inbox} open={openDoc} close={() => update({ doc: "" })} onSaved={savedDoc} />
+    )}
+    <section className="flex flex-col gap-3" aria-labelledby="list-title" inert={detail}>
       <SearchField q={state.q} search={(q) => update({ q, doc: "" })} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 id="list-title" className="min-w-0 font-semibold wrap-anywhere">
@@ -321,6 +333,8 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
               metadata={metadata}
               owner={everyone && d.ownerName && d.ownerName !== user.name ? d.ownerName : ""}
               onChange={replaceDoc}
+              href={formatState({ ...state, doc: d.id }) || "?"}
+              onOpen={() => openDoc(d.id)}
               checked={allMatches !== null || selected.has(d.id)}
               selecting={selecting}
               onPick={(shift) => pick(d.id, shift)}
@@ -347,6 +361,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
         />
       )}
     </section>
+    </>
   );
 }
 
@@ -535,13 +550,16 @@ interface RowProps {
   metadata: Metadata | null;
   owner: string;
   onChange: (d: DocumentSummary) => void;
+  /** The detail's URL, so the title is a real link (a new tab works). */
+  href: string;
+  onOpen: () => void;
   checked: boolean;
   /** Something is selected: on phones the checkboxes show (before, a long press starts selecting). */
   selecting: boolean;
   onPick: (shift: boolean) => void;
 }
 
-function DocumentRow({ doc: d, metadata, owner, onChange, checked, selecting, onPick }: RowProps) {
+function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen, checked, selecting, onPick }: RowProps) {
   const name = documentName(d);
   const press = useLongPress(() => {
     if (!checked) onPick(false);
@@ -550,7 +568,7 @@ function DocumentRow({ doc: d, metadata, owner, onChange, checked, selecting, on
   const type = d.documentTypeId ? metadata?.documentTypes.find((c) => c.id === d.documentTypeId)?.name : undefined;
   const tags = (d.tagIds ?? []).flatMap((id) => metadata?.tags.find((x) => x.id === id) ?? []);
   return (
-    <li className={`flex items-start gap-3 rounded-lg border px-3 py-3 select-none md:rounded-none md:border-0 md:py-2 md:select-auto ${checked ? "border-accent bg-accent-soft/40" : "border-line"}`} {...press}>
+    <li className={`flex items-start gap-3 rounded-lg border px-3 py-3 select-none [-webkit-touch-callout:none] md:rounded-none md:border-0 md:py-2 md:select-auto ${checked ? "border-accent bg-accent-soft/40" : "border-line"}`} {...press}>
       <label className={`-m-2 flex shrink-0 items-center justify-center p-2 pointer-coarse:size-11 ${selecting ? "" : "pointer-coarse:hidden"}`}>
         <input
           type="checkbox"
@@ -563,7 +581,18 @@ function DocumentRow({ doc: d, metadata, owner, onChange, checked, selecting, on
       <Thumbnail url={d.thumbnailUrl} />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <span className="min-w-0 basis-full font-medium wrap-anywhere sm:basis-0 sm:flex-1">{name}</span>
+          <a
+            href={href}
+            data-doc-link={d.id}
+            className="min-w-0 basis-full font-medium wrap-anywhere hover:underline sm:basis-0 sm:flex-1 pointer-coarse:min-h-11"
+            onClick={(e) => {
+              if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+              e.preventDefault();
+              onOpen();
+            }}
+          >
+            {name}
+          </a>
           {d.isInbox && (
             <span className="flex items-center gap-1 text-xs text-accent-ink" title={t.inInbox}>
               <InboxIcon />
@@ -611,55 +640,6 @@ function Thumbnail({ url }: { url?: string | null }) {
   const frame = "h-16 w-12 shrink-0 rounded-sm border border-line";
   if (!url) return <div aria-hidden="true" data-testid="no-thumbnail" className={`${frame} border-dashed`} />;
   return <img src={url} alt="" loading="lazy" decoding="async" className={`${frame} bg-paper object-cover object-top`} />;
-}
-
-const badge = "rounded-sm px-1.5 py-0.5 text-xs font-medium";
-
-/**
- * A badge while a document is queued or being processed; when processing
- * failed, the error and a Retry button. Nothing once it is done.
- */
-function ProcessingStatus({ doc, onChange }: { doc: DocumentSummary; onChange: (d: DocumentSummary) => void }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const p = doc.processing;
-  if (!p || p.state === "done") return null;
-  if (p.state === "queued" || p.state === "running") {
-    const text = p.state === "running" ? t.processingRunning : p.error ? t.processingRetrying : t.processingQueued;
-    return (
-      <span role="status" className={`${badge} self-start bg-surface-hover text-ink-muted`} title={p.error}>
-        {text}
-      </span>
-    );
-  }
-  const retry = () => {
-    setBusy(true);
-    setError("");
-    documentsApi.reprocess(doc.id).then(
-      (d) => {
-        setBusy(false);
-        onChange(d);
-      },
-      (err: unknown) => {
-        setBusy(false);
-        setError(t.failed(err instanceof Error ? err.message : String(err)));
-      },
-    );
-  };
-  return (
-    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
-      <span className={`${badge} bg-danger-soft text-danger`}>{t.processingFailed}</span>
-      {p.error && <span className="min-w-0 wrap-anywhere text-danger">{p.error}</span>}
-      <button type="button" className="text-accent-ink hover:underline disabled:opacity-50 pointer-coarse:min-h-11" disabled={busy} aria-label={t.retryDocument(documentName(doc))} onClick={retry}>
-        {t.retry}
-      </button>
-      {error && (
-        <span role="alert" className="text-danger">
-          {error}
-        </span>
-      )}
-    </div>
-  );
 }
 
 /** A search snippet: its matches as <mark>, everything else as text. */

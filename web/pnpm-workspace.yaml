@@ -1,0 +1,2 @@
+overrides:
+  "@napi-rs/canvas": "-"
