@@ -56,6 +56,9 @@ type pdf struct {
 	convertErr error
 	// decoded is what heif-dec writes; nil means a small JPEG.
 	decoded []byte
+	// thumb is what pdftoppm writes; nil means a 362×512 JPEG.
+	thumb    []byte
+	thumbErr error // pdftoppm's error
 }
 
 // poppler answers the tools as the real ones would for p: pdfinfo and
@@ -118,6 +121,15 @@ func poppler(p pdf) func(context.Context, Command) ([]byte, error) {
 				out = jpegOf(100, 50)
 			}
 			return nil, os.WriteFile(filepath.Join(c.Dir, c.Args[len(c.Args)-1]), out, 0o600)
+		case "pdftoppm":
+			if p.thumbErr != nil {
+				return nil, p.thumbErr
+			}
+			out := p.thumb
+			if out == nil {
+				out = jpegOf(362, 512)
+			}
+			return nil, os.WriteFile(filepath.Join(c.Dir, c.Args[len(c.Args)-1]+".jpg"), out, 0o600)
 		}
 		return nil, fmt.Errorf("unexpected tool %s", c.Name)
 	}
@@ -367,5 +379,52 @@ func TestPipelineTextTooLong(t *testing.T) {
 		} else if err != nil || len(res.Text) != size {
 			t.Fatalf("%d bytes of text: %d, %v", size, len(res.Text), err)
 		}
+	}
+}
+
+// runThumbnail runs Thumbnail with the fake tools on a PDF in a fresh work
+// directory.
+func runThumbnail(t *testing.T, p pdf) (string, *fakeRunner, string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	in := filepath.Join(dir, "archive.pdf")
+	if err := os.WriteFile(in, []byte("%PDF-1.4"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeRunner{handle: poppler(p)}
+	path, err := (&Pipeline{Runner: f}).Thumbnail(context.Background(), dir, in)
+	return path, f, dir, err
+}
+
+func TestThumbnail(t *testing.T) {
+	path, f, dir, err := runThumbnail(t, pdf{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != filepath.Join(dir, "thumbnail.jpg") {
+		t.Fatalf("path %s", path)
+	}
+	c := call(t, f, "pdftoppm")
+	want := []string{"-f", "1", "-l", "1", "-singlefile", "-scale-to", "512", "-jpeg", "-jpegopt", "quality=80", "archive.pdf", "thumbnail"}
+	if !slices.Equal(c.Args, want) || c.Dir != dir {
+		t.Fatalf("pdftoppm %q in %s, want %q", c.Args, c.Dir, want)
+	}
+}
+
+func TestThumbnailRefused(t *testing.T) {
+	for name, p := range map[string]pdf{
+		"tool error": {thumbErr: &ToolError{Tool: "pdftoppm", ExitCode: 1}},
+		"not a JPEG": {thumb: []byte("%PDF-1.4 not an image")},
+		"too wide":   {thumb: jpegOf(ThumbnailSize+1, 10)},
+		"too tall":   {thumb: jpegOf(10, ThumbnailSize+1)},
+		"too large":  {thumb: append(jpegOf(10, 10), make([]byte, MaxThumbnailBytes)...)},
+	} {
+		if path, _, _, err := runThumbnail(t, p); err == nil || path != "" {
+			t.Errorf("%s: %q, %v", name, path, err)
+		}
+	}
+	// At the limits it is fine.
+	if _, _, _, err := runThumbnail(t, pdf{thumb: jpegOf(ThumbnailSize, ThumbnailSize)}); err != nil {
+		t.Fatalf("512×512: %v", err)
 	}
 }

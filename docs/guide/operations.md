@@ -105,6 +105,14 @@ processes them after `docker compose up -d web`. A PDF that opens without
 a password is OCRed unless its permissions forbid changes; the archive PDF
 is then not encrypted (the original stays as it is).
 
+**Thumbnails, status and Retry (#5).** Processing now also renders a
+thumbnail of the first page, and the start page shows it next to each
+document, with a badge while a document is queued or processed and the
+error and a Retry button when processing failed. Documents processed by an
+earlier version have no thumbnail (an empty frame) until they are processed
+again; `./pgo reprocess --all` does that for all of them, with the cost of
+running OCR again on every scan.
+
 **Full-text search index (#6).** The migration indexes every document's
 text once: plan on a few minutes per 100 000 documents (about 4–5 for
 documents of about 5 000 characters; it depends on the machine), during which the documents table is locked (the web server does not

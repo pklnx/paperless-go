@@ -348,6 +348,46 @@ func (q *Queries) JobCounts(ctx context.Context, now time.Time) (JobCountsRow, e
 	return i, err
 }
 
+const latestDocumentJobs = `-- name: LatestDocumentJobs :many
+SELECT DISTINCT ON (document_id) id, document_id, kind, state, attempts, max_attempts, run_after, lease_token, locked_until, last_error, created_at, finished_at FROM jobs
+WHERE document_id = ANY($1::uuid[]) AND kind = 'process'
+ORDER BY document_id, id DESC
+`
+
+// The newest process job of each of the documents: its processing status.
+func (q *Queries) LatestDocumentJobs(ctx context.Context, documentIds []pgtype.UUID) ([]Job, error) {
+	rows, err := q.db.Query(ctx, latestDocumentJobs, documentIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Job
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.DocumentID,
+			&i.Kind,
+			&i.State,
+			&i.Attempts,
+			&i.MaxAttempts,
+			&i.RunAfter,
+			&i.LeaseToken,
+			&i.LockedUntil,
+			&i.LastError,
+			&i.CreatedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockJobLease = `-- name: LockJobLease :one
 SELECT id FROM jobs
 WHERE id = $1 AND lease_token = $2 AND state = 'running'
@@ -431,33 +471,37 @@ const setDocumentProcessed = `-- name: SetDocumentProcessed :exec
 UPDATE documents
 SET page_count = $1,
     archive_sha256 = $2, archive_size = $3,
-    processing_note = $4,
-    extracted_text = CASE WHEN extracted_text = '' OR text_source = ANY($5::text[])
-                          THEN $6 ELSE extracted_text END,
-    text_source = CASE WHEN extracted_text = '' OR text_source = ANY($5::text[])
-                       THEN $7 ELSE text_source END
-WHERE id = $8
+    thumbnail_sha256 = COALESCE($4::text, thumbnail_sha256),
+    processing_note = $5,
+    extracted_text = CASE WHEN extracted_text = '' OR text_source = ANY($6::text[])
+                          THEN $7 ELSE extracted_text END,
+    text_source = CASE WHEN extracted_text = '' OR text_source = ANY($6::text[])
+                       THEN $8 ELSE text_source END
+WHERE id = $9
 `
 
 type SetDocumentProcessedParams struct {
-	PageCount      int32
-	ArchiveSha256  *string
-	ArchiveSize    *int64
-	ProcessingNote string
-	OwnSources     []string
-	ExtractedText  string
-	TextSource     string
-	ID             pgtype.UUID
+	PageCount       int32
+	ArchiveSha256   *string
+	ArchiveSize     *int64
+	ThumbnailSha256 *string
+	ProcessingNote  string
+	OwnSources      []string
+	ExtractedText   string
+	TextSource      string
+	ID              pgtype.UUID
 }
 
 // Stores a processing result without touching modified_at. The text is
 // replaced only when it is empty or came from processing itself
-// (own_sources): text from an import or an edit stays.
+// (own_sources): text from an import or an edit stays. A NULL thumbnail
+// keeps the stored one.
 func (q *Queries) SetDocumentProcessed(ctx context.Context, arg SetDocumentProcessedParams) error {
 	_, err := q.db.Exec(ctx, setDocumentProcessed,
 		arg.PageCount,
 		arg.ArchiveSha256,
 		arg.ArchiveSize,
+		arg.ThumbnailSha256,
 		arg.ProcessingNote,
 		arg.OwnSources,
 		arg.ExtractedText,

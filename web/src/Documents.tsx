@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { ApiError, documentsApi, type DocumentSummary } from "./api";
+import { ApiError, documentsApi, processingPending, type DocumentSummary } from "./api";
 import { lang, t } from "./i18n";
 import { snippetParts } from "./snippet";
 import { button, input, primary } from "./styles";
@@ -10,6 +10,18 @@ const recentCount = 10;
 
 /** How many search results a page holds. */
 export const searchPageSize = 25;
+
+/** How long the start page waits before it loads the list again while documents are being processed. */
+export const pollDelay = 5000;
+
+/** The timer of the polling; tests replace it to fire it themselves. */
+export const pollTimer = {
+  set: (fn: () => void, ms: number): number => window.setTimeout(fn, ms),
+  clear: (id: number) => window.clearTimeout(id),
+};
+
+/** Replaces the document with the same ID as d in docs. */
+const replaceDoc = (docs: DocumentSummary[], d: DocumentSummary) => docs.map((x) => (x.id === d.id ? { ...d, snippet: x.snippet } : x));
 
 function useQueue(queue: UploadQueue): UploadItem[] {
   return useSyncExternalStore(
@@ -81,9 +93,11 @@ export function DocumentsHome({ queue }: { queue: UploadQueue }) {
   const [docs, setDocs] = useState<DocumentSummary[] | null>(null);
   const [maxSize, setMaxSize] = useState<number | undefined>(queue.maxSize);
   const [error, setError] = useState("");
+  const [poll, setPoll] = useState(0);
   const imported = items.filter((i) => i.state.kind === "imported").length;
 
-  // Load the list at start and again after each import.
+  // Load the list at start, again after each import, and while documents
+  // are being processed every pollDelay.
   useEffect(() => {
     const ctl = new AbortController();
     documentsApi.list(recentCount, ctl.signal).then(
@@ -98,20 +112,27 @@ export function DocumentsHome({ queue }: { queue: UploadQueue }) {
       },
     );
     return () => ctl.abort();
-  }, [queue, imported]);
+  }, [queue, imported, poll]);
+
+  const pending = docs?.some(processingPending) ?? false;
+  useEffect(() => {
+    if (!pending) return;
+    const id = pollTimer.set(() => setPoll((n) => n + 1), pollDelay);
+    return () => pollTimer.clear(id);
+  }, [pending, docs]);
 
   const limit = maxSize ? formatSize(maxSize, lang) : "";
   return (
     <div className="flex flex-col gap-6">
       <UploadPanel queue={queue} items={items} limit={limit} />
       <DocumentSearch>
-        <RecentDocuments docs={docs} error={error} />
+        <RecentDocuments docs={docs} error={error} onChange={(d) => setDocs((ds) => ds && replaceDoc(ds, d))} />
       </DocumentSearch>
     </div>
   );
 }
 
-function RecentDocuments({ docs, error }: { docs: DocumentSummary[] | null; error: string }) {
+function RecentDocuments({ docs, error, onChange }: { docs: DocumentSummary[] | null; error: string; onChange: (d: DocumentSummary) => void }) {
   return (
     <section className="flex flex-col gap-2">
       <h2 className="font-semibold">{t.recentTitle}</h2>
@@ -122,25 +143,85 @@ function RecentDocuments({ docs, error }: { docs: DocumentSummary[] | null; erro
       )}
       {!docs && !error && <p className="text-sm text-ink-muted">{t.loading}</p>}
       {docs && docs.length === 0 && <p className="text-sm text-ink-muted">{t.recentEmpty}</p>}
-      {docs && docs.length > 0 && <DocumentList label={t.recentTitle} docs={docs} />}
+      {docs && docs.length > 0 && <DocumentList label={t.recentTitle} docs={docs} onChange={onChange} />}
     </section>
   );
 }
 
-function DocumentList({ label, docs }: { label: string; docs: DocumentSummary[] }) {
+function DocumentList({ label, docs, onChange }: { label: string; docs: DocumentSummary[]; onChange: (d: DocumentSummary) => void }) {
   return (
     <ul aria-label={label} className="flex flex-col divide-y divide-line rounded-lg border border-line">
       {docs.map((d) => (
-        <li key={d.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-3 py-2">
-          <span className="min-w-0 basis-full wrap-anywhere sm:basis-0 sm:flex-1">{displayName(d.title) || t.untitled}</span>
-          <span className="text-sm text-ink-muted">{new Date(d.createdAt).toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" })}</span>
-          <a className="text-sm text-accent-ink hover:underline" href={documentsApi.fileURL(d.id)} download>
-            {t.download}
-          </a>
-          {d.snippet && <Snippet text={d.snippet} />}
+        <li key={d.id} className="flex items-start gap-3 px-3 py-2">
+          <Thumbnail url={d.thumbnailUrl} />
+          <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 gap-y-1">
+            <span className="min-w-0 basis-full wrap-anywhere sm:basis-0 sm:flex-1">{displayName(d.title) || t.untitled}</span>
+            <span className="text-sm text-ink-muted">{new Date(d.createdAt).toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" })}</span>
+            <a className="text-sm text-accent-ink hover:underline" href={documentsApi.fileURL(d.id)} download>
+              {t.download}
+            </a>
+            <ProcessingStatus doc={d} onChange={onChange} />
+            {d.snippet && <Snippet text={d.snippet} />}
+          </div>
         </li>
       ))}
     </ul>
+  );
+}
+
+/** The thumbnail of the first page, or an empty frame until processing made one. It is decoration: the title is next to it. */
+function Thumbnail({ url }: { url?: string | null }) {
+  const frame = "h-16 w-12 shrink-0 rounded-sm border border-line";
+  if (!url) return <div aria-hidden="true" data-testid="no-thumbnail" className={`${frame} border-dashed`} />;
+  return <img src={url} alt="" loading="lazy" decoding="async" className={`${frame} bg-paper object-cover object-top`} />;
+}
+
+const badge = "rounded-sm px-1.5 py-0.5 text-xs font-medium";
+
+/**
+ * A badge while a document is queued or being processed; when processing
+ * failed, the error and a Retry button. Nothing once it is done.
+ */
+function ProcessingStatus({ doc, onChange }: { doc: DocumentSummary; onChange: (d: DocumentSummary) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const p = doc.processing;
+  if (!p || p.state === "done") return null;
+  if (p.state === "queued" || p.state === "running") {
+    const text = p.state === "running" ? t.processingRunning : p.error ? t.processingRetrying : t.processingQueued;
+    return (
+      <span role="status" className={`${badge} bg-surface-hover text-ink-muted`} title={p.error}>
+        {text}
+      </span>
+    );
+  }
+  const retry = () => {
+    setBusy(true);
+    setError("");
+    documentsApi.reprocess(doc.id).then(
+      (d) => {
+        setBusy(false);
+        onChange(d);
+      },
+      (err: unknown) => {
+        setBusy(false);
+        setError(t.failed(err instanceof Error ? err.message : String(err)));
+      },
+    );
+  };
+  return (
+    <div className="flex basis-full flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+      <span className={`${badge} bg-danger-soft text-danger`}>{t.processingFailed}</span>
+      {p.error && <span className="min-w-0 wrap-anywhere text-danger">{p.error}</span>}
+      <button type="button" className="text-accent-ink hover:underline disabled:opacity-50" disabled={busy} aria-label={t.retryDocument(displayName(doc.title) || t.untitled)} onClick={retry}>
+        {t.retry}
+      </button>
+      {error && (
+        <span role="alert" className="text-danger">
+          {error}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -252,7 +333,9 @@ function DocumentSearch({ children }: { children: ReactNode }) {
           )}
           {search.loading && !search.docs && <p className="text-sm text-ink-muted">{t.loading}</p>}
           {search.docs && search.docs.length === 0 && <p className="text-sm text-ink-muted">{t.searchEmpty}</p>}
-          {search.docs && search.docs.length > 0 && <DocumentList label={t.searchResults} docs={search.docs} />}
+          {search.docs && search.docs.length > 0 && (
+            <DocumentList label={t.searchResults} docs={search.docs} onChange={(d) => setSearch((s) => s && s.docs && { ...s, docs: replaceDoc(s.docs, d) })} />
+          )}
           {search.cursor && (
             <button type="button" className={`${button} self-start`} disabled={search.loading} onClick={() => load(search.q, search.cursor)}>
               {t.searchMore}

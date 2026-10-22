@@ -48,6 +48,11 @@ const en = {
   recentEmpty: "No documents yet.",
   download: "Download",
   untitled: "Untitled",
+  processingQueued: "Queued",
+  processingRetrying: "Queued again",
+  processingRunning: "Processing",
+  processingFailed: "Failed",
+  retryDocument: (name: string) => `Retry processing ${name}`,
 
   // Search (start page)
   searchLabel: "Search documents",
@@ -294,6 +299,7 @@ const en = {
       "audit.export": "Exported log",
       "document.create": "Uploaded document",
       "document.search": "Searched documents",
+      "document.reprocess": "Processed document again",
       "api_key.create": "Created API key",
       "api_key.revoke": "Revoked API key",
     })[a] ?? a,
@@ -346,6 +352,11 @@ const de: Messages = {
   recentEmpty: "Noch keine Dokumente.",
   download: "Herunterladen",
   untitled: "Ohne Titel",
+  processingQueued: "In der Warteschlange",
+  processingRetrying: "Erneut in der Warteschlange",
+  processingRunning: "Wird verarbeitet",
+  processingFailed: "Fehlgeschlagen",
+  retryDocument: (name) => `${name} erneut verarbeiten`,
 
   // Suche (Startseite)
   searchLabel: "Dokumente durchsuchen",
@@ -584,6 +595,7 @@ const de: Messages = {
       "audit.export": "Protokoll exportiert",
       "document.create": "Dokument hochgeladen",
       "document.search": "Dokumente durchsucht",
+      "document.reprocess": "Dokument erneut verarbeitet",
       "api_key.create": "API-Schlüssel erstellt",
       "api_key.revoke": "API-Schlüssel widerrufen",
     })[a] ?? a,

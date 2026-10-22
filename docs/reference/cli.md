@@ -102,7 +102,14 @@ open, or an image with more than 50 megapixels fails at once. The error stays wi
 Processing again replaces a document's extracted text, page count and
 archive PDF. Text that did not come from processing (`PDF-Text` or
 `Tesseract`), such as text imported from the app or edited by hand, is kept.
-`reprocess` writes a `document.reprocess` entry to the audit log.
+`reprocess` writes a `document.reprocess` entry to the audit log. Processing
+also renders a thumbnail of the first page (a JPEG, 512 pixels on the longer
+side); when that fails, the document is stored without a new one.
+
+The web UI shows the status of each document: a badge while it is queued or
+being processed, and the error with a Retry button when processing failed.
+Retry (`POST /api/documents/{id}/reprocess`) does what `reprocess ID` does
+and is recorded the same way.
 
 A PDF keeps its own text layer on pages with at least 15 characters; the
 other pages are OCRed with OCRmyPDF and Tesseract (`PAPERLESS_GO_OCR_LANGUAGES`),

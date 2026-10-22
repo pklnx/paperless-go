@@ -73,6 +73,8 @@ func (s *Server) routes() []route {
 		h("GET /api/documents", s.handleListDocuments, accessRead),
 		h("GET /api/documents/{id}", s.handleGetDocument, accessRead),
 		h("GET /api/documents/{id}/file", s.handleDocumentFile, accessRead),
+		h("GET /api/documents/{id}/thumbnail", s.handleThumbnail, accessRead),
+		h("POST /api/documents/{id}/reprocess", s.handleReprocess, accessWrite),
 
 		h("GET /api/users", s.handleListUsers, accessSession),
 		h("POST /api/users", s.handleCreateUser, accessSession),

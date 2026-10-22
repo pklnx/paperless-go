@@ -136,7 +136,7 @@ func (w *Worker) RunOnce(ctx context.Context) (Outcome, error) {
 	var hb sync.WaitGroup
 	hb.Go(func() { w.renewLease(jobCtx, job, cancelJob, stop, log) })
 	runCtx, cancelRun := context.WithTimeout(jobCtx, w.Timeout)
-	res, err := w.attempt(runCtx, job)
+	res, err := w.attempt(runCtx, job, log)
 	timedOut := err != nil && errors.Is(runCtx.Err(), context.DeadlineExceeded) && jobCtx.Err() == nil
 	cancelRun()
 	close(stop)
@@ -266,9 +266,10 @@ func (w *Worker) renewLease(ctx context.Context, job *store.Job, cancel context.
 // errDocumentGone is a job whose document was deleted before it started.
 var errDocumentGone = errors.New("document deleted")
 
-// attempt copies the original into a fresh work directory and runs the
-// pipeline on it.
-func (w *Worker) attempt(ctx context.Context, job *store.Job) (store.ProcessResult, error) {
+// attempt copies the original into a fresh work directory, runs the
+// pipeline on it and renders the thumbnail of the archive. A thumbnail that
+// cannot be made is logged and left out: the text matters more.
+func (w *Worker) attempt(ctx context.Context, job *store.Job, log *slog.Logger) (store.ProcessResult, error) {
 	doc, err := w.Store.GetDocument(ctx, store.Scope{All: true}, job.DocumentID)
 	if errors.Is(err, store.ErrNotFound) {
 		return store.ProcessResult{}, errDocumentGone
@@ -292,29 +293,46 @@ func (w *Worker) attempt(ctx context.Context, job *store.Job) (store.ProcessResu
 	out := store.ProcessResult{
 		PageCount: res.PageCount, Text: res.Text, TextSource: res.TextSource, Note: res.Note,
 	}
-	if res.Archive == "" {
+	archive := res.Archive
+	if archive == "" {
+		// The original is a PDF that serves as its own archive.
+		archive = path
 		out.ArchiveSHA256, out.ArchiveSize = doc.OriginalSHA256, doc.OriginalSize
-		return out, nil
-	}
-	if out.ArchiveSHA256, out.ArchiveSize, err = w.putArchive(res.Archive); err != nil {
+	} else if out.ArchiveSHA256, out.ArchiveSize, err = w.putFile(res.Archive, "archive"); err != nil {
 		return store.ProcessResult{}, err
+	}
+	thumb, err := w.Pipeline.Thumbnail(ctx, dir, archive)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return store.ProcessResult{}, err
+	case err != nil:
+		attrs := []any{"err", err}
+		var tool *ToolError
+		if errors.As(err, &tool) && tool.Stderr != "" {
+			attrs = append(attrs, "stderr", tool.Stderr)
+		}
+		log.Warn("no thumbnail; the document is stored without one", attrs...)
+	default:
+		if out.ThumbnailSHA256, _, err = w.putFile(thumb, "thumbnail"); err != nil {
+			return store.ProcessResult{}, err
+		}
 	}
 	return out, nil
 }
 
-// putArchive stores the archive PDF at path in the blob store, durably,
-// before the result is committed. If the commit does not happen (the
-// document was deleted, the lease lost), the blob is an orphan for the
-// cleanup; nothing refers to it.
-func (w *Worker) putArchive(path string) (hash string, size int64, err error) {
+// putFile stores the file at path (the archive PDF or the thumbnail) in
+// the blob store, durably, before the result is committed. If the commit
+// does not happen (the document was deleted, the lease lost), the blob is
+// an orphan for the cleanup; nothing refers to it.
+func (w *Worker) putFile(path, what string) (hash string, size int64, err error) {
 	f, err := os.Open(path) //nolint:gosec // in the job's work directory
 	if err != nil {
-		return "", 0, fmt.Errorf("open archive: %w", err)
+		return "", 0, fmt.Errorf("open %s: %w", what, err)
 	}
 	defer func() { _ = f.Close() }()
 	b, _, err := w.Blobs.Put(f)
 	if err != nil {
-		return "", 0, fmt.Errorf("store archive: %w", err)
+		return "", 0, fmt.Errorf("store %s: %w", what, err)
 	}
 	return b.SHA256, b.Size, nil
 }

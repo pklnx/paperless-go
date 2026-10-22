@@ -523,3 +523,78 @@ func TestReprocess(t *testing.T) {
 		t.Fatalf("audit rows: %+v", rows)
 	}
 }
+
+// The thumbnail of a result is stored; a result without one keeps the
+// stored thumbnail.
+func TestCompleteJobThumbnail(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	d := mustDoc(t, st, alice, newDoc("scan"))
+	now := time.Now().Truncate(time.Microsecond)
+
+	complete := func(thumb string) *store.Document {
+		t.Helper()
+		j := claim(t, st, now)
+		res := store.ProcessResult{PageCount: 1, ArchiveSHA256: d.OriginalSHA256, ArchiveSize: d.OriginalSize, ThumbnailSHA256: thumb}
+		if err := st.CompleteJob(ctx, j, now, res); err != nil {
+			t.Fatal(err)
+		}
+		got, err := st.GetDocument(ctx, alice, d.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.EnqueueDocument(ctx, d.ID); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	first, second := hashOf("thumbnail 1"), hashOf("thumbnail 2")
+	if got := complete(first); got.ThumbnailSHA256 == nil || *got.ThumbnailSHA256 != first {
+		t.Fatalf("thumbnail %v, want %s", got.ThumbnailSHA256, first)
+	}
+	if got := complete(""); got.ThumbnailSHA256 == nil || *got.ThumbnailSHA256 != first {
+		t.Fatalf("thumbnail after a result without one: %v", got.ThumbnailSHA256)
+	}
+	if got := complete(second); got.ThumbnailSHA256 == nil || *got.ThumbnailSHA256 != second {
+		t.Fatalf("thumbnail after a new one: %v", got.ThumbnailSHA256)
+	}
+}
+
+// LatestJobs gives each document's newest job; documents without one and
+// malformed IDs are missing.
+func TestLatestJobs(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	failed := mustDoc(t, st, alice, newDoc("failed"))
+	now := time.Now().Truncate(time.Microsecond)
+	j := claim(t, st, now)
+	if err := st.FailJob(ctx, j, now, "broken"); err != nil {
+		t.Fatal(err)
+	}
+	// A new job after the failed one is the status.
+	retried := mustDoc(t, st, alice, newDoc("retried"))
+	j = claim(t, st, now) // retried's job
+	if err := st.FailJob(ctx, j, now, "broken"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnqueueDocument(ctx, retried.ID); err != nil {
+		t.Fatal(err)
+	}
+	in := newDoc("archived")
+	in.ArchiveSHA256, in.ArchiveSize = ptr(hashOf("archive")), ptr(int64(7))
+	archived := mustDoc(t, st, alice, in) // no job
+
+	got, err := st.LatestJobs(ctx, []string{failed.ID, retried.ID, archived.ID, "not-a-uuid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[failed.ID].State != store.JobFailed || got[failed.ID].LastError != "broken" ||
+		got[retried.ID].State != store.JobQueued || got[retried.ID].Attempts != 0 {
+		t.Fatalf("latest jobs: %+v", got)
+	}
+	if got, err := st.LatestJobs(ctx, nil); err != nil || len(got) != 0 {
+		t.Fatalf("no IDs: %v, %v", got, err)
+	}
+}

@@ -495,3 +495,125 @@ func TestWorkerListenWakes(t *testing.T) {
 	cancel()
 	<-stopped
 }
+
+// blobOf returns the hash of content, as the blob store names it.
+func blobOf(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
+}
+
+// The thumbnail is rendered from the archive (the original PDF, OCRmyPDF's
+// output or the image's PDF) and stored with the result.
+func TestWorkerStoresThumbnail(t *testing.T) {
+	for _, tc := range []struct {
+		name, mime string
+		original   []byte
+		pages      []string
+		from       string // the PDF pdftoppm renders
+	}{
+		{"text PDF", mimePDF, []byte("%PDF-1.4 text"), []string{longText}, "original"},
+		{"scan", mimePDF, []byte("%PDF-1.4 scan"), []string{""}, archiveFile},
+		{"photo", mimePNG, pngOf(t, 40, 20, 0), []string{""}, archiveFile},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			ctx := context.Background()
+			d := e.docAs(t, string(tc.original), tc.mime)
+			thumb := jpegOf(300, 512)
+			e.runner.handle = poppler(pdf{pages: tc.pages, ocr: []string{longText}, thumb: thumb})
+			e.runOnce(t, ctx, Done)
+			got, err := e.st.GetDocument(ctx, e.owner, d.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ThumbnailSHA256 == nil || *got.ThumbnailSHA256 != blobOf(thumb) {
+				t.Fatalf("thumbnail %v, want %s", got.ThumbnailSHA256, blobOf(thumb))
+			}
+			f, err := e.blobs.OpenHash(*got.ThumbnailSHA256)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := io.ReadAll(f)
+			_ = f.Close()
+			if !bytes.Equal(b, thumb) {
+				t.Fatal("stored thumbnail differs")
+			}
+			if c := call(t, e.runner, "pdftoppm"); c.Args[len(c.Args)-2] != tc.from {
+				t.Fatalf("thumbnail rendered from %q, want %q", c.Args[len(c.Args)-2], tc.from)
+			}
+			e.workDirEmpty(t)
+		})
+	}
+}
+
+// A thumbnail that cannot be made costs nothing else: the result is
+// stored without it, and a later failure keeps the earlier thumbnail.
+func TestWorkerThumbnailFails(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	d := e.doc(t, "%PDF-1.4 no thumbnail")
+	e.runner.handle = poppler(pdf{pages: []string{longText}, thumbErr: &ToolError{Tool: "pdftoppm", ExitCode: 99, Stderr: "render details"}})
+	e.runOnce(t, ctx, Done)
+	got, err := e.st.GetDocument(ctx, e.owner, d.ID)
+	if err != nil || got.ThumbnailSHA256 != nil || got.ExtractedText != longText || got.ArchiveSHA256 == nil {
+		t.Fatalf("processed without a thumbnail: %+v, %v", got, err)
+	}
+	if j := e.job(t, d.ID); j.State != store.JobDone || j.LastError != "" {
+		t.Fatalf("job: %+v", j)
+	}
+	if log := e.log.String(); !strings.Contains(log, "no thumbnail") || !strings.Contains(log, "render details") {
+		t.Fatalf("log: %s", log)
+	}
+
+	reprocess := func(p pdf) *store.Document {
+		t.Helper()
+		if _, err := e.st.Reprocess(ctx, store.ReprocessSelection{IDs: []string{d.ID}}); err != nil {
+			t.Fatal(err)
+		}
+		e.runner.handle = poppler(p)
+		e.runOnce(t, ctx, Done)
+		got, err := e.st.GetDocument(ctx, e.owner, d.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	thumb := jpegOf(362, 512)
+	if got := reprocess(pdf{pages: []string{longText}, thumb: thumb}); got.ThumbnailSHA256 == nil || *got.ThumbnailSHA256 != blobOf(thumb) {
+		t.Fatalf("thumbnail after a retry: %v", got.ThumbnailSHA256)
+	}
+	if got := reprocess(pdf{pages: []string{longText}, thumb: []byte("not a JPEG")}); got.ThumbnailSHA256 == nil || *got.ThumbnailSHA256 != blobOf(thumb) {
+		t.Fatalf("thumbnail after a failed one: %v", got.ThumbnailSHA256)
+	}
+}
+
+// A shutdown while the thumbnail is rendered gives the job back; nothing
+// is stored.
+func TestWorkerShutdownDuringThumbnail(t *testing.T) {
+	e := newEnv(t)
+	d := e.doc(t, "%PDF-1.4 shutdown")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{}, 1)
+	tools := poppler(pdf{pages: []string{longText}})
+	e.runner.handle = func(ctx context.Context, c Command) ([]byte, error) {
+		if c.Name != "pdftoppm" {
+			return tools(ctx, c)
+		}
+		started <- struct{}{}
+		<-ctx.Done()
+		return nil, &ToolError{Tool: "pdftoppm", ExitCode: -1}
+	}
+	go func() {
+		<-started
+		cancel()
+	}()
+	e.runOnce(t, ctx, Released)
+	got, err := e.st.GetDocument(context.Background(), e.owner, d.ID)
+	if err != nil || got.ArchiveSHA256 != nil || got.ThumbnailSHA256 != nil {
+		t.Fatalf("stored at shutdown: %+v, %v", got, err)
+	}
+	if j := e.job(t, d.ID); j.State != store.JobQueued || j.Attempts != 0 {
+		t.Fatalf("job: %+v", j)
+	}
+}
