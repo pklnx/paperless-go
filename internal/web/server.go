@@ -20,6 +20,7 @@ import (
 	"github.com/pklnx/paperless-go/internal/config"
 	"github.com/pklnx/paperless-go/internal/crypto"
 	"github.com/pklnx/paperless-go/internal/ingest"
+	"github.com/pklnx/paperless-go/internal/search"
 	"github.com/pklnx/paperless-go/internal/store"
 )
 
@@ -317,13 +318,26 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, status int, msg st
 // or database message never reaches the client; an error without a known
 // meaning is a generic 500 and only logged.
 func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
+	var ve *store.ValidationError
 	switch {
 	case errors.Is(err, store.ErrAuditUnavailable):
 		s.failAudit(w, r, err)
 	case errors.Is(err, store.ErrNotFound):
 		s.fail(w, r, http.StatusNotFound, "not found", err)
+	case errors.Is(err, store.ErrInvalidCursor):
+		s.fail(w, r, http.StatusBadRequest, "invalid cursor", err)
+	case errors.Is(err, store.ErrInvalidSort):
+		s.fail(w, r, http.StatusBadRequest, "invalid sort", err)
+	case errors.Is(err, search.ErrTooLong):
+		s.fail(w, r, http.StatusBadRequest, "query too long", err)
+	case errors.Is(err, search.ErrInvalid), errors.As(err, &ve) && ve.Field == "q":
+		s.fail(w, r, http.StatusBadRequest, "invalid query", err)
 	case errors.Is(err, store.ErrInvalid):
 		s.fail(w, r, http.StatusBadRequest, "invalid input", err)
+	case errors.Is(err, store.ErrRetry):
+		// A deadlock with a concurrent change: nothing was written.
+		w.Header().Set("Retry-After", "1")
+		s.fail(w, r, http.StatusServiceUnavailable, "a concurrent change got in the way; try again", err)
 	case errors.Is(err, store.ErrUnknownUser):
 		// The user was removed while the request ran; the session is gone
 		// with it.

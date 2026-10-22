@@ -9,6 +9,14 @@ search to tags, correspondents, types, dates and status flags.
 You only ever find your own documents. An admin searches all users'
 documents.
 
+Type a search into the field on the start page and press Enter. The
+results replace the recent documents; "Load more" shows the next 25, and
+clearing the field brings the recent documents back. Each search is
+recorded in your [audit log](./audit-log), with the text you searched
+for. Scripts search with `GET /api/documents?q=…` and an API key with the
+`read` scope (see [Architecture](../development/architecture#documents-api)
+for the parameters).
+
 ## Words and phrases
 
 | You type | It finds documents |
@@ -69,8 +77,9 @@ values.
 A search with words lists the best matches first: a word in the title
 counts most, then the tags, correspondent and type, then the notes and file
 name, then the text. Without words, the newest added documents come first.
-The list can also be sorted by the date added or by the document's date,
-newest or oldest first.
+Through the API (`sort`, `order`), a search can also be sorted by the
+date added or by the document's date, newest or oldest first; the web UI
+gets sort menus with the document list.
 
 Each result shows up to two passages of the text around the words it
 matched.

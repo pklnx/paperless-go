@@ -288,7 +288,8 @@ The [audit log](../guide/audit-log) records:
 | Passkey removals | Who removed all of a user's passkeys, in the web UI or with `user remove-passkeys`, and how many; a password reset records how many passkeys it removed. |
 | 2FA resets | Who reset whose two-factor login, in the web UI or with `user reset-2fa`. |
 | API keys | Who created a key (name, scopes, expiry) and who revoked which key of whom; `user revoke-api-keys` and password resets record how many keys they revoked. |
-| Requests with a key | Uploads made with a key are recorded with the actor `api_key` and the key's name. Reads are not recorded. |
+| Requests with a key | Uploads and searches made with a key are recorded with the actor `api_key` and the key's name. Other reads are not recorded. |
+| Searches | The first page of each search, with the search text and the filters (`document.search`). |
 | Uploads | Who uploaded which document. |
 | Command line | Every command that changes a user, and `audit export`, with the command, the operating system user and `PAPERLESS_GO_OPERATOR` (`./pgo` sets the host user; not verified). |
 

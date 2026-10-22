@@ -196,6 +196,30 @@ func (q *Query) items() int {
 	return n
 }
 
+// CheckLimits applies Parse's limits to a query built some other way (an
+// API that adds filters, a saved view): more than MaxItems items, or text
+// and filter values of more than MaxBytes bytes together, give ErrTooLong.
+// The values of a parsed query are parts of its input, so a query Parse
+// returned passes.
+func (q *Query) CheckLimits() error {
+	if q.items() > MaxItems {
+		return ErrTooLong
+	}
+	n := 0
+	for _, t := range q.Text {
+		n += len(t.Value)
+	}
+	for _, f := range q.Filters {
+		for _, v := range f.Values {
+			n += len(v)
+		}
+	}
+	if n > MaxBytes {
+		return ErrTooLong
+	}
+	return nil
+}
+
 // HasText reports whether the query has free-text items.
 func (q *Query) HasText() bool { return len(q.Text) > 0 }
 

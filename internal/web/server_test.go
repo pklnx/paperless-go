@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/pklnx/paperless-go/internal/search"
 	"github.com/pklnx/paperless-go/internal/store"
 )
 
@@ -160,6 +161,13 @@ func TestFailStore(t *testing.T) {
 		{"validation", &store.ValidationError{Field: "source", Constraint: "documents_source_check"}, http.StatusBadRequest, `{"error":"invalid input"}`},
 		{"not found", store.ErrNotFound, http.StatusNotFound, `{"error":"not found"}`},
 		{"user removed meanwhile", fmt.Errorf("ingest: create document: %w", store.ErrUnknownUser), http.StatusUnauthorized, `{"error":"login required"}`},
+		{"invalid cursor", store.ErrInvalidCursor, http.StatusBadRequest, `{"error":"invalid cursor"}`},
+		{"invalid sort", store.ErrInvalidSort, http.StatusBadRequest, `{"error":"invalid sort"}`},
+		{"query too long", fmt.Errorf("x: %w", search.ErrTooLong), http.StatusBadRequest, `{"error":"query too long"}`},
+		{"invalid query", search.ErrInvalid, http.StatusBadRequest, `{"error":"invalid query"}`},
+		{"invalid query text", &store.ValidationError{Field: "q"}, http.StatusBadRequest, `{"error":"invalid query"}`},
+		{"deadlock", fmt.Errorf("set tags: %w", store.ErrRetry), http.StatusServiceUnavailable, `{"error":"a concurrent change got in the way; try again"}`},
+		{"timestamp out of range", &pgconn.PgError{Code: "22008", Message: "timestamp out of range"}, http.StatusInternalServerError, `{"error":"internal error"}`},
 		{"raw database error", raw, http.StatusInternalServerError, `{"error":"internal error"}`},
 		{"wrapped unknown error", fmt.Errorf("query: %w", raw), http.StatusInternalServerError, `{"error":"internal error"}`},
 	} {
@@ -168,6 +176,9 @@ func TestFailStore(t *testing.T) {
 			s.failStore(rec, httptest.NewRequest("GET", "http://localhost/api/x", nil), tc.err)
 			if rec.Code != tc.status || strings.TrimSpace(rec.Body.String()) != tc.body {
 				t.Errorf("answer = %d %s, want %d %s", rec.Code, rec.Body, tc.status, tc.body)
+			}
+			if retry := rec.Header().Get("Retry-After"); (tc.status == http.StatusServiceUnavailable) != (retry == "1") {
+				t.Errorf("Retry-After %q", retry)
 			}
 		})
 	}
