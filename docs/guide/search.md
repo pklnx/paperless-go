@@ -76,7 +76,8 @@ values.
 
 A search with words lists the best matches first: a word in the title
 counts most, then the tags, correspondent and type, then the notes and file
-name, then the text. Without words, the newest added documents come first.
+name, then the text. Without words, or with only excluded words (`-Mahnung`), the newest added
+documents come first.
 Through the API (`sort`, `order`), a search can also be sorted by the
 date added or by the document's date, newest or oldest first; the web UI
 gets sort menus with the document list.

@@ -580,7 +580,7 @@ another user's document answers `404` and an admin sees all.
   | `q` | The [search syntax](../guide/search.md), parsed by `search.Parse` in the zone of `tz`. |
   | `tag`, `correspondent`, `type` | UUIDs, repeatable (at most 100 each), any of them; joined with `q` by AND. |
   | `inbox` | `true` or `false`: an `is:inbox` filter. |
-  | `sort` | `relevance` (the default with free text), `added` (the default otherwise) or `date`. |
+  | `sort` | `relevance` (the default with free text that is not only negated), `added` (the default otherwise: with only negated words every match ranks 0, and ranking them all took 4–5 s on 100 000 documents) or `date`. |
   | `order` | `desc` (default) or `asc`; relevance has no ascending order. |
   | `tz` | An IANA zone (`time.LoadLocation`, zones built in through `time/tzdata`) for the days of `date:` and `added:`; default UTC. `Local` is refused. |
   | `limit` | 1 to 100, default 100 (the start page asks for 10, the search for 25); more is capped. |

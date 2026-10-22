@@ -692,6 +692,22 @@ func TestSearchDocumentsRelevance(t *testing.T) {
 	if got := hitTitles(runSearch(t, st, alice, q)); !slices.Equal(got, []string{"Brief", "Rechnung März"}) {
 		t.Fatalf("ascending: %v", got)
 	}
+	// Only negated words rank nothing: newest added first, and the cursor
+	// is one of that sort.
+	q = parseQuery(t, "-Notiz", nil)
+	q.Limit = 1
+	page := runSearch(t, st, alice, q)
+	if got := hitTitles(page); !slices.Equal(got, []string{"Rechnung März"}) || page.NextCursor == "" {
+		t.Fatalf("negation only: %v, cursor %q", got, page.NextCursor)
+	}
+	q.Sort, q.Cursor = search.SortAdded, page.NextCursor
+	if got := hitTitles(runSearch(t, st, alice, q)); !slices.Equal(got, []string{"Brief"}) {
+		t.Fatalf("negation only, next page: %v", got)
+	}
+	q.Sort = search.SortRelevance
+	if _, err := st.SearchDocuments(context.Background(), alice, q); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("negation-only cursor with relevance: %v", err)
+	}
 }
 
 // Snippets mark the matches, in German, English or accent-free form;
