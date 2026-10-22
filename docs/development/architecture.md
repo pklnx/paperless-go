@@ -708,13 +708,19 @@ another user's document answers `404` and an admin sees all.
   `200` when it was queued or running already, `404` outside the scope,
   `503` without the audit log.
 - **`PATCH /api/documents/{id}`** (write) changes only the fields sent
-  (`store.PatchDocument`): `title` (at most 1 024 characters; empty is
-  allowed, the UI shows the file name), `documentDate`, `notes` (at most
-  100 000 characters; the body may be up to 1 MiB), `isFavorite`,
+  (`store.PatchDocument`): `title` (at most 1 024 characters and no
+  control characters (Unicode Cc: NUL, tab, line breaks, escape …), like
+  the titles the import makes and metadata names; empty is allowed, the
+  UI shows the file name), `documentDate`, `notes` (at most 100 000
+  characters; of the control characters only tab, line feed and carriage
+  return; the body may be up to 1 MiB), `isFavorite`,
   `isInbox`, `archiveSerialNumber`, `correspondentId`, `documentTypeId`
   (`null` clears these three) and `tagIds` (replaces the tags). `null` for
   any other field answers `400` `invalid_field`, an empty body `400`
-  `nothing_to_change`. One transaction locks the row, updates the given
+  `nothing_to_change`. One transaction locks the row (`LockDocument`,
+  `FOR NO KEY UPDATE`: no key column changes, so a foreign-key check of a
+  row referencing the document, such as a new job, does not wait),
+  updates the given
   columns (the search triggers follow), replaces the tags, touches
   `modified_at` and writes `document.update` (target the document, no
   target name; `fields`, the names of the fields sent; `ownerId` for an
@@ -733,10 +739,11 @@ another user's document answers `404` and an admin sees all.
   | Field | Selects |
   |---|---|
   | `ids` | These documents: at most 500 (`store.MaxBulkIDs`) after removing repeats, each in the scope, else `404` and nothing changes. An empty list is `400` `empty_selection`. |
-  | `match` | Every match of a search across all pages: an object with the list's parameters `q`, `tag`, `correspondent`, `type` (arrays), `inbox`, `favorite` (booleans), `owner` and `tz`. The server reads it with `listQuery` and `ownerScope`, the code of `GET /api/documents`, and resolves it in the transaction with the search's own filter block (`MatchDocumentIDs`); a client-sent ID list plays no part. At most 5 000 matches (`store.MaxBulkMatches`), else `400` `too_many_documents` with `matched` and `limit`, and nothing changes. |
+  | `match` | Every match of a search across all pages: an object with the list's parameters `q`, `tag`, `correspondent`, `type` (arrays), `inbox`, `favorite` (booleans), `owner` and `tz`. The server reads it with `listQuery` and `ownerScope`, the code of `GET /api/documents`, and resolves it in the transaction with the search's own filter block (`MatchDocumentIDs`); a client-sent ID list plays no part. `owner` only narrows the match (`BulkSelection.Owner`); the change runs in the caller's scope, so the audit records `ownerId` for another user's documents with `owner=<id>` too. At most 5 000 matches (`store.MaxBulkMatches`), else `400` `too_many_documents` with `matched` and `limit`, and nothing changes. |
 
   The change: `addTags`, `removeTags` (UUID arrays; a tag in both is
-  `400` `tag_add_and_remove`), `correspondent`, `documentType` (a UUID,
+  `400` `tag_add_and_remove`; IDs are compared as UUIDs, so repeats and
+  another case count as the same tag), `correspondent`, `documentType` (a UUID,
   or `null` to clear), `inbox`, `favorite` (booleans). Adding a tag a
   document has, or removing one it lacks, is no error; a tag to add, a
   correspondent or type of another owner is `400` `owner_mismatch`.
@@ -753,8 +760,13 @@ another user's document answers `404` and an admin sees all.
   has no total.
 
   **Locking.** One transaction resolves the selection, locks the
-  documents in id order (`LockDocuments`, `ORDER BY id FOR UPDATE`, so two
-  bulk changes over overlapping sets wait for each other), removes and
+  documents in id order (`LockDocuments`, `ORDER BY id FOR NO KEY
+  UPDATE`, so two bulk changes over overlapping sets wait for each other),
+  by `match` runs the search again with the documents locked and keeps
+  only those that still match (the first match ran before the lock under
+  READ COMMITTED, so a document a concurrent change took out of the match
+  in between is left alone; `TestBulkUpdateByMatchRecheckedAfterLock`
+  holds the bulk change between match and lock), removes and
   adds the tags (one `DELETE`, one `INSERT … ON CONFLICT DO NOTHING`),
   updates the columns and touches `modified_at` of every document. Against
   a metadata delete it can still deadlock: `DeleteTag` deletes the tag's

@@ -74,3 +74,10 @@ func SetReindexLockTimeout(t *testing.T, d time.Duration) {
 func WithAfterLock(ctx context.Context, f func()) context.Context {
 	return context.WithValue(ctx, afterLockKey{}, f)
 }
+
+// WithAfterMatch makes each attempt of a bulk change of documents by
+// search call f after it ran the search and before it locks the matches:
+// a test holds it there to change a match concurrently.
+func WithAfterMatch(ctx context.Context, f func()) context.Context {
+	return context.WithValue(ctx, afterMatchKey{}, f)
+}

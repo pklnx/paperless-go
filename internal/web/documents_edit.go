@@ -73,9 +73,14 @@ func (s *Server) failDocument(w http.ResponseWriter, r *http.Request, err error)
 		s.refuseDocument(w, codeSeveralOwners,
 			"the documents belong to several users; tags, correspondents and types can only be set for one user's documents")
 	case errors.As(err, &ve) && ve.Field == "title":
-		s.refuseDocument(w, codeInvalidTitle, "invalid title: at most 1024 characters")
+		s.refuseDocument(w, codeInvalidTitle, "invalid title: at most 1024 characters, no control characters")
 	case errors.As(err, &ve) && ve.Field == "notes":
-		s.refuseDocument(w, codeInvalidNotes, "invalid notes: at most 100000 characters")
+		s.refuseDocument(w, codeInvalidNotes,
+			"invalid notes: at most 100000 characters, no control characters other than tabs and line breaks")
+	case errors.As(err, &ve) && ve.Field == "tags":
+		// The store compares the parsed IDs, so the same tag spelled in
+		// another case is caught too.
+		s.refuseDocument(w, codeTagAddRemove, "a tag cannot be added and removed at once")
 	case errors.As(err, &ve) && (ve.Field == "tag" || ve.Field == "correspondent" || ve.Field == "type" || ve.Field == "q"):
 		s.failSearch(w, r, err)
 	default:
@@ -330,14 +335,20 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		q.Cursor, q.Sort, q.Ascending = "", "", false
-		var ok bool
-		if sc, ok = s.ownerScope(w, r, in.Match.Owner); !ok {
-			return
+		// The owner narrows the match; the scope stays the caller's, so
+		// the audit sees the acting user (ownerId on another user's
+		// documents).
+		if in.Match.Owner != "" {
+			osc, ok := s.ownerScope(w, r, in.Match.Owner)
+			if !ok {
+				return
+			}
+			sel.Owner = &osc.UserID
 		}
 		sel.Match = &q
 	}
 	if in.DryRun {
-		m, err := s.store.CountBulkMatches(r.Context(), sc, *sel.Match)
+		m, err := s.store.CountBulkMatches(r.Context(), sc, sel)
 		if err != nil {
 			s.failDocument(w, r, err)
 			return
@@ -372,16 +383,6 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 		c.SetDocumentType = true
 		if !in.DocumentType.Null {
 			c.DocumentTypeID = &in.DocumentType.Value
-		}
-	}
-	removed := map[string]bool{}
-	for _, id := range in.RemoveTags {
-		removed[id] = true
-	}
-	for _, id := range in.AddTags {
-		if removed[id] {
-			s.refuseDocument(w, codeTagAddRemove, "a tag cannot be added and removed at once")
-			return
 		}
 	}
 	fields := c.Fields()

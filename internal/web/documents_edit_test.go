@@ -59,6 +59,8 @@ func TestPatchDocumentAPI(t *testing.T) {
 	f.expect("PATCH", docPath(f.ids["Vertrag"]), map[string]any{"isInbox": false}, 200)
 
 	f.expect("PATCH", docPath(f.ids["Strom"]), map[string]any{"archiveSerialNumber": 8}, 200)
+	// Notes keep line breaks and tabs.
+	f.expect("PATCH", docPath(f.ids["Strom"]), map[string]any{"notes": "eins\r\n\tzwei"}, 200)
 	for _, c := range []struct {
 		body   map[string]any
 		status int
@@ -66,6 +68,9 @@ func TestPatchDocumentAPI(t *testing.T) {
 	}{
 		{map[string]any{"title": strings.Repeat("x", store.MaxTitleLength+1)}, 400, codeInvalidTitle},
 		{map[string]any{"notes": "a\x00b"}, 400, codeInvalidNotes},
+		{map[string]any{"notes": "a\x1bb"}, 400, codeInvalidNotes},
+		{map[string]any{"title": "a\x00b"}, 400, codeInvalidTitle},
+		{map[string]any{"title": "a\nb"}, 400, codeInvalidTitle},
 		{map[string]any{"title": nil}, 400, codeInvalidField},
 		{map[string]any{"tagIds": nil}, 400, codeInvalidField},
 		{map[string]any{"archiveSerialNumber": 0}, 400, codeInvalidASN},
@@ -77,6 +82,9 @@ func TestPatchDocumentAPI(t *testing.T) {
 		resp, out := f.do("PATCH", docPath(id), c.body)
 		if resp.StatusCode != c.status || out["code"] != c.code {
 			t.Errorf("%v: %d %v, want %d %s", c.body, resp.StatusCode, out, c.status, c.code)
+		}
+		if msg, _ := out["error"].(string); (c.code == codeInvalidTitle || c.code == codeInvalidNotes) && !strings.Contains(msg, "control characters") {
+			t.Errorf("%v: message %q does not name control characters", c.body, msg)
 		}
 		if c.code == codeASNTaken && out["documentId"] != f.ids["Strom"] {
 			t.Errorf("asn_taken names %v, want %s", out["documentId"], f.ids["Strom"])
@@ -201,6 +209,9 @@ func TestBulkDocumentsByIDs(t *testing.T) {
 		{"501 ids", map[string]any{"ids": many, "inbox": true}, 400, codeTooMany},
 		{"nothing to change", map[string]any{"ids": all}, 400, codeNothingToChange},
 		{"add and remove", map[string]any{"ids": all, "addTags": []string{steuer}, "removeTags": []string{steuer}}, 400, codeTagAddRemove},
+		{"add and remove, another case", map[string]any{"ids": all, "addTags": []string{steuer}, "removeTags": []string{strings.ToUpper(steuer)}}, 400, codeTagAddRemove},
+		{"repeated tags", map[string]any{"ids": all, "addTags": []string{steuer, steuer, strings.ToUpper(steuer)}}, 200, ""},
+		{"repeated tags to remove", map[string]any{"ids": all, "removeTags": []string{steuer, strings.ToUpper(steuer)}}, 200, ""},
 		{"another owner's tag", map[string]any{"ids": all, "addTags": []string{f.tag(f.bob, "Bob's")}}, 400, codeOwnerMismatch},
 		{"one foreign id", map[string]any{"ids": []string{all[0], f.ids["Bob"]}, "inbox": true}, 404, ""},
 	} {
@@ -209,8 +220,8 @@ func TestBulkDocumentsByIDs(t *testing.T) {
 			t.Errorf("%s: %d %v, want %d %s", c.name, resp.StatusCode, out, c.status, c.code)
 		}
 	}
-	if d := f.doc(all[0]); d.IsInbox {
-		t.Error("a refused bulk change changed a document")
+	if d := f.doc(all[0]); d.IsInbox || len(d.TagIDs) != 0 {
+		t.Errorf("a refused bulk change changed a document: %+v", d)
 	}
 
 	// An admin across owners: inbox works, a tag does not.
@@ -377,5 +388,53 @@ func TestListDocumentsFavoriteAndOwner(t *testing.T) {
 	}
 	if out := f.expect("GET", docPath(f.ids["Bob"]), nil, 200); out["ownerName"] != "bob" {
 		t.Errorf("admin's document: %v", out)
+	}
+}
+
+// Every per-document entry of an admin's bulk change records the owner of
+// another user's document (ownerId), by ids, by match with owner empty
+// and by match with owner=<id>; the admin's own documents get none, also
+// with owner=me.
+func TestBulkDocumentsAdminOwnerID(t *testing.T) {
+	f := newSearchFixture(t)
+	root, err := f.st.GetUserByName(context.Background(), "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootDoc := searchDoc(t, f.st, store.Scope{UserID: root.ID}, "Root", "Eine Rechnung von root.")
+	f.loginOK("root", keyPassword)
+	for _, c := range []struct {
+		name string
+		body map[string]any
+		want int // per-document entries
+	}{
+		{"ids", map[string]any{"ids": []string{f.ids["Bob"], f.ids["Telekom"], rootDoc}}, 3},
+		{"match, owner empty", map[string]any{"match": map[string]any{"q": "rechnung"}}, 4},
+		{"match, owner=bob", map[string]any{"match": map[string]any{"q": "rechnung", "owner": fmt.Sprint(f.bob.UserID)}}, 1},
+		{"match, owner=alice", map[string]any{"match": map[string]any{"q": "rechnung", "owner": fmt.Sprint(f.alice.UserID)}}, 2},
+		{"match, owner=me", map[string]any{"match": map[string]any{"q": "rechnung", "owner": "me"}}, 1},
+		{"match, owner=root's id", map[string]any{"match": map[string]any{"q": "rechnung", "owner": fmt.Sprint(root.ID)}}, 1},
+	} {
+		c.body["favorite"] = true
+		n := len(auditLog(t, f.st))
+		f.expect("POST", "/api/documents/bulk", c.body, 200)
+		perDoc := 0
+		for _, e := range newEntries(t, f.st, n) {
+			if e.Action != "document.update" {
+				continue
+			}
+			perDoc++
+			want := ""
+			if owner := f.doc(e.TargetID).OwnerID; owner != root.ID {
+				want = fmt.Sprint(owner)
+			}
+			got, ok := details(t, e)["ownerId"]
+			if want == "" && ok || want != "" && fmt.Sprint(got) != want {
+				t.Errorf("%s: entry of %s has ownerId %v, want %q", c.name, e.TargetID, got, want)
+			}
+		}
+		if perDoc != c.want {
+			t.Errorf("%s: %d per-document entries, want %d", c.name, perDoc, c.want)
+		}
 	}
 }

@@ -170,6 +170,11 @@ func TestPatchDocumentErrors(t *testing.T) {
 		{"title too long", alice, doc.ID, store.DocumentPatch{Title: ptr(strings.Repeat("ä", store.MaxTitleLength+1))}, store.ErrInvalid},
 		{"notes too long", alice, doc.ID, store.DocumentPatch{Notes: ptr(strings.Repeat("x", store.MaxNotesLength+1))}, store.ErrInvalid},
 		{"NUL in notes", alice, doc.ID, store.DocumentPatch{Notes: ptr("a\x00b")}, store.ErrInvalid},
+		{"NUL in title", alice, doc.ID, store.DocumentPatch{Title: ptr("a\x00b")}, store.ErrInvalid},
+		{"line break in title", alice, doc.ID, store.DocumentPatch{Title: ptr("a\nb")}, store.ErrInvalid},
+		{"tab in title", alice, doc.ID, store.DocumentPatch{Title: ptr("a\tb")}, store.ErrInvalid},
+		{"C1 control in title", alice, doc.ID, store.DocumentPatch{Title: ptr("a\u0085b")}, store.ErrInvalid},
+		{"escape in notes", alice, doc.ID, store.DocumentPatch{Notes: ptr("a\x1bb")}, store.ErrInvalid},
 		{"nothing to change", alice, doc.ID, store.DocumentPatch{}, store.ErrInvalid},
 		{"another user's document", bob, doc.ID, store.DocumentPatch{Title: ptr("mine")}, store.ErrNotFound},
 		{"malformed id", alice, "x", store.DocumentPatch{Title: ptr("mine")}, store.ErrNotFound},
@@ -194,6 +199,10 @@ func TestPatchDocumentErrors(t *testing.T) {
 	}
 	if _, err := st.PatchDocument(ctx, alice, doc.ID, store.DocumentPatch{Title: ptr("")}); err != nil {
 		t.Errorf("empty title: %v", err)
+	}
+	// Notes keep their lines and tabs.
+	if _, err := st.PatchDocument(ctx, alice, doc.ID, store.DocumentPatch{Notes: ptr("line\r\n\tindented\nend")}); err != nil {
+		t.Errorf("notes with line breaks and tabs: %v", err)
 	}
 	if _, err := st.PatchDocument(ctx, bob, bobDoc.ID, store.DocumentPatch{SetASN: true, ArchiveSerialNumber: ptr(int32(5))}); err != nil {
 		t.Errorf("same ASN for another owner: %v", err)
@@ -417,17 +426,17 @@ func TestBulkUpdateByMatch(t *testing.T) {
 		t.Errorf("several owners: %v", err)
 	}
 	// The dry run counts what the change would cover.
-	if m, err := st.CountBulkMatches(ctx, admin, *parse("rechnung")); err != nil || m.Count != 4 || m.Owners != 3 {
+	if m, err := st.CountBulkMatches(ctx, admin, store.BulkSelection{Match: parse("rechnung")}); err != nil || m.Count != 4 || m.Owners != 3 {
 		t.Errorf("dry run: %+v, %v", m, err)
 	}
-	if m, err := st.CountBulkMatches(ctx, alice, *parse("nichtda")); err != nil || m.Count != 0 {
+	if m, err := st.CountBulkMatches(ctx, alice, store.BulkSelection{Match: parse("nichtda")}); err != nil || m.Count != 0 {
 		t.Errorf("dry run without matches: %+v, %v", m, err)
 	}
 
 	// The limit: one match too many refuses the whole change.
 	conn := connect(t, dbURL)
 	insertDocs(t, conn, bob.UserID, store.MaxBulkMatches, "Massenbrief")
-	if m, err := st.CountBulkMatches(ctx, bob, *parse("massenbrief")); err != nil || m.Count != store.MaxBulkMatches || m.Owners != 1 {
+	if m, err := st.CountBulkMatches(ctx, bob, store.BulkSelection{Match: parse("massenbrief")}); err != nil || m.Count != store.MaxBulkMatches || m.Owners != 1 {
 		t.Errorf("dry run at the limit: %+v, %v", m, err)
 	}
 	if got, err := bulk(t, st, bob, store.BulkSelection{Match: parse("massenbrief")}, store.BulkChange{IsInbox: ptr(false)}); err != nil || len(got) != store.MaxBulkMatches {
@@ -439,7 +448,7 @@ func TestBulkUpdateByMatch(t *testing.T) {
 	if !errors.As(err, &tooMany) || tooMany.Count != store.MaxBulkMatches+1 || tooMany.Limit != store.MaxBulkMatches {
 		t.Errorf("over the limit: %v", err)
 	}
-	if m, err := st.CountBulkMatches(ctx, bob, *parse("massenbrief")); err != nil || m.Count != store.MaxBulkMatches+1 || m.Owners != 0 {
+	if m, err := st.CountBulkMatches(ctx, bob, store.BulkSelection{Match: parse("massenbrief")}); err != nil || m.Count != store.MaxBulkMatches+1 || m.Owners != 0 {
 		t.Errorf("dry run over the limit: %+v, %v", m, err)
 	}
 	var inbox int
@@ -700,5 +709,256 @@ func TestBulkUpdateDeadlockEveryAttempt(t *testing.T) {
 	}
 	if g := getDoc(t, st, doc.ID); g.IsFavorite || g.Title != "doc" {
 		t.Errorf("changed: %+v", g)
+	}
+}
+
+// Every per-document entry of an admin's bulk change of another user's
+// documents has ownerId = that user, by IDs, by a match over everyone's
+// and by a match narrowed to the owner (Owner, the list's owner=<id>);
+// the admin's own documents get none, also with Owner = the admin.
+func TestBulkUpdateAuditOwnerID(t *testing.T) {
+	st, dbURL := storetest.NewWithURL(t)
+	conn := connect(t, dbURL)
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	root := storetest.User(t, st, "root", true)
+	admin := store.Scope{UserID: root.ID, All: true}
+	var aliceDocs, rootDocs []string
+	for i := range 2 {
+		aliceDocs = append(aliceDocs, mustDoc(t, st, alice, newDoc(fmt.Sprint("Rechnung alice ", i))).ID)
+		rootDocs = append(rootDocs, mustDoc(t, st, store.Scope{UserID: root.ID}, newDoc(fmt.Sprint("Rechnung root ", i))).ID)
+	}
+	parse := func(s string) *search.Query {
+		q, err := search.Parse(s, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &q
+	}
+	run := 0
+	for _, c := range []struct {
+		name    string
+		sel     store.BulkSelection
+		targets []string
+		ownerID string // "" for none
+	}{
+		{"ids, alice's", store.BulkSelection{IDs: aliceDocs}, aliceDocs, fmt.Sprint(alice.UserID)},
+		{"match, alice's (owner empty)", store.BulkSelection{Match: parse("alice")}, aliceDocs, fmt.Sprint(alice.UserID)},
+		{"match, owner=alice", store.BulkSelection{Match: parse("rechnung"), Owner: &alice.UserID}, aliceDocs, fmt.Sprint(alice.UserID)},
+		{"ids, own", store.BulkSelection{IDs: rootDocs}, rootDocs, ""},
+		{"match, own (owner empty)", store.BulkSelection{Match: parse("root")}, rootDocs, ""},
+		{"match, owner=me", store.BulkSelection{Match: parse("rechnung"), Owner: &root.ID}, rootDocs, ""},
+	} {
+		before := len(auditRows(t, conn))
+		run++
+		e := &store.AuditEntry{Actor: store.ActorSession, Action: "document.bulk_update"}
+		e.SetUser(root.ID, root.Name)
+		e.Detail("fields", []string{"favorite"})
+		e.Detail("bulkRun", fmt.Sprint("run-", run))
+		ctx := store.WithAudit(context.Background(), e)
+		if _, err := st.BulkUpdateDocuments(ctx, admin, c.sel, store.BulkChange{IsFavorite: ptr(run%2 == 1)}, "document.update"); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		var targets []string
+		for _, r := range auditRows(t, conn)[before:] {
+			if r.Action != "document.update" {
+				continue
+			}
+			targets = append(targets, *r.TargetID)
+			got, ok := r.Details["ownerId"]
+			if c.ownerID == "" && ok || c.ownerID != "" && fmt.Sprint(got) != c.ownerID {
+				t.Errorf("%s: entry of %s has ownerId %v, want %q", c.name, *r.TargetID, got, c.ownerID)
+			}
+		}
+		slices.Sort(targets)
+		if !slices.Equal(targets, slices.Sorted(slices.Values(c.targets))) {
+			t.Errorf("%s: entries for %v, want %v", c.name, targets, c.targets)
+		}
+	}
+	// A non-admin naming another owner matches nothing.
+	if got, err := bulk(t, st, alice, store.BulkSelection{Match: parse("rechnung"), Owner: &root.ID}, store.BulkChange{IsInbox: ptr(false)}); err != nil || len(got) != 0 {
+		t.Errorf("alice with owner=root: %v, %v", got, err)
+	}
+	if m, err := st.CountBulkMatches(context.Background(), alice, store.BulkSelection{Match: parse("rechnung"), Owner: &root.ID}); err != nil || m.Count != 0 {
+		t.Errorf("alice's dry run with owner=root: %+v, %v", m, err)
+	}
+	if m, err := st.CountBulkMatches(context.Background(), admin, store.BulkSelection{Match: parse("rechnung"), Owner: &alice.UserID}); err != nil || m.Count != 2 || m.Owners != 1 {
+		t.Errorf("admin's dry run with owner=alice: %+v, %v", m, err)
+	}
+}
+
+// Repeated tags to add or remove are one tag, also in another case; the
+// same tag added and removed is refused, also in another case.
+func TestBulkUpdateRepeatedTags(t *testing.T) {
+	st := storetest.New(t)
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	a, b := mustTag(t, st, alice, "A", nil), mustTag(t, st, alice, "B", nil)
+	in := newDoc("doc")
+	in.TagIDs = []string{b.ID}
+	doc := mustDoc(t, st, alice, in)
+	sel := store.BulkSelection{IDs: []string{doc.ID}}
+	if _, err := bulk(t, st, alice, sel, store.BulkChange{AddTags: []string{a.ID, a.ID, strings.ToUpper(a.ID)},
+		RemoveTags: []string{b.ID, strings.ToUpper(b.ID), b.ID}}); err != nil {
+		t.Fatalf("repeated tags: %v", err)
+	}
+	if g := getDoc(t, st, doc.ID); !slices.Equal(sortedTags(g), ids(a)) {
+		t.Errorf("tags %v, want %v", g.TagIDs, ids(a))
+	}
+	var ve *store.ValidationError
+	if _, err := bulk(t, st, alice, sel, store.BulkChange{AddTags: []string{b.ID}, RemoveTags: []string{strings.ToUpper(b.ID)}}); !errors.As(err, &ve) || ve.Field != "tags" {
+		t.Errorf("add and remove in another case: %v", err)
+	}
+}
+
+// A document that a concurrent change takes out of the match after the
+// match ran but before the bulk change locked it is left alone: the bulk
+// change runs the search again with the documents locked.
+func TestBulkUpdateByMatchRecheckedAfterLock(t *testing.T) {
+	st, dbURL := storetest.NewWithURL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn := connect(t, dbURL)
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	moved := mustDoc(t, st, alice, newDoc("moved"))
+	stays := mustDoc(t, st, alice, newDoc("stays"))
+	inbox := &search.Query{Filters: []search.Filter{{Field: search.FieldIs, Values: []string{search.IsInbox}}}}
+	before := len(auditRows(t, conn))
+
+	var attempts atomic.Int32
+	matched, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	var changed []string
+	go func() {
+		e := &store.AuditEntry{Actor: store.ActorCLI, Action: "document.bulk_update"}
+		held := store.WithAfterMatch(store.WithAudit(ctx, e), func() {
+			if attempts.Add(1) > 1 {
+				return
+			}
+			close(matched)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+		var err error
+		changed, err = st.BulkUpdateDocuments(held, alice, store.BulkSelection{Match: inbox}, store.BulkChange{IsFavorite: ptr(true)}, "document.update")
+		done <- err
+	}()
+	select {
+	case <-matched:
+	case err := <-done:
+		t.Fatalf("bulk change finished before it matched: %v", err)
+	}
+	// Both matched; now one leaves the inbox.
+	if _, err := st.PatchDocument(ctx, alice, moved.ID, store.DocumentPatch{IsInbox: ptr(false)}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("bulk change: %v", err)
+	}
+	if !slices.Equal(changed, []string{stays.ID}) {
+		t.Errorf("changed %v, want only %s", changed, stays.ID)
+	}
+	if g := getDoc(t, st, moved.ID); g.IsFavorite {
+		t.Errorf("the document no longer matching was changed: %+v", g)
+	}
+	if g := getDoc(t, st, stays.ID); !g.IsFavorite {
+		t.Errorf("the matching document was not changed: %+v", g)
+	}
+	var targets []string
+	for _, r := range auditRows(t, conn)[before:] {
+		if r.Action == "document.update" {
+			targets = append(targets, *r.TargetID)
+		} else if r.Action == "document.bulk_update" && fmt.Sprint(r.Details["count"]) != "1" {
+			t.Errorf("summary: %+v", r.Details)
+		}
+	}
+	if !slices.Equal(targets, []string{stays.ID}) {
+		t.Errorf("per-document entries for %v, want only %s", targets, stays.ID)
+	}
+}
+
+// finishesWithoutLockWait returns done's result, or fails once a statement
+// of application app waits for a lock first.
+func finishesWithoutLockWait(ctx context.Context, t *testing.T, conn *pgx.Conn, app string, done <-chan error) error {
+	t.Helper()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-ctx.Done():
+			t.Fatalf("%s neither finished nor waited", app)
+		default:
+		}
+		var waiting bool
+		err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE datname = current_database() AND application_name = $1 AND wait_event_type = 'Lock')`, app).Scan(&waiting)
+		if err == nil && waiting {
+			t.Fatalf("%s waits for the document's lock", app)
+		}
+	}
+}
+
+// A patch or a bulk change holds the document with FOR NO KEY UPDATE: a
+// row referencing the document (here a job) can be written meanwhile; its
+// foreign-key check (FOR KEY SHARE) waited for FOR UPDATE.
+func TestDocumentLocksLetReferencesIn(t *testing.T) {
+	st, dbURL := storetest.NewWithURL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	doc := mustDoc(t, st, alice, newDoc("doc"))
+	watch := connect(t, dbURL)
+	u, err := url.Parse(dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	q.Set("application_name", "referrer")
+	u.RawQuery = q.Encode()
+	referrer := connect(t, u.String())
+
+	for _, c := range []struct {
+		name   string
+		change func(ctx context.Context) error
+	}{
+		{"patch", func(ctx context.Context) error {
+			_, err := st.PatchDocument(ctx, alice, doc.ID, store.DocumentPatch{Title: ptr("patched")})
+			return err
+		}},
+		{"bulk", func(ctx context.Context) error {
+			_, err := st.BulkUpdateDocuments(ctx, alice, store.BulkSelection{IDs: []string{doc.ID}}, store.BulkChange{IsFavorite: ptr(true)}, "document.update")
+			return err
+		}},
+	} {
+		locked, release := make(chan struct{}), make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			held := store.WithAfterLock(ctx, func() {
+				close(locked)
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+			})
+			done <- c.change(held)
+		}()
+		select {
+		case <-locked:
+		case err := <-done:
+			t.Fatalf("%s finished before it locked: %v", c.name, err)
+		}
+		inserted := make(chan error, 1)
+		go func() {
+			_, err := referrer.Exec(ctx, `INSERT INTO jobs (document_id, state, finished_at) VALUES ($1, 'done', now())`, doc.ID)
+			inserted <- err
+		}()
+		if err := finishesWithoutLockWait(ctx, t, watch, "referrer", inserted); err != nil {
+			t.Fatalf("%s: insert a job: %v", c.name, err)
+		}
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
 	}
 }

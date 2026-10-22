@@ -54,11 +54,13 @@ SET title = sqlc.arg(title),
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner));
 
 -- LockDocument locks the document row for a change of its tags and returns
--- its owner.
+-- its owner. FOR NO KEY UPDATE: no key column changes, so the foreign-key
+-- checks of rows referencing the document (document_tags, jobs; FOR KEY
+-- SHARE) need not wait for the change.
 -- name: LockDocument :one
 SELECT owner_id FROM documents
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
-FOR UPDATE;
+FOR NO KEY UPDATE;
 
 -- name: ClearDocumentTags :exec
 DELETE FROM document_tags WHERE document_id = $1;
@@ -99,12 +101,13 @@ SELECT id, title FROM documents WHERE owner_id = $1 AND archive_serial_number = 
 
 -- LockDocuments locks the documents of ids in the scope, in id order, so
 -- two bulk changes over overlapping sets wait for each other instead of
--- deadlocking. It returns the locked ids with their owners.
+-- deadlocking. It returns the locked ids with their owners. FOR NO KEY
+-- UPDATE as in LockDocument.
 -- name: LockDocuments :many
 SELECT id, owner_id FROM documents
 WHERE id = ANY (sqlc.arg(ids)::uuid[]) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
 ORDER BY id
-FOR UPDATE;
+FOR NO KEY UPDATE;
 
 -- name: CountOwnedTags :one
 SELECT count(*) FROM tags WHERE owner_id = sqlc.arg(owner_id) AND id = ANY (sqlc.arg(ids)::uuid[]);

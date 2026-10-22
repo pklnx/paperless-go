@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -112,11 +114,28 @@ func (p DocumentPatch) Fields() []string {
 	return out
 }
 
+// validTitle reports whether s may be a document's title: storable text
+// of at most MaxTitleLength characters without control characters (Cc,
+// also NUL, tab and line breaks), as the titles the import makes and the
+// names of tags, correspondents and types.
+func validTitle(s string) bool {
+	return validText(s) && !strings.ContainsFunc(s, unicode.IsControl) && utf8.RuneCountInString(s) <= MaxTitleLength
+}
+
+// validNotes reports whether s may be a document's notes: storable text
+// of at most MaxNotesLength characters whose only control characters are
+// tab, line feed and carriage return (notes have several lines).
+func validNotes(s string) bool {
+	return validText(s) && utf8.RuneCountInString(s) <= MaxNotesLength && !strings.ContainsFunc(s, func(r rune) bool {
+		return unicode.IsControl(r) && r != '\t' && r != '\n' && r != '\r'
+	})
+}
+
 func (p DocumentPatch) validate() error {
-	if p.Title != nil && (!validText(*p.Title) || utf8.RuneCountInString(*p.Title) > MaxTitleLength) {
+	if p.Title != nil && !validTitle(*p.Title) {
 		return invalid("title")
 	}
-	if p.Notes != nil && (!validText(*p.Notes) || utf8.RuneCountInString(*p.Notes) > MaxNotesLength) {
+	if p.Notes != nil && !validNotes(*p.Notes) {
 		return invalid("notes")
 	}
 	if p.SetASN && p.ArchiveSerialNumber != nil && *p.ArchiveSerialNumber <= 0 {
@@ -220,9 +239,29 @@ func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p Docume
 // match of Match in the scope (at most MaxBulkMatches), resolved by the
 // store with the search's own filters. Exactly one of them is set.
 // Match's sort, cursor and limit are ignored.
+//
+// Owner, with Match, narrows the match to that user's documents (the
+// list's owner=me or owner=<user ID>). The scope stays the acting user's,
+// so the audit records an admin's change of another user's documents
+// with their ownerId either way; outside the scope (a non-admin naming
+// another user) nothing matches.
 type BulkSelection struct {
 	IDs   []string
 	Match *search.Query
+	Owner *int64
+}
+
+// matchScope is the scope a match of sel is resolved and locked in: sc,
+// or with Owner only that owner's documents. ok is false when sc may not
+// see them.
+func (sel BulkSelection) matchScope(sc Scope) (Scope, bool) {
+	if sel.Owner == nil {
+		return sc, true
+	}
+	if !sc.All && *sel.Owner != sc.UserID {
+		return Scope{}, false
+	}
+	return Scope{UserID: *sel.Owner}, true
 }
 
 // BulkChange holds what a bulk change does to each document: tags to add
@@ -321,11 +360,19 @@ func (s *Store) match(ctx context.Context, d db.DBTX, m resolvedMatch) ([]db.Mat
 	return rows, int(rows[0].Total), nil
 }
 
-// CountBulkMatches tells what a bulk change by q in the scope would cover,
-// without changing anything: the dry run the UI shows before it asks for
-// confirmation. It uses the same resolution as BulkUpdateDocuments.
-func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, q search.Query) (BulkMatch, error) {
-	m, err := s.resolveMatch(ctx, sc, q)
+// CountBulkMatches tells what a bulk change by sel.Match (and sel.Owner)
+// in the scope would cover, without changing anything: the dry run the UI
+// shows before it asks for confirmation. It uses the same resolution as
+// BulkUpdateDocuments.
+func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelection) (BulkMatch, error) {
+	if sel.Match == nil || sel.IDs != nil {
+		return BulkMatch{}, invalid("selection")
+	}
+	msc, ok := sel.matchScope(sc)
+	if !ok {
+		return BulkMatch{}, nil
+	}
+	m, err := s.resolveMatch(ctx, msc, *sel.Match)
 	if err != nil {
 		return BulkMatch{}, err
 	}
@@ -347,14 +394,18 @@ func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, q search.Query) 
 // BulkUpdateDocuments applies c to the documents of sel, all or nothing,
 // in one transaction, and returns the IDs of the changed documents in id
 // order. It locks the documents in id order (so two bulk changes over
-// overlapping sets wait for each other), checks them, removes and adds the
+// overlapping sets wait for each other); by search it then runs the
+// search again and keeps only the locked documents that still match, so a
+// document changed between the match and the lock so that it no longer
+// matches is left alone. It checks them, removes and adds the
 // tags (adding a tag a document has, or removing one it lacks, is no
 // error), sets the fields and touches modified_at of every one.
 //
 // The audit entry of ctx is the summary: the store adds count and ids; the caller
 // sets the rest. With it, each document gets an entry of its own
 // (perDocument's action, target the document, the summary's details
-// fields and bulkRun, and ownerId when the owner is not the scope's user).
+// fields and bulkRun, and ownerId when the owner is not the acting user,
+// sc.UserID, also with sel.Owner).
 //
 // Errors: a *ValidationError (ErrInvalid) for an empty selection, both or
 // neither of IDs and Match, nothing to change, or a tag both added and
@@ -398,11 +449,19 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 
 	var ids []pgtype.UUID
 	var m resolvedMatch
+	lsc := sc // the scope the documents are locked in
 	if sel.Match != nil {
-		if m, err = s.resolveMatch(ctx, sc, *sel.Match); err != nil {
+		var ok bool
+		if lsc, ok = sel.matchScope(sc); !ok {
+			return []string{}, nil
+		}
+		if m, err = s.resolveMatch(ctx, lsc, *sel.Match); err != nil {
 			return nil, err
 		}
 	} else {
+		if sel.Owner != nil {
+			return nil, invalid("selection")
+		}
 		if len(sel.IDs) == 0 {
 			return nil, invalid("ids")
 		}
@@ -442,15 +501,28 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 				for i, r := range rows {
 					want[i] = r.ID
 				}
+				afterMatch(ctx)
 			}
-			locked, err := q.LockDocuments(ctx, db.LockDocumentsParams{Ids: want, Owner: sc.owner()})
+			locked, err := q.LockDocuments(ctx, db.LockDocumentsParams{Ids: want, Owner: lsc.owner()})
 			if err != nil {
 				return err
 			}
 			afterLock(ctx)
-			// By search, a match deleted before the lock is left out; by
-			// IDs, every one must exist.
-			if sel.Match == nil && len(locked) != len(want) {
+			if sel.Match != nil {
+				// The match ran before the lock under READ COMMITTED: a
+				// concurrent change committed in between may have taken a
+				// document out of it. Run it again now that the documents
+				// are locked (the statement sees every change committed
+				// before the lock, and the lock keeps them as they are)
+				// and keep the locked ones that still match; a match
+				// deleted before the lock is left out too. Documents that
+				// match only now were not part of the selection.
+				locked, err = s.stillMatching(ctx, tx, m, locked)
+				if err != nil {
+					return err
+				}
+			} else if len(locked) != len(want) {
+				// By IDs, every one must exist.
 				return ErrNotFound
 			}
 			if len(locked) == 0 {
@@ -499,7 +571,7 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 			for _, l := range locked {
 				changed = append(changed, idString(l.ID))
 			}
-			auditBulk(ctx, sc, locked, perDocument)
+			auditBulk(ctx, sc.UserID, locked, perDocument)
 			return nil
 		})
 	})
@@ -512,13 +584,39 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 	return changed, nil
 }
 
+// afterMatchKey carries a test seam: a function a bulk change by search
+// calls after the match, before it locks the documents (see
+// export_test.go).
+type afterMatchKey struct{}
+
+func afterMatch(ctx context.Context) {
+	if f, ok := ctx.Value(afterMatchKey{}).(func()); ok {
+		f()
+	}
+}
+
 // errNothingMatched rolls back a bulk change by search without matches,
 // so no audit entry is written.
 var errNothingMatched = errors.New("store: nothing matched")
 
+// stillMatching returns the rows of locked that the search of m matches
+// now, in their order.
+func (s *Store) stillMatching(ctx context.Context, tx pgx.Tx, m resolvedMatch, locked []db.LockDocumentsRow) ([]db.LockDocumentsRow, error) {
+	rows, _, err := s.match(ctx, tx, m)
+	if err != nil {
+		return nil, err
+	}
+	now := make(map[[16]byte]bool, len(rows))
+	for _, r := range rows {
+		now[r.ID.Bytes] = true
+	}
+	return slices.DeleteFunc(locked, func(l db.LockDocumentsRow) bool { return !now[l.ID.Bytes] }), nil
+}
+
 // auditBulk completes the summary entry of ctx with the count and adds
-// one entry per document.
-func auditBulk(ctx context.Context, sc Scope, locked []db.LockDocumentsRow, action string) {
+// one entry per document, with ownerId for a document whose owner is not
+// actor (the acting user).
+func auditBulk(ctx context.Context, actor int64, locked []db.LockDocumentsRow, action string) {
 	e := auditFrom(ctx)
 	if e == nil {
 		return
@@ -538,7 +636,7 @@ func auditBulk(ctx context.Context, sc Scope, locked []db.LockDocumentsRow, acti
 				d.Detail(k, v)
 			}
 		}
-		if l.OwnerID != sc.UserID {
+		if l.OwnerID != actor {
 			d.Detail("ownerId", l.OwnerID)
 		}
 		entries[i] = d

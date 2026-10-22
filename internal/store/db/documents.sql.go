@@ -422,7 +422,7 @@ func (q *Queries) ListDocuments(ctx context.Context, owner *int64) ([]ListDocume
 const lockDocument = `-- name: LockDocument :one
 SELECT owner_id FROM documents
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
-FOR UPDATE
+FOR NO KEY UPDATE
 `
 
 type LockDocumentParams struct {
@@ -431,7 +431,9 @@ type LockDocumentParams struct {
 }
 
 // LockDocument locks the document row for a change of its tags and returns
-// its owner.
+// its owner. FOR NO KEY UPDATE: no key column changes, so the foreign-key
+// checks of rows referencing the document (document_tags, jobs; FOR KEY
+// SHARE) need not wait for the change.
 func (q *Queries) LockDocument(ctx context.Context, arg LockDocumentParams) (int64, error) {
 	row := q.db.QueryRow(ctx, lockDocument, arg.ID, arg.Owner)
 	var owner_id int64
@@ -443,7 +445,7 @@ const lockDocuments = `-- name: LockDocuments :many
 SELECT id, owner_id FROM documents
 WHERE id = ANY ($1::uuid[]) AND ($2::bigint IS NULL OR owner_id = $2)
 ORDER BY id
-FOR UPDATE
+FOR NO KEY UPDATE
 `
 
 type LockDocumentsParams struct {
@@ -458,7 +460,8 @@ type LockDocumentsRow struct {
 
 // LockDocuments locks the documents of ids in the scope, in id order, so
 // two bulk changes over overlapping sets wait for each other instead of
-// deadlocking. It returns the locked ids with their owners.
+// deadlocking. It returns the locked ids with their owners. FOR NO KEY
+// UPDATE as in LockDocument.
 func (q *Queries) LockDocuments(ctx context.Context, arg LockDocumentsParams) ([]LockDocumentsRow, error) {
 	rows, err := q.db.Query(ctx, lockDocuments, arg.Ids, arg.Owner)
 	if err != nil {
