@@ -61,10 +61,7 @@ func (s *Store) CreateCorrespondent(ctx context.Context, sc Scope, in Correspond
 		return nil, err
 	}
 	var out *Correspondent
-	err = s.inTxWith(ctx, func(t *writeTx) error {
-		if err := t.lockOwners(ctx, owner); err != nil {
-			return err
-		}
+	err = s.ownerTx(ctx, []int64{owner}, func(ctx context.Context, t *writeTx) error {
 		r, err := t.q.CreateCorrespondent(ctx, db.CreateCorrespondentParams{
 			OwnerID: owner, Name: in.Name, MatchText: in.MatchText, MatchMode: orDefault(in.MatchMode, DefaultMatchMode),
 		})
@@ -115,7 +112,7 @@ func (s *Store) UpdateCorrespondent(ctx context.Context, sc Scope, id string, in
 		return nil, ErrNotFound
 	}
 	var r db.Correspondent
-	err := s.inOwnerTx(ctx, sc, u, kindCorrespondent, func(t *writeTx) error {
+	err := s.inOwnerTx(ctx, sc, u, kindCorrespondent, func(ctx context.Context, t *writeTx) error {
 		var err error
 		r, err = t.q.UpdateCorrespondent(ctx, db.UpdateCorrespondentParams{
 			ID: u, Owner: sc.owner(), Name: in.Name, MatchText: in.MatchText,
@@ -141,7 +138,7 @@ func (s *Store) DeleteCorrespondent(ctx context.Context, sc Scope, id string) er
 	if !ok {
 		return ErrNotFound
 	}
-	return mapErr(s.inOwnerTx(ctx, sc, u, kindCorrespondent, func(t *writeTx) error {
+	return mapErr(s.inOwnerTx(ctx, sc, u, kindCorrespondent, func(ctx context.Context, t *writeTx) error {
 		afterLock(ctx)
 		r, err := t.q.DeleteCorrespondent(ctx, db.DeleteCorrespondentParams{ID: u, Owner: sc.owner()})
 		if err != nil {
@@ -194,10 +191,7 @@ func (s *Store) CreateDocumentType(ctx context.Context, sc Scope, in DocumentTyp
 		return nil, err
 	}
 	var out *DocumentType
-	err = s.inTxWith(ctx, func(t *writeTx) error {
-		if err := t.lockOwners(ctx, owner); err != nil {
-			return err
-		}
+	err = s.ownerTx(ctx, []int64{owner}, func(ctx context.Context, t *writeTx) error {
 		r, err := t.q.CreateDocumentType(ctx, db.CreateDocumentTypeParams{
 			OwnerID: owner, Name: in.Name, Symbol: orDefault(in.Symbol, DefaultDocumentTypeSymbol),
 			MatchText: in.MatchText, MatchMode: orDefault(in.MatchMode, DefaultMatchMode),
@@ -249,7 +243,7 @@ func (s *Store) UpdateDocumentType(ctx context.Context, sc Scope, id string, in 
 		return nil, ErrNotFound
 	}
 	var r db.DocumentType
-	err := s.inOwnerTx(ctx, sc, u, kindDocumentType, func(t *writeTx) error {
+	err := s.inOwnerTx(ctx, sc, u, kindDocumentType, func(ctx context.Context, t *writeTx) error {
 		var err error
 		r, err = t.q.UpdateDocumentType(ctx, db.UpdateDocumentTypeParams{
 			ID: u, Owner: sc.owner(), Name: in.Name, Symbol: orDefault(in.Symbol, DefaultDocumentTypeSymbol),
@@ -274,7 +268,7 @@ func (s *Store) DeleteDocumentType(ctx context.Context, sc Scope, id string) err
 	if !ok {
 		return ErrNotFound
 	}
-	return mapErr(s.inOwnerTx(ctx, sc, u, kindDocumentType, func(t *writeTx) error {
+	return mapErr(s.inOwnerTx(ctx, sc, u, kindDocumentType, func(ctx context.Context, t *writeTx) error {
 		afterLock(ctx)
 		r, err := t.q.DeleteDocumentType(ctx, db.DeleteDocumentTypeParams{ID: u, Owner: sc.owner()})
 		if err != nil {
@@ -337,10 +331,7 @@ func (s *Store) CreateTag(ctx context.Context, sc Scope, in TagInput) (*Tag, err
 		return nil, err
 	}
 	var out *Tag
-	err = s.inTxWith(ctx, func(t *writeTx) error {
-		if err := t.lockOwners(ctx, owner); err != nil {
-			return err
-		}
+	err = s.ownerTx(ctx, []int64{owner}, func(ctx context.Context, t *writeTx) error {
 		r, err := t.q.CreateTag(ctx, db.CreateTagParams{
 			OwnerID: owner, Name: in.Name, ColorHex: orDefault(in.ColorHex, DefaultTagColor),
 			Symbol: orDefault(in.Symbol, DefaultTagSymbol), ParentID: parent,
@@ -398,7 +389,7 @@ func (s *Store) UpdateTag(ctx context.Context, sc Scope, id string, in TagInput)
 		return nil, err
 	}
 	var r db.Tag
-	err = s.inOwnerTx(ctx, sc, u, kindTag, func(t *writeTx) error {
+	err = s.inOwnerTx(ctx, sc, u, kindTag, func(ctx context.Context, t *writeTx) error {
 		var err error
 		r, err = t.q.UpdateTag(ctx, db.UpdateTagParams{
 			ID: u, Owner: sc.owner(), Name: in.Name, ColorHex: orDefault(in.ColorHex, DefaultTagColor),
@@ -427,7 +418,7 @@ func (s *Store) DeleteTag(ctx context.Context, sc Scope, id string) error {
 	if !ok {
 		return ErrNotFound
 	}
-	err := s.inOwnerTx(ctx, sc, u, kindTag, func(t *writeTx) error {
+	err := s.inOwnerTx(ctx, sc, u, kindTag, func(ctx context.Context, t *writeTx) error {
 		afterLock(ctx)
 		r, err := t.q.DeleteTag(ctx, db.DeleteTagParams{ID: u, Owner: sc.owner()})
 		if err != nil {
@@ -457,30 +448,25 @@ const (
 	kindTag
 )
 
-// inOwnerTx runs fn in a transaction that first reads the owner of the
-// metadata row id of kind in the scope (ErrNotFound outside it) and takes
-// that owner's write lock (locking.go). fn checks the owner of the row it
-// locks or writes with t.holds.
-func (s *Store) inOwnerTx(ctx context.Context, sc Scope, id pgtype.UUID, kind int, fn func(*writeTx) error) error {
-	return s.inTxWith(ctx, func(t *writeTx) error {
-		var owner int64
-		var err error
-		switch kind {
-		case kindCorrespondent:
-			owner, err = t.q.CorrespondentOwner(ctx, db.CorrespondentOwnerParams{ID: id, Owner: sc.owner()})
-		case kindDocumentType:
-			owner, err = t.q.DocumentTypeOwner(ctx, db.DocumentTypeOwnerParams{ID: id, Owner: sc.owner()})
-		default:
-			owner, err = t.q.TagOwner(ctx, db.TagOwnerParams{ID: id, Owner: sc.owner()})
-		}
-		if err != nil {
-			return err
-		}
-		if err := t.lockOwners(ctx, owner); err != nil {
-			return err
-		}
-		return fn(t)
-	})
+// inOwnerTx reads the owner of the metadata row id of kind in the scope
+// (ErrNotFound outside it), then runs fn in an owner transaction of that
+// owner (ownerTx: its gate, then its write lock). fn checks the owner of
+// the row it locks or writes with t.holds.
+func (s *Store) inOwnerTx(ctx context.Context, sc Scope, id pgtype.UUID, kind int, fn func(context.Context, *writeTx) error) error {
+	var owner int64
+	var err error
+	switch kind {
+	case kindCorrespondent:
+		owner, err = s.q.CorrespondentOwner(ctx, db.CorrespondentOwnerParams{ID: id, Owner: sc.owner()})
+	case kindDocumentType:
+		owner, err = s.q.DocumentTypeOwner(ctx, db.DocumentTypeOwnerParams{ID: id, Owner: sc.owner()})
+	default:
+		owner, err = s.q.TagOwner(ctx, db.TagOwnerParams{ID: id, Owner: sc.owner()})
+	}
+	if err != nil {
+		return err
+	}
+	return s.ownerTx(ctx, []int64{owner}, fn)
 }
 
 // creatorFor returns the owner of a new row: the scope's user for 0 or
@@ -551,7 +537,7 @@ func (s *Store) PatchCorrespondent(ctx context.Context, sc Scope, id string, p C
 		return nil, ErrNotFound
 	}
 	var out *Correspondent
-	err := s.inOwnerTx(ctx, sc, u, kindCorrespondent, func(t *writeTx) error {
+	err := s.inOwnerTx(ctx, sc, u, kindCorrespondent, func(ctx context.Context, t *writeTx) error {
 		q := t.q
 		old, err := q.LockCorrespondent(ctx, db.LockCorrespondentParams{ID: u, Owner: sc.owner()})
 		if err != nil {
@@ -594,7 +580,7 @@ func (s *Store) PatchDocumentType(ctx context.Context, sc Scope, id string, p Do
 		return nil, ErrNotFound
 	}
 	var out *DocumentType
-	err := s.inOwnerTx(ctx, sc, u, kindDocumentType, func(t *writeTx) error {
+	err := s.inOwnerTx(ctx, sc, u, kindDocumentType, func(ctx context.Context, t *writeTx) error {
 		q := t.q
 		old, err := q.LockDocumentType(ctx, db.LockDocumentTypeParams{ID: u, Owner: sc.owner()})
 		if err != nil {
@@ -649,7 +635,7 @@ func (s *Store) PatchTag(ctx context.Context, sc Scope, id string, p TagPatch) (
 		}
 	}
 	var out *Tag
-	err := s.inOwnerTx(ctx, sc, u, kindTag, func(t *writeTx) error {
+	err := s.inOwnerTx(ctx, sc, u, kindTag, func(ctx context.Context, t *writeTx) error {
 		q := t.q
 		old, err := q.LockTag(ctx, db.LockTagParams{ID: u, Owner: sc.owner()})
 		if err != nil {

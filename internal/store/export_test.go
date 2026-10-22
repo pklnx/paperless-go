@@ -85,8 +85,9 @@ func WithBeforeLock(ctx context.Context, f func()) context.Context {
 	return context.WithValue(ctx, beforeLockKey{}, f)
 }
 
-// LockEvent is what WithLockRecorder reports: a lockOwners call (Owners
-// set, ascending) or a guarded statement (Query its sqlc name, "" for
+// LockEvent is what WithLockRecorder reports: an owner transaction past
+// its gate (Gated set, ascending), a lockOwners call (Owners set,
+// ascending) or a guarded statement (Query its sqlc name, "" for
 // other SQL; Writes whether it needs the owner lock; Locked whether the
 // transaction held it).
 type LockEvent = lockEvent
@@ -99,10 +100,69 @@ func WithLockRecorder(ctx context.Context, rec func(LockEvent)) context.Context 
 
 // DisableOwnerLock makes lockOwners skip the lock until the test ends, and
 // with it the guard (the writes run as if the lock were held): it shows
-// that a concurrency test fails without the owner lock.
+// that a concurrency test fails without the owner lock. The owner gate
+// stays on. It flips a package-global switch, so a test that uses it must
+// not run in parallel (t.Parallel) with other store tests.
 func DisableOwnerLock(t *testing.T) {
 	ownerLockDisabled.Store(true)
 	t.Cleanup(func() { ownerLockDisabled.Store(false) })
+}
+
+// DisableOwnerGate makes ownerTx skip the owner gate until the test ends
+// (the owner lock stays): it shows that a test fails without the gate.
+// Like DisableOwnerLock it flips a package-global switch: no t.Parallel.
+func DisableOwnerGate(t *testing.T) {
+	ownerGateDisabled.Store(true)
+	t.Cleanup(func() { ownerGateDisabled.Store(false) })
+}
+
+// WithGateWait makes a writer with ctx call f when it starts to wait at
+// the owner gate, because another writer of the owner holds it.
+func WithGateWait(ctx context.Context, f func()) context.Context {
+	return context.WithValue(ctx, gateWaitKey{}, f)
+}
+
+// WithAfterOwnerLock makes a writer with ctx call f in its transaction
+// right after it took the owner locks; query runs a statement there and
+// returns its single text value.
+func WithAfterOwnerLock(ctx context.Context, f func(query func(sql string) (string, error))) context.Context {
+	return context.WithValue(ctx, afterOwnerLockKey{}, func(t *writeTx) {
+		f(func(sql string) (string, error) {
+			var v string
+			err := t.g.QueryRow(ctx, sql).Scan(&v)
+			return v, err
+		})
+	})
+}
+
+// PoolSetting returns the run-time parameter name as a statement on the
+// pool sees it.
+func PoolSetting(ctx context.Context, s *Store, name string) (string, error) {
+	var v string
+	err := s.g.QueryRow(ctx, `SELECT current_setting($1)`, name).Scan(&v)
+	return v, err
+}
+
+// AcquiredConns is the number of the store's pool connections in use now.
+func AcquiredConns(s *Store) int32 { return s.pool.Stat().AcquiredConns() }
+
+// GateEntries is the number of owners the store's gate has an entry for.
+func GateEntries(s *Store) int { return s.gate.size() }
+
+// LockWithoutGate calls lockOwners in a transaction that did not take the
+// gate, as a writer bypassing ownerTx would.
+func LockWithoutGate(ctx context.Context, s *Store, owner int64) error {
+	return s.inTxWith(ctx, func(t *writeTx) error { return t.lockOwners(ctx, owner) })
+}
+
+// NestedCreateTag creates a tag of owner inside an owner transaction of
+// owner, with the transaction's context, as a writer calling another
+// writer would.
+func NestedCreateTag(ctx context.Context, s *Store, owner int64) error {
+	return s.ownerTx(ctx, []int64{owner}, func(ctx context.Context, _ *writeTx) error {
+		_, err := s.CreateTag(ctx, Scope{UserID: owner}, TagInput{Name: "nested"})
+		return err
+	})
 }
 
 // OwnerLockPrefix is the key text of the owner lock.
@@ -114,6 +174,8 @@ var (
 	ErrOwnerNotLocked = errOwnerNotLocked
 	ErrLockedTwice    = errLockedTwice
 	ErrNoOwners       = errNoOwners
+	ErrNotGated       = errNotGated
+	ErrNestedOwnerTx  = errNestedOwnerTx
 )
 
 // UnlockedPatch runs the raw PatchDocument query on document id (a new
@@ -135,16 +197,23 @@ func UnlockedPatch(ctx context.Context, s *Store, id string, inTx bool) error {
 	})
 }
 
-// GuardedExec runs sql through the guard: on the pool (owners nil), or in
-// a transaction that first calls lockOwners with each list of owners in
-// turn (an empty outer list: no lock).
+// GuardedExec runs sql through the guard: on the pool (owners nil), in a
+// transaction without the lock (an empty outer list), or in an owner
+// transaction of the first list of owners that then calls lockOwners
+// again with each further list.
 func GuardedExec(ctx context.Context, s *Store, sql string, owners [][]int64) error {
 	if owners == nil {
 		_, err := s.g.Exec(ctx, sql)
 		return err
 	}
-	return s.inTxWith(ctx, func(t *writeTx) error {
-		for _, o := range owners {
+	if len(owners) == 0 {
+		return s.inTxWith(ctx, func(t *writeTx) error {
+			_, err := t.g.Exec(ctx, sql)
+			return err
+		})
+	}
+	return s.ownerTx(ctx, owners[0], func(ctx context.Context, t *writeTx) error {
+		for _, o := range owners[1:] {
 			if err := t.lockOwners(ctx, o...); err != nil {
 				return err
 			}

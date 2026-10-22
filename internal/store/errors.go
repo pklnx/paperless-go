@@ -59,6 +59,12 @@ var (
 	// SQL outside the store and for deadlocks among jobs-only writers.
 	ErrRetry = errors.New("store: concurrent change, try again")
 
+	// ErrBusy means a write gave up waiting for another change of the
+	// same owner: the bound of WithOwnerWait passed at the owner gate or
+	// at the owner lock (lock_timeout, SQLSTATE 55P03 at the lock only).
+	// Nothing was written; the same call can be tried again later.
+	ErrBusy = errors.New("store: another change of the owner is still running")
+
 	// ErrUnknownUser means the owner of a new row does not exist (any
 	// more), for example because the user was deleted meanwhile.
 	ErrUnknownUser = errors.New("store: unknown user")

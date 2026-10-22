@@ -20,7 +20,7 @@ Compose, set them in `.env`; `docker-compose.yml` passes them on.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PAPERLESS_GO_DATABASE_URL` | (required) | PostgreSQL URL; PostgreSQL 17 or newer (older servers are refused). Compose sets it. |
+| `PAPERLESS_GO_DATABASE_URL` | (required) | PostgreSQL URL; PostgreSQL 17 or newer (older servers are refused). Compose sets it. The connection pool has `max(4, number of CPUs)` connections; `pool_max_conns` in the URL changes that (`postgres://…/paperless?pool_max_conns=10`). Writes of one user wait for each other without holding a connection, so the pool fills only with concurrent work of different users. |
 | `PAPERLESS_GO_DATA_DIR` | `./data` (`/data` in the image) | Directory of the document files. |
 | `PAPERLESS_GO_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `PAPERLESS_GO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Host names accepted in the `Host` header, comma-separated, without port. See [DNS rebinding](./security#dns-rebinding). |

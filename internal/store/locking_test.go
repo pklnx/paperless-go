@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -319,9 +320,13 @@ func TestEveryWriterLocksItsOwner(t *testing.T) {
 			t.Errorf("%s: %v, want %v", c.name, err, c.err)
 			continue
 		}
-		var locks [][]int64
+		var locks, gates [][]int64
 		writes := 0
 		for _, e := range events {
+			if e.Gated != nil {
+				gates = append(gates, e.Gated)
+				continue
+			}
 			if e.Owners != nil {
 				locks = append(locks, e.Owners)
 				continue
@@ -332,6 +337,9 @@ func TestEveryWriterLocksItsOwner(t *testing.T) {
 					t.Errorf("%s: %s ran without the owner lock", c.name, e.Query)
 				}
 			}
+		}
+		if !reflect.DeepEqual(gates, locks) {
+			t.Errorf("%s: gated %v, locked %v; want the same owners", c.name, gates, locks)
 		}
 		switch {
 		case c.owners == nil && len(locks) != 0:
@@ -360,7 +368,7 @@ func TestEveryWriterLocksItsOwner(t *testing.T) {
 		"ListCorrespondents", "ListCorrespondentsWithCounts", "ListDeadlines", "ListDocumentTypes",
 		"ListDocumentTypesWithCounts", "ListDocuments", "ListPasskeys", "ListSavedViews", "ListTags",
 		"ListTagsWithCounts", "ListUsers", "ListenJobs", "Migrate", "MigrateAndRebuild", "MigrateDown",
-		"MigrateDownTo", "MigrationStatus", "OwnedRowCounts", "PasskeyCounts", "Ping", "ReapJobs",
+		"MigrateDownTo", "MigrationStatus", "OwnedRowCounts", "OwnerGateWaiters", "PasskeyCounts", "Ping", "ReapJobs",
 		"RehashUserPassword", "ReleaseJob", "RemoveOwnPasskey", "RemovePasskeys", "ReplaceRecoveryCodes",
 		"Reprocess", "ResetTwoFactor", "ResetUserPassword", "RetryJob", "RevokeAPIKey", "RevokeUserAPIKeys",
 		"SchemaVersions", "SearchDocuments", "SetUserAdmin", "SetUserLocked", "SetUserPassword", "StartSession",
@@ -415,10 +423,30 @@ func waitForAdvisory(ctx context.Context, t *testing.T, conn *pgx.Conn, app stri
 	}
 }
 
+// waitForGate returns once n writers wait at st's owner gate, or fails
+// when one of dones delivers first or ctx ends.
+func waitForGate(ctx context.Context, t *testing.T, st *store.Store, n int, dones ...chan error) {
+	t.Helper()
+	for st.OwnerGateWaiters() < n {
+		for i, d := range dones {
+			select {
+			case err := <-d:
+				t.Fatalf("operation %d finished without waiting at the gate: %v", i, err)
+			default:
+			}
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("%d of %d never waited at the gate", st.OwnerGateWaiters(), n)
+		}
+		runtime.Gosched()
+	}
+}
+
 // One owner's writers serialise: while alice's bulk change holds her lock,
 // her patch, tag delete, tag create, upload and OCR completion wait for it
-// (at the advisory lock); bob's same calls go through without any lock
-// wait. After the release everything succeeds.
+// (one of them at the advisory lock, the others at her store's owner
+// gate, without a connection); bob's same calls go through without any
+// lock wait. After the release everything succeeds.
 func TestWritersOfOneOwnerSerialise(t *testing.T) {
 	st, dbURL := storetest.NewWithURL(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -479,7 +507,8 @@ func TestWritersOfOneOwnerSerialise(t *testing.T) {
 	for _, op := range ops(alice) {
 		waiting = append(waiting, startOp(op))
 	}
-	waitForAdvisory(ctx, t, conn, alice.app, len(waiting), waiting...)
+	waitForAdvisory(ctx, t, conn, alice.app, 1, waiting...)
+	waitForGate(ctx, t, alice.store, len(waiting)-1, waiting...)
 	for i, op := range ops(bob) {
 		if err := finishesWithoutLockWait(ctx, t, conn, bob.app, startOp(op)); err != nil {
 			t.Errorf("bob's operation %d: %v", i, err)

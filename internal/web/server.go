@@ -185,9 +185,23 @@ func (s *Server) Handler() http.Handler {
 	h := s.protect(s.authenticate(mux, accessOf), routeBody)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.warnIgnoredForwardedFor(r)
-		h.ServeHTTP(w, r)
+		// Every request's writes wait at most ownerWaitBound for other
+		// changes of the same owner (store.ErrBusy, 503).
+		h.ServeHTTP(w, r.WithContext(store.WithOwnerWait(r.Context(), ownerWaitBound)))
 	})
 }
+
+// ownerWait is how long a request's write waits for other changes of the
+// same owner before it answers 503 with Retry-After (busyRetryAfter):
+// about five bulk changes of MaxBulkMatches queued ahead, well below a
+// reverse proxy's usual timeout. It is no setting.
+const ownerWait = 15 * time.Second
+
+// busyRetryAfter is the Retry-After of that 503, in seconds.
+const busyRetryAfter = "5"
+
+// ownerWaitBound is ownerWait; tests shorten it.
+var ownerWaitBound = ownerWait
 
 // warnIgnoredForwardedFor logs once when a request carries X-Forwarded-For
 // from a peer that is not a trusted proxy, also from loopback: behind a
@@ -382,6 +396,11 @@ func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
 		// A deadlock with a concurrent change: nothing was written.
 		w.Header().Set("Retry-After", "1")
 		s.fail(w, r, http.StatusServiceUnavailable, "a concurrent change got in the way; try again", err)
+	case errors.Is(err, store.ErrBusy):
+		// Another change of the owner ran longer than ownerWait: nothing
+		// was written.
+		w.Header().Set("Retry-After", busyRetryAfter)
+		s.fail(w, r, http.StatusServiceUnavailable, "another change of these documents is still running; try again", err)
 	case errors.Is(err, store.ErrUnknownUser):
 		// The user was removed while the request ran; the session is gone
 		// with it.

@@ -202,8 +202,9 @@ func (in documentPatchJSON) patch() (store.DocumentPatch, string) {
 // owner's, invalid_title, invalid_notes, invalid_asn, invalid_field,
 // nothing_to_change), 404 outside the scope, 409 asn_taken naming the
 // document that has the number, 409 document_changed with the current
-// modifiedAt when expectedModifiedAt no longer holds, 503 without the audit log or after
-// repeated deadlocks (Retry-After).
+// modifiedAt when expectedModifiedAt no longer holds, 503 without the audit log,
+// after a deadlock with SQL outside the store (Retry-After: 1) or when
+// another change of the owner ran longer than ownerWait (Retry-After: 5).
 func (s *Server) handlePatchDocument(w http.ResponseWriter, r *http.Request) {
 	if !s.documentsAvailable(w, r) {
 		return

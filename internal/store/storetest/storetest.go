@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -32,6 +33,14 @@ func New(t *testing.T) *store.Store {
 // need to set up state the store API cannot create.
 func NewWithURL(t *testing.T) (*store.Store, string) {
 	t.Helper()
+	return NewWithParams(t, nil)
+}
+
+// NewWithParams is NewWithURL with extra connection parameters in the
+// store's URL, for example pool_max_conns for a test that needs a pool of
+// a known size. The returned URL has none of them.
+func NewWithParams(t *testing.T, params map[string]string) (*store.Store, string) {
+	t.Helper()
 	base := os.Getenv(EnvURL)
 	if base == "" {
 		t.Skip(EnvURL + " not set; skipping database test")
@@ -55,6 +64,14 @@ func NewWithURL(t *testing.T) (*store.Store, string) {
 		t.Fatal(err)
 	}
 	u.Path = "/" + name
+	plain := u.String()
+	if len(params) > 0 {
+		q := u.Query()
+		for k, v := range params {
+			q.Set(k, v)
+		}
+		u.RawQuery = strings.ReplaceAll(q.Encode(), "+", "%20")
+	}
 	st, err := store.Open(ctx, u.String())
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +84,7 @@ func NewWithURL(t *testing.T) (*store.Store, string) {
 	if _, err := st.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return st, u.String()
+	return st, plain
 }
 
 // Password is the password of users created by User.
