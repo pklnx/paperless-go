@@ -32,8 +32,8 @@ DELETE FROM passkeys WHERE id = $1 AND user_id = $2 RETURNING name, credential_i
 DELETE FROM passkeys WHERE user_id = $1;
 
 -- name: CreateWebAuthnCeremony :exec
-INSERT INTO webauthn_ceremonies (id, kind, user_id, name, factor, data, client_key, created_at, expires_at)
-VALUES (@id, @kind, @user_id, @name, @factor, @data, @client_key, @now, @expires_at);
+INSERT INTO webauthn_ceremonies (id, kind, user_id, name, factor, data, client_key, client_net_mid, client_net_wide, created_at, expires_at)
+VALUES (@id, @kind, @user_id, @name, @factor, @data, @client_key, @client_net_mid, @client_net_wide, @now, @expires_at);
 
 -- name: TakeWebAuthnCeremony :one
 -- Uses up a ceremony that has not expired at now.
@@ -46,10 +46,18 @@ RETURNING *;
 SELECT pg_advisory_xact_lock(hashtext('webauthn_login_ceremonies'));
 
 -- name: CountOpenLoginCeremonies :one
--- All open logins, and those of one client.
+-- All open logins, those of one client and those of its two networks. An
+-- empty network key counts nothing: NULL matches no row.
 SELECT count(*) AS total,
-       count(*) FILTER (WHERE client_key = @client_key::text) AS client
+       count(*) FILTER (WHERE client_key = @client_key::text) AS client,
+       count(*) FILTER (WHERE client_net_mid = NULLIF(@net_mid::text, '')) AS net_mid,
+       count(*) FILTER (WHERE client_net_wide = NULLIF(@net_wide::text, '')) AS net_wide
 FROM webauthn_ceremonies WHERE kind = 'login' AND expires_at > @now;
+
+-- name: DeleteLoginCeremonies :execrows
+-- Drops logins by the hashes of their tokens, expired or not; never a
+-- registration.
+DELETE FROM webauthn_ceremonies WHERE id = ANY(@ids::bytea[]) AND kind = 'login';
 
 -- name: DeleteExpiredWebAuthnCeremonies :execrows
 DELETE FROM webauthn_ceremonies WHERE expires_at <= @now;

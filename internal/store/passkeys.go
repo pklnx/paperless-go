@@ -27,10 +27,23 @@ const MaxPasskeys = 10
 // no session, so this keeps anybody from filling the table.
 // MaxOpenLoginCeremoniesPerClient bounds them per client, so that one
 // client cannot use up the total and lock everybody out of passkey logins.
+// The network caps bound them per network of clients (ClientKeys), so that
+// one site with many addresses cannot either: a routed IPv6 /56 or an IPv4
+// /24 holds at most a tenth of the total, an IPv6 /48 a quarter.
 const (
-	MaxOpenLoginCeremonies          = 1000
-	MaxOpenLoginCeremoniesPerClient = 20
+	MaxOpenLoginCeremonies           = 1000
+	MaxOpenLoginCeremoniesPerClient  = 20
+	MaxOpenLoginCeremoniesPerNetMid  = 100
+	MaxOpenLoginCeremoniesPerNetWide = 250
 )
+
+// ClientKeys group a client for the caps on open passkey logins. Addr is
+// the client (its IPv4 address or IPv6 /64, or the raw peer without an
+// address); NetMid is its IPv6 /56 or IPv4 /24 and NetWide its IPv6 /48.
+// An empty network key is not counted.
+type ClientKeys struct {
+	Addr, NetMid, NetWide string
+}
 
 // Passkey errors.
 var (
@@ -44,7 +57,10 @@ var (
 	// ErrTooManyClientCeremonies: this client has too many logins in
 	// progress.
 	ErrTooManyClientCeremonies = errors.New("store: too many passkey logins in progress from this client")
-	ErrUserLocked              = errors.New("store: this user is locked")
+	// ErrTooManyNetworkCeremonies: this client's network has too many
+	// logins in progress.
+	ErrTooManyNetworkCeremonies = errors.New("store: too many passkey logins in progress from this client's network")
+	ErrUserLocked               = errors.New("store: this user is locked")
 )
 
 // Ceremony kinds.
@@ -214,11 +230,14 @@ func (s *Store) FinishPasskeyRegistration(ctx context.Context, userID int64, tok
 }
 
 // BeginPasskeyLogin stores the session data of a login without a user name
-// at now for the client clientKey (its address; IPv6 grouped by /64) and
-// returns the token for the client. Both caps are checked under a lock in
-// the same transaction as the insert, so concurrent requests cannot exceed
-// them.
-func (s *Store) BeginPasskeyLogin(ctx context.Context, clientKey string, data []byte, now, expires time.Time) (string, error) {
+// at now for the client keys and returns the token for the client. It
+// first drops the logins of the tokens in replace (the browser's earlier
+// ones, from its ceremony cookie): a login page that is loaded again holds
+// one open login, not one per load. Unknown tokens are ignored. All caps
+// are checked under a lock in the same transaction as the insert, so
+// concurrent requests cannot exceed them; when one refuses, nothing is
+// dropped either.
+func (s *Store) BeginPasskeyLogin(ctx context.Context, keys ClientKeys, replace []string, data []byte, now, expires time.Time) (string, error) {
 	token, hash, err := auth.NewSessionToken()
 	if err != nil {
 		return "", err
@@ -227,7 +246,14 @@ func (s *Store) BeginPasskeyLogin(ctx context.Context, clientKey string, data []
 		if err := q.LockLoginCeremonies(ctx); err != nil {
 			return err
 		}
-		n, err := q.CountOpenLoginCeremonies(ctx, db.CountOpenLoginCeremoniesParams{ClientKey: clientKey, Now: now})
+		if ids := tokenHashes(replace); len(ids) > 0 {
+			if _, err := q.DeleteLoginCeremonies(ctx, ids); err != nil {
+				return err
+			}
+		}
+		n, err := q.CountOpenLoginCeremonies(ctx, db.CountOpenLoginCeremoniesParams{
+			ClientKey: keys.Addr, NetMid: keys.NetMid, NetWide: keys.NetWide, Now: now,
+		})
 		if err != nil {
 			return err
 		}
@@ -236,15 +262,40 @@ func (s *Store) BeginPasskeyLogin(ctx context.Context, clientKey string, data []
 			return ErrTooManyCeremonies
 		case n.Client >= MaxOpenLoginCeremoniesPerClient:
 			return ErrTooManyClientCeremonies
+		case n.NetMid >= MaxOpenLoginCeremoniesPerNetMid, n.NetWide >= MaxOpenLoginCeremoniesPerNetWide:
+			return ErrTooManyNetworkCeremonies
 		}
 		return q.CreateWebAuthnCeremony(ctx, db.CreateWebAuthnCeremonyParams{
-			ID: hash, Kind: ceremonyLogin, Data: data, ClientKey: &clientKey, Now: now, ExpiresAt: expires,
+			ID: hash, Kind: ceremonyLogin, Data: data, ClientKey: &keys.Addr,
+			ClientNetMid: nullString(keys.NetMid), ClientNetWide: nullString(keys.NetWide), Now: now, ExpiresAt: expires,
 		})
 	})
 	if err != nil {
 		return "", err
 	}
 	return token, nil
+}
+
+// DropPasskeyLogins deletes the open logins of tokens (after a password
+// login, which leaves the browser's autofill login unused) and returns how
+// many. Registrations and unknown tokens are left alone.
+func (s *Store) DropPasskeyLogins(ctx context.Context, tokens []string) (int64, error) {
+	ids := tokenHashes(tokens)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	return s.q.DeleteLoginCeremonies(ctx, ids)
+}
+
+// tokenHashes hashes the non-empty tokens.
+func tokenHashes(tokens []string) [][]byte {
+	var ids [][]byte
+	for _, t := range tokens {
+		if t != "" {
+			ids = append(ids, auth.HashSessionToken(t))
+		}
+	}
+	return ids
 }
 
 // PasskeyLogin is the result of a passkey login.

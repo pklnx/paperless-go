@@ -222,13 +222,15 @@ type User struct {
 }
 
 type WebauthnCeremony struct {
-	ID        []byte
-	Kind      string
-	UserID    *int64
-	Name      *string
-	Factor    *string
-	Data      []byte
-	ClientKey *string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	ID            []byte
+	Kind          string
+	UserID        *int64
+	Name          *string
+	Factor        *string
+	Data          []byte
+	ClientKey     *string
+	CreatedAt     time.Time
+	ExpiresAt     time.Time
+	ClientNetMid  *string
+	ClientNetWide *string
 }
