@@ -670,8 +670,13 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   `auth.login_failed` with `reason: second_factor`. Requests refused
   by the login limiter write nothing, so a flood cannot grow the log.
 - **Reading.** `GET /api/audit` takes its scope from `requestScope`: users
-  get their own rows (`audit_log_user_idx`), admins everyone's, optionally
-  narrowed by `user` or `actor`. Paging is by a `(at, id)` cursor, newest
+  get their own rows (`audit_log_user_idx`) and the rows about them
+  (`target_type = 'user'`, partial index `audit_log_target_user_idx`) as a
+  `UNION ALL` of two index scans, admins everyone's, optionally narrowed by
+  `user` or `actor`. A row about a user made by someone else is marked
+  `byOther` and reduced (`redactForeign`): no client IP, user agent or API
+  key name, and only allowlisted detail keys; a new key stays admin-only
+  until it is added to the allowlist. Paging is by a `(at, id)` cursor, newest
   first. Reading the log writes no entry.
 
 ## Container

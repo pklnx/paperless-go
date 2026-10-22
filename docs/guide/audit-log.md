@@ -46,6 +46,13 @@ Removing a user keeps their entries.
 
 The **Log** page in the web UI shows your own entries, newest first, for the
 last 30 days by default; choose a period and a kind of action to see others.
+It also shows the entries about you that an admin or the command line made:
+your account being locked, unlocked, promoted or demoted, your password or
+two-factor login reset, your passkeys removed, documents imported into your
+account and exports of your log. Such an entry names the admin, or says
+"command line", and shows only counts, the format and the period from its
+details: never the admin's address, browser or API key, or who ran the
+command and with which paths.
 Admins see every user's entries and can narrow them to one user, to the
 command line or to requests made with API keys. A removed user's entries stay, under the name the user had, and
 the filter by name still finds them.
@@ -57,7 +64,9 @@ Admins can export a period as CSV or JSON lines:
 ./pgo audit export --since 2026-10-01 --until 2026-10-31 --user alice --action login --format jsonl > alice.jsonl
 ```
 
-See [Command line](../reference/cli#audit-log) for all options.
+`--user` selects the entries that user made (by `user_id`), not the entries
+about them; to find changes made to a user, export `--action users` without
+`--user`. See [Command line](../reference/cli#audit-log) for all options.
 
 ## Storage
 

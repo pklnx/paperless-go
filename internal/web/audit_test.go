@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -353,6 +354,134 @@ func TestAuditPage(t *testing.T) {
 	// and the filter by name still finds them.
 	if rows := auditEntries(t, f.expect("GET", "/api/audit?user=alice", nil, 200)); len(rows) != 2 || rows[0]["user"] != "alice" {
 		t.Fatalf("user=alice after removing her: %v", rows)
+	}
+}
+
+// A user also sees the changes an admin or the command line made to them,
+// with who made them, but without the admin's client, user agent, API key
+// or the command's operator, and with only the allowed details.
+func TestAuditPageForeignEntries(t *testing.T) {
+	f := newAuthFixture(t)
+	ctx := context.Background()
+	admin := f.addUser("admin", "correct horse battery", true)
+	alice := f.addUser("alice", "correct horse battery", false)
+	f.addUser("bob", "correct horse battery", false)
+	aliceID := strconv.FormatInt(alice.ID, 10)
+	f.loginOK("admin", "correct horse battery")
+	for _, patch := range []map[string]any{{"locked": true}, {"locked": false}, {"admin": true}, {"admin": false}} {
+		f.expect("PATCH", "/api/users/alice", patch, 204)
+	}
+	// bob's lock is not alice's: her log below has one user.lock.
+	f.expect("PATCH", "/api/users/bob", map[string]any{"locked": true}, 204)
+	password, _ := f.expect("POST", "/api/users/alice/password", nil, 200)["password"].(string)
+	// The command line, an admin's API key, an import and an export.
+	add := func(e store.AuditEntry) {
+		t.Helper()
+		e.SetTarget(store.TargetUser, aliceID, "alice")
+		if err := f.st.Audit(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cli := store.AuditEntry{Actor: store.ActorCLI, Action: "user.password_set"}
+	cli.Detail("operator", "patrick")
+	cli.Detail("os_user", "nonroot")
+	cli.Detail("command", "paperless-go user password")
+	cli.Detail("passkeysRemoved", 2)
+	add(cli)
+	keyID := int64(99)
+	viaKey := store.AuditEntry{Actor: store.ActorAPIKey, Action: "user.2fa_reset", APIKeyID: &keyID, APIKeyName: "admin-script",
+		ClientIP: netip.MustParseAddr("192.0.2.7"), UserAgent: "curl/8.0"}
+	viaKey.SetUser(admin.ID, admin.Name)
+	add(viaKey)
+	imp := store.AuditEntry{Actor: store.ActorCLI, Action: "document.import"}
+	imp.Detail("path", "/srv/archive/alice")
+	imp.Detail("imported", 3)
+	imp.Detail("failed", 1)
+	imp.Detail("operator", "patrick")
+	add(imp)
+	exp := store.AuditEntry{Actor: store.ActorCLI, Action: "audit.export"}
+	exp.Detail("out", "/tmp/alice.jsonl")
+	exp.Detail("user", "alice")
+	exp.Detail("format", "jsonl")
+	exp.Detail("future_key", "secret")
+	add(exp)
+
+	a := f.as()
+	a.loginOK("alice", password)
+	a.expect("PUT", "/api/profile/password", map[string]any{"current": password, "new": "another horse battery"}, 204)
+	mine := auditEntries(t, a.expect("GET", "/api/audit", nil, 200))
+	byAction := map[string]map[string]any{}
+	var actions []string
+	for _, e := range mine {
+		act, _ := e["action"].(string)
+		actions = append(actions, act)
+		byAction[act] = e
+	}
+	want := "profile.password_change auth.login audit.export document.import user.2fa_reset user.password_set user.password_reset user.demote user.promote user.unlock user.lock"
+	if got := strings.Join(actions, " "); got != want {
+		t.Fatalf("alice's log:\n got %s\nwant %s", got, want)
+	}
+	for _, act := range []string{"user.lock", "user.unlock", "user.promote", "user.demote", "user.password_reset", "user.2fa_reset"} {
+		e := byAction[act]
+		if e["byOther"] != true || e["user"] != "admin" || e["clientIp"] != nil || e["userAgent"] != nil || e["apiKey"] != nil {
+			t.Errorf("%s: %v", act, e)
+		}
+	}
+	if e := byAction["user.2fa_reset"]; e["actor"] != "api_key" {
+		t.Errorf("API key entry: %v", e)
+	}
+	for act, d := range map[string]map[string]any{
+		"user.password_set": {"passkeysRemoved": float64(2)},
+		"document.import":   {"imported": float64(3), "failed": float64(1)},
+		"audit.export":      {"format": "jsonl"},
+	} {
+		e := byAction[act]
+		if e["byOther"] != true || e["actor"] != "cli" || e["user"] != nil {
+			t.Errorf("%s: %v", act, e)
+		}
+		got, _ := json.Marshal(e["details"])
+		w, _ := json.Marshal(d)
+		if string(got) != string(w) {
+			t.Errorf("%s details %s, want %s", act, got, w)
+		}
+	}
+	// alice's own rows keep their client and have no byOther.
+	if e := byAction["auth.login"]; e["byOther"] != nil || e["clientIp"] != "127.0.0.1" || e["userAgent"] == nil || e["user"] != "alice" {
+		t.Errorf("alice's login: %v", e)
+	}
+	a.expect("GET", "/api/audit?user=admin", nil, 403)
+	a.expect("GET", "/api/audit?actor=cli", nil, 403)
+	// The action filter covers the entries about her.
+	if rows := auditEntries(t, a.expect("GET", "/api/audit?action=user.lock", nil, 200)); len(rows) != 1 || rows[0]["byOther"] != true {
+		t.Errorf("action=user.lock: %v", rows)
+	}
+
+	// The admin sees the same entries in full, without byOther.
+	all := auditEntries(t, f.expect("GET", "/api/audit?action=users&action=export&action=document.import", nil, 200))
+	seen := map[string]bool{}
+	for _, e := range all {
+		if e["byOther"] != nil {
+			t.Errorf("admin view with byOther: %v", e)
+		}
+		act, _ := e["action"].(string)
+		d, _ := e["details"].(map[string]any)
+		switch act {
+		case "user.password_set":
+			seen[act] = d["operator"] == "patrick" && d["os_user"] == "nonroot" && d["command"] != nil
+		case "user.2fa_reset":
+			seen[act] = e["apiKey"] == "admin-script" && e["clientIp"] == "192.0.2.7" && e["userAgent"] == "curl/8.0"
+		case "user.lock":
+			seen[act] = seen[act] || e["clientIp"] == "127.0.0.1" && e["userAgent"] != nil
+		case "audit.export":
+			seen[act] = d["out"] != nil && d["user"] == "alice" && d["future_key"] == "secret"
+		case "document.import":
+			seen[act] = d["path"] != nil
+		}
+	}
+	for _, act := range []string{"user.password_set", "user.2fa_reset", "user.lock", "audit.export", "document.import"} {
+		if !seen[act] {
+			t.Errorf("admin view of %s incomplete: %v", act, all)
+		}
 	}
 }
 

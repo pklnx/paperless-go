@@ -272,6 +272,8 @@ export interface AuditEntry {
   clientIp?: string;
   userAgent?: string;
   details: Record<string, unknown>;
+  /** Set for a user who is not an admin on an entry about them made by an admin or the command line. */
+  byOther?: boolean;
 }
 
 /** The filter of the log page. who is a user name, "cli" or "api_key" (admins only). */

@@ -118,6 +118,9 @@ type auditEntryJSON struct {
 	ClientIP  string           `json:"clientIp,omitempty"`
 	UserAgent string           `json:"userAgent,omitempty"`
 	Details   json.RawMessage  `json:"details"`
+	// ByOther marks an entry about the viewer made by someone else (an
+	// admin or the command line), for a viewer who is not an admin.
+	ByOther bool `json:"byOther,omitempty"`
 }
 
 type auditPageJSON struct {
@@ -125,8 +128,9 @@ type auditPageJSON struct {
 	NextCursor string           `json:"nextCursor,omitempty"`
 }
 
-// handleAudit lists audit entries, newest first: a user's own, or for
-// admins everyone's (requestScope). Reading the log writes no entry.
+// handleAudit lists audit entries, newest first: a user's own and those
+// about them (see redactForeign), or for admins everyone's
+// (requestScope). Reading the log writes no entry.
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	scope := requestScope(r)
@@ -213,9 +217,47 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		if rec.TargetType != "" {
 			e.Target = &auditTargetJSON{Type: rec.TargetType, ID: rec.TargetID, Name: rec.TargetName}
 		}
+		if !scope.All && (rec.UserID == nil || *rec.UserID != scope.UserID) {
+			redactForeign(&e)
+		}
 		out.Entries = append(out.Entries, e)
 	}
 	s.writeJSON(w, http.StatusOK, out)
+}
+
+// foreignDetails are the detail keys a user sees on an entry about them
+// made by someone else: counts, flags, a format and a period. Every other
+// key stays admin-only (the CLI's operator, OS user, command, paths and
+// output file, and names): a new detail key is hidden from the user until
+// it is added here.
+var foreignDetails = map[string]bool{
+	"admin": true, "count": true, "passkeysRemoved": true, "apiKeysRevoked": true, "apiKeysRemoved": true,
+	"imported": true, "duplicates": true, "failed": true, "interrupted": true,
+	"format": true, "since": true, "until": true, "actions": true,
+}
+
+// redactForeign reduces an entry about a non-admin viewer made by an admin
+// or the command line to what the viewer may see: who made it (the
+// admin's name, or the actor cli for the command line) and the
+// foreignDetails, without the admin's client, user agent or API key.
+func redactForeign(e *auditEntryJSON) {
+	e.ByOther = true
+	e.ClientIP, e.UserAgent, e.APIKey = "", "", ""
+	var d map[string]json.RawMessage
+	if json.Unmarshal(e.Details, &d) != nil || d == nil {
+		e.Details = json.RawMessage("{}")
+		return
+	}
+	for k := range d {
+		if !foreignDetails[k] {
+			delete(d, k)
+		}
+	}
+	b, err := json.Marshal(d)
+	if err != nil {
+		b = []byte("{}")
+	}
+	e.Details = b
 }
 
 // parseAuditBound reads YYYY-MM-DD (midnight UTC) or RFC 3339. A plain date

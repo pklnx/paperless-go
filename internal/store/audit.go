@@ -443,9 +443,11 @@ func (s *Store) ExportAudit(ctx context.Context, f AuditFilter, fn func(AuditRec
 
 // AuditPage selects a page of the log page, newest first.
 type AuditPage struct {
-	// Viewer is the scope of who reads the log: without All, only the
-	// viewer's own entries (Viewer.UserID) are listed; with All (admins),
-	// every user's, optionally narrowed to UserID or Actor.
+	// Viewer is the scope of who reads the log: without All, the entries
+	// by the viewer (Viewer.UserID) and the entries about them (target
+	// user, by an admin or the command line) are listed, and UserID,
+	// UserName and Actor are ignored; with All (admins), every user's,
+	// optionally narrowed to UserID or Actor.
 	Viewer Scope
 	UserID *int64
 	// UserName selects a deleted user's entries by the name they carry.

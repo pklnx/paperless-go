@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -619,5 +620,228 @@ func TestAuditCreateDocument(t *testing.T) {
 	var jobs int
 	if err := conn.QueryRow(ctx, `SELECT count(*) FROM jobs`).Scan(&jobs); err != nil || jobs != 1 {
 		t.Fatalf("jobs = %d, %v; want only the first document's", jobs, err)
+	}
+}
+
+// A user's own log also lists the entries about them (target user), by an
+// admin or the command line, but no other user's and no other kind of
+// target with the same ID.
+func TestListAuditAboutUser(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	admin := storetest.User(t, st, "admin", true)
+	alice := storetest.User(t, st, "alice", false)
+	bob := storetest.User(t, st, "bob", false)
+	aliceID, bobID := fmt.Sprint(alice.ID), fmt.Sprint(bob.ID)
+	add := func(actor string, by *store.User, action, typ, id string) {
+		t.Helper()
+		e := store.AuditEntry{Actor: actor, Action: action}
+		if by != nil {
+			e.SetUser(by.ID, by.Name)
+		}
+		if typ != "" {
+			e.SetTarget(typ, id, "")
+		}
+		if err := st.Audit(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add(store.ActorSession, alice, "auth.login", "", "")
+	add(store.ActorSession, admin, "user.lock", store.TargetUser, aliceID)
+	add(store.ActorSession, admin, "user.promote", store.TargetUser, aliceID)
+	add(store.ActorSession, admin, "user.lock", store.TargetUser, bobID)
+	add(store.ActorCLI, nil, "user.password_set", store.TargetUser, aliceID)
+	// An API key whose ID is alice's ID is not alice. (A document target
+	// cannot collide: documents are named by a UUID.)
+	add(store.ActorSession, admin, "api_key.revoke", store.TargetAPIKey, aliceID)
+	add(store.ActorSession, admin, "user.password_reset", store.TargetUser, aliceID)
+	add(store.ActorSession, alice, "profile.password_change", "", "")
+	// By and about alice: listed once.
+	add(store.ActorSession, alice, "user.self", store.TargetUser, aliceID)
+	add(store.ActorSession, admin, "user.2fa_reset", store.TargetUser, aliceID)
+
+	since, until := time.Now().Add(-24*time.Hour), time.Now().Add(24*time.Hour)
+	list := func(p store.AuditPage) []store.AuditRecord {
+		t.Helper()
+		if p.Since.IsZero() {
+			p.Since, p.Until = since, until
+		}
+		if p.Limit == 0 {
+			p.Limit = 100
+		}
+		recs, err := st.ListAudit(ctx, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return recs
+	}
+	actions := func(recs []store.AuditRecord) string {
+		var out []string
+		for _, r := range recs {
+			out = append(out, r.Action)
+		}
+		return strings.Join(out, ",")
+	}
+	viewer := store.Scope{UserID: alice.ID}
+	want := "user.2fa_reset,user.self,profile.password_change,user.password_reset,user.password_set,user.promote,user.lock,auth.login"
+	all := list(store.AuditPage{Viewer: viewer})
+	if got := actions(all); got != want {
+		t.Fatalf("alice's log:\n got %s\nwant %s", got, want)
+	}
+	for i := 1; i < len(all); i++ {
+		if !all[i].At.Before(all[i-1].At) && all[i].ID >= all[i-1].ID {
+			t.Fatalf("not newest first: %+v", all)
+		}
+	}
+	// The admin's name stays on the entries about alice; the CLI's is empty.
+	if all[0].UserName != "admin" || all[0].TargetID != aliceID || all[4].Actor != store.ActorCLI || all[4].UserName != "" {
+		t.Errorf("entries about alice: %+v", all)
+	}
+	// bob sees the lock about him only.
+	if got := actions(list(store.AuditPage{Viewer: store.Scope{UserID: bob.ID}})); got != "user.lock" {
+		t.Errorf("bob's log: %s", got)
+	}
+
+	// Pages of 1 cover both branches without repeats or gaps.
+	var paged []store.AuditRecord
+	p := store.AuditPage{Viewer: viewer, Limit: 1}
+	for range 20 {
+		recs := list(p)
+		if len(recs) == 0 {
+			break
+		}
+		paged = append(paged, recs...)
+		last := recs[len(recs)-1]
+		p.CursorAt, p.CursorID = &last.At, last.ID
+	}
+	if got := actions(paged); got != want {
+		t.Fatalf("paged:\n got %s\nwant %s", got, want)
+	}
+
+	// The action filter applies to the entries about alice too.
+	if got := actions(list(store.AuditPage{Viewer: viewer, Actions: []string{"users"}})); got != "user.2fa_reset,user.self,user.password_reset,user.password_set,user.promote,user.lock" {
+		t.Errorf("users group: %s", got)
+	}
+	if got := actions(list(store.AuditPage{Viewer: viewer, Actions: []string{"user.lock"}})); got != "user.lock" {
+		t.Errorf("user.lock: %s", got)
+	}
+	// So does the period: up to the promotion.
+	if got := actions(list(store.AuditPage{Viewer: viewer, Since: since, Until: all[5].At.Add(time.Microsecond)})); got != "user.promote,user.lock,auth.login" {
+		t.Errorf("until the promotion: %s", got)
+	}
+	if got := list(store.AuditPage{Viewer: viewer, Since: until, Until: until.Add(time.Hour)}); len(got) != 0 {
+		t.Errorf("a later period: %+v", got)
+	}
+}
+
+// indexPartitions returns the names of the partition indexes of the
+// partitioned index idx.
+func indexPartitions(t *testing.T, conn *pgx.Conn, idx string) []string {
+	t.Helper()
+	rows, err := conn.Query(context.Background(),
+		`SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+		 WHERE i.inhparent = $1::regclass ORDER BY 1`, idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return names
+}
+
+// The index of the entries about a user is on every partition, survives a
+// rollback and reapply of its migration, and is created on later
+// partitions.
+func TestAuditTargetUserIndex(t *testing.T) {
+	st, url := storetest.NewWithURL(t)
+	conn := connect(t, url)
+	ctx := context.Background()
+	const idx = "audit_log_target_user_idx"
+	if got, want := len(indexPartitions(t, conn, idx)), len(partitions(t, conn)); got != want || got == 0 {
+		t.Fatalf("%d partition indexes for %d partitions", got, want)
+	}
+	if err := st.MigrateDownTo(ctx, 11); err != nil {
+		t.Fatal(err)
+	}
+	var exists bool
+	if err := conn.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, idx).Scan(&exists); err != nil || exists {
+		t.Fatalf("index after the rollback: %v, %v", exists, err)
+	}
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnsureAuditPartitions(ctx, 5); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(indexPartitions(t, conn, idx)), len(partitions(t, conn)); got != want || got != 6 {
+		t.Fatalf("%d partition indexes for %d partitions", got, want)
+	}
+}
+
+// listForUserSQL is the generated SQL of ListAuditEntriesForUser, so that
+// the plan check runs the query the store runs.
+func listForUserSQL(t *testing.T) string {
+	t.Helper()
+	src, err := os.ReadFile("db/audit.sql.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const start = "const listAuditEntriesForUser = `"
+	_, rest, ok := strings.Cut(string(src), start)
+	if !ok {
+		t.Fatal("ListAuditEntriesForUser not found in the generated code")
+	}
+	sql, _, ok := strings.Cut(rest, "`")
+	if !ok {
+		t.Fatal("unterminated query")
+	}
+	return sql
+}
+
+// Both branches of a user's log use their index in a generic plan, the
+// one a cached prepared statement ends up with: there is no OR that falls
+// back to a sequential scan.
+func TestListAuditForUserPlan(t *testing.T) {
+	st, url := storetest.NewWithURL(t)
+	conn := connect(t, url)
+	ctx := context.Background()
+	alice := storetest.User(t, st, "alice", false)
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, sql := range []string{
+		"SET LOCAL plan_cache_mode = force_generic_plan",
+		"SET LOCAL enable_seqscan = off",
+		"PREPARE list_for_user (bigint, timestamptz, timestamptz, text[], timestamptz, bigint, integer) AS " + listForUserSQL(t),
+	} {
+		if _, err := tx.Exec(ctx, sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	// EXPLAIN EXECUTE takes no parameters of its own.
+	rows, err := tx.Query(ctx, fmt.Sprintf("EXPLAIN EXECUTE list_for_user(%d, now() - interval '1 day', now() + interval '1 day', ARRAY['%%'], NULL, 0, 101)", alice.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := strings.Join(lines, "\n")
+	if strings.Contains(plan, "Seq Scan on audit_log") {
+		t.Errorf("sequential scan:\n%s", plan)
+	}
+	for _, idx := range []string{"audit_log_user_idx", "audit_log_target_user_idx"} {
+		used := false
+		for _, part := range indexPartitions(t, conn, idx) {
+			used = used || strings.Contains(plan, " "+part+" ")
+		}
+		if !used {
+			t.Errorf("%s not used:\n%s", idx, plan)
+		}
 	}
 }
