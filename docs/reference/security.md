@@ -30,7 +30,9 @@ reach it. To use it from your home network or a VPN:
 3. **Publish the port** only as far as needed with `WEB_BIND`. With a proxy
    or `tailscale serve` on the same computer, keep the default `127.0.0.1`.
 
-Do not forward the port from the internet to the web UI.
+Do not forward the port from the internet to the web UI. To publish the
+site on the internet, put a reverse proxy in front and follow [Running on
+the internet](../guide/internet).
 
 ### HTTPS behind a proxy
 
