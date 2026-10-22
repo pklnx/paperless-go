@@ -24,6 +24,10 @@ const (
 	ActorSession = "session" // the web UI, also for login attempts
 	ActorAPIKey  = "api_key"
 	ActorCLI     = "cli"
+	// ActorSystem is the server acting on its own (the consume folder). Its
+	// entries are by no user and from no client; the user they concern is
+	// the target.
+	ActorSystem = "system"
 )
 
 // What an audit entry is about. A document is named by its UUID.

@@ -54,6 +54,11 @@ consume/            CONSUME_DIR in .env, default ./consume
   cannot be read, deleted or moved (for example, the folder is not writable
   for the server) stays where it is with one warning in the log and is
   tried again after an hour, or as soon as it changes.
+- **Audit log.** Each look that imported, deleted or moved files in your
+  folder adds one entry to your [log](./audit-log), made by the server,
+  with how many files it imported, how many duplicates it deleted and how
+  many it moved to `failed/` (no file names). A file that is tried again
+  is counted only once it is deleted or moved.
 
 With Docker Compose the consume folder is on: `./pgo migrate` creates it
 and makes it writable for the container user, UID 65532, which must be able

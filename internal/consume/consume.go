@@ -12,6 +12,12 @@
 // database or blob store error, leaves the file in place for the next
 // scan.
 //
+// Each scan that changed something in a user's folder writes one
+// document.consume audit entry about that user, by the server (actor
+// system): how many files were imported, how many duplicates deleted and
+// how many files moved to failed/. It has no file names; the server log
+// has them.
+//
 // Everything below the consume folder is reached through an os.Root, so
 // no path leaves the tree, and every entry is checked with Lstat: only
 // real directories count as user folders and only regular files as
@@ -72,6 +78,14 @@ const IncompleteTime = 10 * time.Minute
 // maxNameBytes is the longest file name most file systems allow.
 const maxNameBytes = 255
 
+// ActionConsume is the audit action of a scan that changed a user's folder.
+const ActionConsume = "document.consume"
+
+// auditTimeout bounds the audit writes at the end of a scan. They do not
+// use the scan's context, so a scan stopped by shutdown still records what
+// it did.
+const auditTimeout = 10 * time.Second
+
 // Users is the part of *store.Store the consumer uses.
 type Users interface {
 	ListUsers(ctx context.Context) ([]*store.User, error)
@@ -89,6 +103,9 @@ type Options struct {
 	Now func() time.Time
 	// Settle is how long a file must stay unchanged; DefaultSettle if 0.
 	Settle time.Duration
+	// Audit writes an audit entry (serve passes the store's Audit); nil
+	// writes none.
+	Audit func(context.Context, store.AuditEntry) error
 }
 
 // Consumer scans one consume folder. Scan and Run must not be called
@@ -100,9 +117,18 @@ type Consumer struct {
 	log    *slog.Logger
 	now    func() time.Time
 	settle time.Duration
+	audit  func(context.Context, store.AuditEntry) error
 	open   func(r *os.Root, name string) (file, error)
 	// openRoot opens a user's folder; tests replace it.
 	openRoot func(r *os.Root, name string) (*os.Root, error)
+	// removeFile deletes a file in a user's folder; tests replace it.
+	removeFile func(r *os.Root, name string) error
+
+	// pending are the document.consume entries not written yet, by user
+	// ID. An entry that cannot be written keeps its counts here; every
+	// scan tries again, and the counts of later scans are added.
+	pending  map[int64]*summary
+	auditErr string // the last failure to write them, logged once
 
 	// seen is the last observation of each candidate file.
 	seen map[fileKey]observation
@@ -144,13 +170,15 @@ type file interface {
 // New returns a consumer of the consume folder dir.
 func New(dir string, users Users, im Importer, opts Options) *Consumer {
 	c := &Consumer{
-		dir: dir, users: users, im: im, log: opts.Log, now: opts.Now, settle: opts.Settle,
-		open:     openInput,
-		openRoot: func(r *os.Root, name string) (*os.Root, error) { return r.OpenRoot(name) },
-		seen:     make(map[fileKey]observation),
-		visited:  make(map[fileKey]bool),
-		partial:  make(map[int64]bool),
-		warned:   make(map[string]int),
+		dir: dir, users: users, im: im, log: opts.Log, now: opts.Now, settle: opts.Settle, audit: opts.Audit,
+		open:       openInput,
+		openRoot:   func(r *os.Root, name string) (*os.Root, error) { return r.OpenRoot(name) },
+		removeFile: func(r *os.Root, name string) error { return r.Remove(name) },
+		pending:    make(map[int64]*summary),
+		seen:       make(map[fileKey]observation),
+		visited:    make(map[fileKey]bool),
+		partial:    make(map[int64]bool),
+		warned:     make(map[string]int),
 	}
 	if c.log == nil {
 		c.log = slog.New(slog.DiscardHandler)
@@ -189,20 +217,35 @@ func (c *Consumer) Run(ctx context.Context, tick <-chan time.Time) {
 	}
 }
 
-// Stats counts what one scan did.
+// Stats counts what one scan did: the files imported (a document was
+// created, also if the file could not be deleted), the duplicates deleted
+// and the files moved to failed/. A file that could not be deleted or
+// moved is not counted again when it is tried after HoldTime.
 type Stats struct {
 	Imported, Duplicates, Failed int
 	// Waiting are the files seen that are not yet unchanged for Settle.
 	Waiting int
 }
 
+func (s *Stats) add(o Stats) {
+	s.Imported += o.Imported
+	s.Duplicates += o.Duplicates
+	s.Failed += o.Failed
+	s.Waiting += o.Waiting
+}
+
+// changed reports whether the scan changed something in the folder.
+func (s Stats) changed() bool { return s.Imported+s.Duplicates+s.Failed > 0 }
+
 // Scan scans the consume folder once: it creates the missing user
 // folders and imports, deletes or moves the files that are ready. An
 // error is transient (the users could not be listed, or an import failed
 // for a reason that is not the file's); the scan stops there and leaves
-// the remaining files for the next one.
+// the remaining files for the next one. Whatever happened, the audit
+// entries of the users whose folders changed are written at the end.
 func (c *Consumer) Scan(ctx context.Context) (Stats, error) {
 	var st Stats
+	defer c.writeSummaries(ctx)
 	users, err := c.users.ListUsers(ctx)
 	if err != nil {
 		return st, fmt.Errorf("list users: %w", err)
@@ -265,7 +308,11 @@ func (c *Consumer) Scan(ctx context.Context) (Stats, error) {
 			c.warnOnce("locked:"+name, "consume folder: the user is locked; their folder is skipped", "user", name)
 			continue
 		}
-		if err := c.scanUser(ctx, root, u, &st); err != nil {
+		var us Stats
+		err := c.scanUser(ctx, root, u, &us)
+		st.add(us)
+		c.record(u, us, err != nil)
+		if err != nil {
 			return st, err
 		}
 	}
@@ -524,10 +571,13 @@ func (c *Consumer) consume(ctx context.Context, ur *os.Root, u *store.User, key 
 				"user", u.Name, "file", name)
 			return nil
 		}
-		st.Duplicates++
 		c.log.Info("consume folder: duplicate, the user already has this file", "user", u.Name, "file", name,
 			"document", res.Existing.ID)
-		c.remove(ur, u, key, fi)
+		// Counted only once deleted: one that cannot be deleted comes
+		// back after HoldTime and is not counted again.
+		if c.remove(ur, u, key, fi) {
+			st.Duplicates++
+		}
 	case ingest.Refused:
 		if c.moveToFailed(ur, u, key, fi, res.Refusal) {
 			st.Failed++
@@ -592,24 +642,104 @@ func complete(f io.ReaderAt, size int64) (bool, error) {
 }
 
 // remove deletes a consumed file if it is still the version that was read.
-func (c *Consumer) remove(ur *os.Root, u *store.User, key fileKey, read fs.FileInfo) {
+// It reports whether it deleted the file.
+func (c *Consumer) remove(ur *os.Root, u *store.User, key fileKey, read fs.FileInfo) bool {
 	delete(c.seen, key)
 	cur, err := ur.Lstat(key.name)
 	if errors.Is(err, fs.ErrNotExist) {
-		return
+		return false
 	}
 	if err != nil || !sameVersion(cur, read) {
 		// Its next version is imported once it settles.
 		c.log.Info("consume folder: the file changed while it was imported; left in place",
 			"user", u.Name, "file", key.name)
+		return false
+	}
+	if err := c.removeFile(ur, key.name); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			// Tried again as a duplicate after HoldTime.
+			c.warnOnce(c.fileWarnKey("remove", key), "consume folder: cannot delete the consumed file; trying again in an hour",
+				"user", u.Name, "file", key.name, "err", err)
+			c.hold(key, read)
+		}
+		return false
+	}
+	return true
+}
+
+// summary is what the scans not yet written to the audit log did in one
+// user's folder.
+type summary struct {
+	name                         string // the user's name at the last scan
+	imported, duplicates, failed int
+	interrupted                  bool
+}
+
+// record keeps what a scan did in u's folder for its audit entry, if it
+// changed something. interrupted: the folder's pass stopped early.
+func (c *Consumer) record(u *store.User, st Stats, interrupted bool) {
+	if c.audit == nil || !st.changed() {
 		return
 	}
-	if err := ur.Remove(key.name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		// Tried again as a duplicate after HoldTime.
-		c.warnOnce(c.fileWarnKey("remove", key), "consume folder: cannot delete the consumed file; trying again in an hour",
-			"user", u.Name, "file", key.name, "err", err)
-		c.hold(key, read)
+	s := c.pending[u.ID]
+	if s == nil {
+		s = &summary{}
+		c.pending[u.ID] = s
 	}
+	s.name = u.Name
+	s.imported += st.Imported
+	s.duplicates += st.Duplicates
+	s.failed += st.Failed
+	s.interrupted = s.interrupted || interrupted
+}
+
+// writeSummaries writes a document.consume entry for each user with
+// pending counts. One that cannot be written is logged and kept for the
+// next scan. The writes do not use ctx's cancellation.
+func (c *Consumer) writeSummaries(ctx context.Context) {
+	if len(c.pending) == 0 {
+		return
+	}
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	ids := make([]int64, 0, len(c.pending))
+	for id := range c.pending {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		s := c.pending[id]
+		e := systemEntry(ActionConsume, id, s.name)
+		e.Detail("imported", s.imported)
+		e.Detail("duplicates", s.duplicates)
+		e.Detail("failed", s.failed)
+		if s.interrupted {
+			e.Detail("interrupted", true)
+		}
+		if err := c.audit(actx, e); err != nil {
+			// The database is likely down: the others wait too.
+			if msg := err.Error(); msg != c.auditErr {
+				c.auditErr = msg
+				c.log.Error("consume folder: audit log not written; the counts are kept for the next scan",
+					"users", len(c.pending), "err", err)
+			}
+			return
+		}
+		delete(c.pending, id)
+	}
+	if c.auditErr != "" {
+		c.auditErr = ""
+		c.log.Info("consume folder: audit log written again")
+	}
+}
+
+// systemEntry starts an audit entry by the server itself about a user:
+// actor system, with no user, API key or client (the database refuses
+// them for this actor), and the user as the target.
+func systemEntry(action string, userID int64, userName string) store.AuditEntry {
+	e := store.AuditEntry{Actor: store.ActorSystem, Action: action}
+	e.SetTarget(store.TargetUser, strconv.FormatInt(userID, 10), userName)
+	return e
 }
 
 // moveToFailed moves a refused file to failed/ under a free name and

@@ -223,6 +223,16 @@ docker compose up -d web
 Restoring a backup made before the upgrade works too and needs no
 `REINDEX`.
 
+**Audit entries by the server (#49).** Run `./pgo migrate` before `docker
+compose up -d web`. The consume folder now writes a `document.consume`
+entry to the audit log for each scan that imported, deleted or moved files
+in a user's folder; the Log page names the server as who made it. Going
+back to an older version after the first such entry needs a [backup
+restore](#backups) from before the upgrade: the log is append-only, so the
+migration (`00015_audit_system_actor.sql`) cannot be rolled back while it
+holds entries by the server, and `migrate down` refuses with that hint.
+Before the first one, `migrate down` rolls it back.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build
