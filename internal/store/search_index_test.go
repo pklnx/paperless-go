@@ -132,6 +132,13 @@ func TestSearchStemmingAndFolding(t *testing.T) {
 	st, url := storetest.NewWithURL(t)
 	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
 	conn := connect(t, url)
+	// PostgreSQL 18's German stemmer (Snowball 3) also folds ae, oe and ue
+	// to a, o and u; 16 and 17 do not.
+	var version int
+	if err := conn.QueryRow(context.Background(), `SELECT current_setting('server_version_num')::int`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	foldsUE := version >= 180000
 	for _, c := range []struct {
 		text, query string
 		found       bool
@@ -142,7 +149,8 @@ func TestSearchStemmingAndFolding(t *testing.T) {
 		{"Die Versicherung zahlt.", "Versicherungen", true},
 		{"Gebühren für das Konto.", "Gebuhren", true},
 		{"Gebuhren ohne Umlaut.", "Gebühren", true},
-		{"Gebühren für das Konto.", "Gebuehren", false},
+		{"Gebühren für das Konto.", "Gebuehren", foldsUE},
+		{"Gebuehren für das Konto.", "Gebühren", foldsUE},
 		{"Hauptstraße 5, Berlin.", "Hauptstrasse", true},
 		{"Hauptstrasse 5, Berlin.", "Hauptstraße", true},
 		{"Die Häuser am See.", "Haus", true},
@@ -397,12 +405,12 @@ func TestSearchVectorCap(t *testing.T) {
 	random := "Zufallsanfang " + accentedWords(40000, 1) + "Zufallsende"
 	textDoc(t, st, alice, "Zufallstext", random)
 
-	// Huge notes too: only the title and 100 000 characters of the other
-	// fields are indexed.
+	// Huge notes too: 100 000 characters of the text and of every other
+	// field are indexed.
 	in := newDoc("Notizenflut")
 	in.OriginalFileName = "scan.pdf"
 	in.Notes = "Notizanfang " + accentedWords(40000, 2)
-	in.ExtractedText = random
+	in.ExtractedText = "Normaltext " + strings.Repeat("ganz gewöhnlicher Inhalt ", 15000)
 	mustDoc(t, st, alice, in)
 
 	// Everything huge: the vector is empty, and the document still saves.
@@ -420,6 +428,7 @@ func TestSearchVectorCap(t *testing.T) {
 	wantTitles(t, "start of overflowing text", searchIndex(t, conn, me, words("Zufallsanfang")), "Zufallstext")
 	wantTitles(t, "end of overflowing text", searchIndex(t, conn, me, words("Zufallsende")))
 	wantTitles(t, "huge notes", searchIndex(t, conn, me, words("Notizenflut", "Notizanfang")), "Notizenflut")
+	wantTitles(t, "text next to huge notes", searchIndex(t, conn, me, words("Normaltext")), "Notizenflut")
 	var size int
 	if err := conn.QueryRow(ctx, `SELECT length(search_text) FROM documents WHERE id = $1`, empty.ID).Scan(&size); err != nil || size != 0 {
 		t.Errorf("vector of a document with only huge fields: %d lexemes, %v", size, err)
@@ -675,6 +684,18 @@ func TestSearchMigration(t *testing.T) {
 		t.Fatalf("up again: %v", err)
 	}
 	check("up again")
+
+	// An object outside the extension that uses it keeps it on Down.
+	if _, err := conn.Exec(ctx, `CREATE TEXT SEARCH CONFIGURATION other_unaccent (COPY = pg_catalog.simple);
+		ALTER TEXT SEARCH CONFIGURATION other_unaccent ALTER MAPPING FOR word WITH public.unaccent, pg_catalog.simple`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MigrateDownTo(ctx, searchVersion-1); err != nil {
+		t.Fatalf("down with another user of unaccent: %v", err)
+	}
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM pg_extension WHERE extname = 'unaccent'`).Scan(&ext); err != nil || ext != 1 {
+		t.Errorf("unaccent in use elsewhere after rolling back: %d, %v", ext, err)
+	}
 }
 
 // An update that assigns the indexed fields without changing them (as
@@ -706,5 +727,96 @@ func TestSearchTextSkipsUnchangedFields(t *testing.T) {
 	}
 	if n := length(`UPDATE documents SET extracted_text = extracted_text || ' Ende.' WHERE id = $1`); n == 0 {
 		t.Error("changed text not parsed")
+	}
+}
+
+// A search_text near the 1 MB limit would make the index expression
+// search_text || search_links overflow once links are added; the vector
+// stays below 896 KiB, so a document with that text and 2000 tags saves.
+func TestSearchTextLeavesRoomForLinks(t *testing.T) {
+	st, url := storetest.NewWithURL(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	conn := connect(t, url)
+	text := accentedWords(17700, 7)
+	var full int
+	if err := conn.QueryRow(ctx, `SELECT pg_column_size(to_tsvector('german', $1) || to_tsvector('paperless_simple', $1) || to_tsvector('english', $1))`,
+		text).Scan(&full); err != nil {
+		t.Fatal(err)
+	}
+	if full <= 1048575-2000*40 || full >= 1048575 {
+		t.Fatalf("test text gives a %d byte vector; want one that only overflows with the links", full)
+	}
+	doc := textDoc(t, st, alice, "Grenzfall", text)
+	rows, err := conn.Query(ctx, `INSERT INTO tags (owner_id, name) SELECT $1, 'Etikett ' || g FROM generate_series(1, 2000) g RETURNING id::text`, alice.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetDocumentTags(ctx, alice, doc.ID, tags); err != nil {
+		t.Fatalf("2000 tags on a document with a large vector: %v", err)
+	}
+	var textSize, links int
+	if err := conn.QueryRow(ctx, `SELECT pg_column_size(search_text), length(search_links) FROM documents WHERE id = $1`, doc.ID).Scan(&textSize, &links); err != nil {
+		t.Fatal(err)
+	}
+	if textSize > 917504 || links != 2000 {
+		t.Errorf("search_text %d bytes, %d link lexemes", textSize, links)
+	}
+	wantTitles(t, "title", searchIndex(t, conn, &alice.UserID, words("Grenzfall")), "Grenzfall")
+}
+
+// An unaccent extension an administrator created beforehand stays when the
+// migration is rolled back: the app's user does not own it.
+func TestSearchMigrationKeepsForeignUnaccent(t *testing.T) {
+	st, url := storetest.NewWithURL(t)
+	ctx := context.Background()
+	conn := connect(t, url)
+	var super bool
+	if err := conn.QueryRow(ctx, `SELECT rolsuper FROM pg_roles WHERE rolname = current_user`).Scan(&super); err != nil {
+		t.Fatal(err)
+	}
+	if !super {
+		t.Skip("needs a superuser to create another role")
+	}
+	if err := st.MigrateDownTo(ctx, searchVersion-1); err != nil {
+		t.Fatal(err)
+	}
+	var db string
+	if err := conn.QueryRow(ctx, `SELECT current_database()`).Scan(&db); err != nil {
+		t.Fatal(err)
+	}
+	role := pgx.Identifier{db + "_dba"}.Sanitize() // unique like the database
+	for _, sql := range []string{
+		`CREATE ROLE ` + role,
+		`GRANT CREATE ON DATABASE ` + pgx.Identifier{db}.Sanitize() + ` TO ` + role,
+		`GRANT CREATE ON SCHEMA public TO ` + role,
+		`SET ROLE ` + role,
+		`CREATE EXTENSION unaccent SCHEMA public`,
+		`RESET ROLE`,
+	} {
+		if _, err := conn.Exec(ctx, sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, sql := range []string{`DROP EXTENSION IF EXISTS unaccent CASCADE`, `DROP OWNED BY ` + role, `DROP ROLE ` + role} {
+			if _, err := conn.Exec(ctx, sql); err != nil {
+				t.Errorf("%s: %v", sql, err)
+			}
+		}
+	})
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("up with an existing unaccent: %v", err)
+	}
+	if err := st.MigrateDownTo(ctx, searchVersion-1); err != nil {
+		t.Fatalf("down with another role's unaccent: %v", err)
+	}
+	var ext int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM pg_extension WHERE extname = 'unaccent'`).Scan(&ext); err != nil || ext != 1 {
+		t.Errorf("unaccent after rolling back: %d, %v", ext, err)
 	}
 }

@@ -144,7 +144,9 @@ queries use exactly this expression. `documents_owner_date_idx` on
 is `simple` with the `unaccent` dictionary and covers exact words, numbers
 and prefixes. The German stemmer maps `ä ö ü` to `a o u` and `ß` to `ss`,
 and `unaccent` does the same for the simple part, so `Gebühren`/`Gebuhren`
-and `Straße`/`Strasse` match each other; `Gebuehren` does not. `unaccent`
+and `Straße`/`Strasse` match each other. `Gebuehren` matches them only
+from PostgreSQL 18 on, whose German stemmer (Snowball 3) also folds `ae oe
+ue`; the Compose image runs 18. `unaccent`
 is a trusted extension (PostgreSQL 13+): the database owner creates it
 without superuser rights, and it ships with `postgres:18-alpine`. It and
 `paperless_simple` live in `public` and are always referenced
@@ -153,8 +155,11 @@ schema-qualified, so nothing depends on the caller's `search_path`.
 **Cap.** A `tsvector` cannot exceed 1 MB, and the worker accepts 16 MiB of
 text. `documents_search_text_vector` takes 300 000 characters of the text;
 on overflow (SQLSTATE `54000`) it retries with 100 000, then without the
-text, then with 100 000 characters of every other field, then gives an
-empty vector. Saving a document never fails because of the index.
+text, then with 100 000 characters of the text and of every other field,
+then of the other fields only, then gives an empty vector. A built vector over 896 KiB counts as an overflow, which
+leaves room for the link lexemes, so the index expression `search_text ||
+search_links` cannot overflow either. Saving a document never fails
+because of the index.
 
 **Positions.** `a || b` shifts `b`'s positions by `a`'s largest, and
 positions stop at 16 383. The short fields come first and the `german` copy
@@ -175,7 +180,11 @@ and document types whose name contains the term, ignoring case and accents
 matches a whole name only; at most 1000 IDs per item, ordered by kind and
 ID). Negated items get `!!`, items of one `or_group` are joined by `|`, the
 groups by `&`. An item that yields nothing is dropped; with none left the
-result is `NULL` (no full-text condition). Names are resolved within
+result is `NULL` (no full-text condition). The function is plpgsql and so never folded at plan time: a query
+must call it once, as a scalar subquery (`@@ (SELECT
+document_search_tsquery(...))`, an InitPlan that still uses the index),
+or a sequential scan calls it for every row (measured: 4.9 s instead of
+22 ms for 20 000 documents). Names are resolved within
 `owner`, or among all owners when it is `NULL` (an admin). Because the
 composite foreign keys keep a document's links within its owner, a user
 cannot match another user's documents through a name or an ID. Renaming or
@@ -187,7 +196,12 @@ is `VOLATILE` (plpgsql) on purpose: each statement takes a fresh snapshot,
 so a trigger that waited for the document's row lock sees tags committed
 meanwhile. Every writer of `document_tags` locks the document row first
 (`SetDocumentTags` through `LockDocument`; the bulk edit (#7) and automatic
-tagging must do the same), so two rebuilds of one document never interleave.
+tagging must do the same), so two rebuilds of one document never interleave. A tag's delete takes the locks the other way round (`document_tags`,
+then the documents), so it can deadlock with a concurrent `SetDocumentTags`
+on the same document; PostgreSQL then fails one of them (`40P01`), nothing
+hangs or is half-written. `document_tags` rows are never updated, so there
+is no `UPDATE` trigger. Down drops `unaccent` only when the current user
+owns it and nothing outside the extension uses it.
 
 **Reads.** No query reads the vectors back: `GetDocument` and
 `ListDocuments` list their columns instead of `d.*`.

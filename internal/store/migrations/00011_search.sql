@@ -52,8 +52,9 @@ DECLARE
     n text := left(coalesce(notes, ''), coalesce(field_cap, 2147483647));
     f text := translate(left(coalesce(file_name, ''), coalesce(field_cap, 2147483647)), '_.-', '   ');
     x text := left(coalesce(extracted, ''), text_cap);
+    v tsvector;
 BEGIN
-    RETURN setweight(to_tsvector('public.paperless_simple', t), 'A')
+    v := setweight(to_tsvector('public.paperless_simple', t), 'A')
         || setweight(to_tsvector('pg_catalog.german', t), 'A')
         || setweight(to_tsvector('pg_catalog.english', t), 'A')
         || setweight(to_tsvector('pg_catalog.simple',
@@ -65,14 +66,23 @@ BEGIN
         || setweight(to_tsvector('pg_catalog.german', x), 'D')
         || setweight(to_tsvector('public.paperless_simple', x), 'D')
         || setweight(to_tsvector('pg_catalog.english', x), 'D');
+    -- Leave room below the 1 MB limit for search_links: the index
+    -- expression search_text || search_links must never overflow either
+    -- (a link lexeme takes about 50 bytes, so 128 KiB hold over 2000).
+    IF pg_column_size(v) > 917504 THEN
+        RAISE EXCEPTION 'search_text over 896 KiB' USING ERRCODE = 'program_limit_exceeded';
+    END IF;
+    RETURN v;
 END;
 $$;
 -- +goose StatementEnd
 
 -- documents_search_text_vector never fails because of the index. A tsvector
--- cannot exceed 1 MB (SQLSTATE 54000), so it takes the first 300 000
--- characters of the text (the worker allows 16 MiB), then 100 000, then
--- none; then 100 000 characters of each other field; then nothing.
+-- cannot exceed 1 MB (SQLSTATE 54000), and documents_search_text_build
+-- refuses more than 896 KiB, so it takes the first 300 000 characters of
+-- the text (the worker allows 16 MiB), then 100 000, then none; then
+-- 100 000 characters of the text and of each other field, then of the
+-- other fields only; then nothing.
 -- +goose StatementBegin
 CREATE FUNCTION documents_search_text_vector(
     title text, asn integer, notes text, file_name text, extracted text
@@ -89,6 +99,10 @@ BEGIN
     END;
     BEGIN
         RETURN documents_search_text_build(title, asn, notes, file_name, extracted, 0, NULL);
+    EXCEPTION WHEN program_limit_exceeded THEN NULL;
+    END;
+    BEGIN
+        RETURN documents_search_text_build(title, asn, notes, file_name, extracted, 100000, 100000);
     EXCEPTION WHEN program_limit_exceeded THEN NULL;
     END;
     BEGIN
@@ -193,6 +207,13 @@ CREATE TRIGGER documents_search_links
 -- Statement-level triggers on document_tags refresh each affected document
 -- once per statement. A tag's delete reaches document_tags through its
 -- cascade, so it is covered; a document's delete finds no row to refresh.
+-- Rows of document_tags are only inserted and deleted, never updated (the
+-- store has no such query), so there is no UPDATE trigger; a future UPDATE
+-- of document_tags must add one.
+-- A tag's delete locks document_tags rows before the documents, while
+-- SetDocumentTags locks the document first: run concurrently on the same
+-- document, PostgreSQL may detect a deadlock and fail one of them (no hang,
+-- nothing half-written). The bulk edit (#7) should retry on 40P01.
 -- +goose StatementBegin
 CREATE FUNCTION document_tags_search_trigger() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -367,4 +388,33 @@ ALTER TABLE documents
     DROP COLUMN search_links,
     DROP COLUMN search_text;
 DROP TEXT SEARCH CONFIGURATION public.paperless_simple;
-DROP EXTENSION IF EXISTS unaccent;
+-- unaccent goes only when the current user owns it, which is the case when
+-- this migration created it, and nothing outside the extension uses it.
+-- One an administrator created beforehand (for a user without the CREATE
+-- privilege) stays: the user could not drop it, and other software may use
+-- it.
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_extension x
+        WHERE x.extname = 'unaccent'
+          AND x.extowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+          AND NOT EXISTS (
+              -- an object that is not part of the extension and depends on
+              -- one of its members
+              SELECT 1 FROM pg_depend member
+              JOIN pg_depend d ON d.refclassid = member.classid AND d.refobjid = member.objid
+              WHERE member.refclassid = 'pg_extension'::regclass AND member.refobjid = x.oid
+                AND member.deptype = 'e' AND d.deptype = 'n'
+                AND NOT EXISTS (
+                    SELECT 1 FROM pg_depend m2
+                    WHERE m2.classid = d.classid AND m2.objid = d.objid
+                      AND m2.refclassid = 'pg_extension'::regclass AND m2.refobjid = x.oid
+                      AND m2.deptype = 'e'))
+    ) THEN
+        DROP EXTENSION unaccent;
+    END IF;
+END;
+$$;
+-- +goose StatementEnd
