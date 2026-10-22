@@ -173,7 +173,7 @@ const en = {
   // API keys
   apiKeys: "API keys",
   apiKeysText:
-    "Scripts and devices use an API key instead of a login: Authorization: Bearer pl_…. A key can read documents (read), only add them (upload, for a phone or scanner) or add and change documents and their tags, correspondents and document types (write), with your rights; nothing else.",
+    "Scripts and devices use an API key instead of a login: Authorization: Bearer pl_…. A key can read documents (read), only add them (upload, for a phone or scanner) or add, change and delete documents and their tags, correspondents and document types (write), with your rights; nothing else.",
   apiKeysKeptOnPasswordChange: "Changing your password keeps your API keys. Revoke a key here if it may be known to others.",
   apiKeyNone: "No API keys yet.",
   apiKeyName: "Name of the key",
@@ -479,7 +479,7 @@ const de: Messages = {
 
   apiKeys: "API-Schlüssel",
   apiKeysText:
-    "Skripte und Geräte nutzen einen API-Schlüssel statt einer Anmeldung: Authorization: Bearer pl_…. Ein Schlüssel kann Dokumente lesen (read), nur hinzufügen (upload, für ein Handy oder einen Scanner) oder Dokumente samt Tags, Korrespondenten und Dokumenttypen hinzufügen und ändern (write), mit deinen Rechten; sonst nichts.",
+    "Skripte und Geräte nutzen einen API-Schlüssel statt einer Anmeldung: Authorization: Bearer pl_…. Ein Schlüssel kann Dokumente lesen (read), nur hinzufügen (upload, für ein Handy oder einen Scanner) oder Dokumente samt Tags, Korrespondenten und Dokumenttypen hinzufügen, ändern und löschen (write), mit deinen Rechten; sonst nichts.",
   apiKeysKeptOnPasswordChange: "Wenn du dein Passwort änderst, bleiben deine API-Schlüssel gültig. Widerrufe hier einen Schlüssel, wenn andere ihn kennen könnten.",
   apiKeyNone: "Noch keine API-Schlüssel.",
   apiKeyName: "Name des Schlüssels",

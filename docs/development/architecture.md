@@ -638,7 +638,8 @@ another user's document answers `404` and an admin sees all.
   `document.create` is written in the creating transaction
   (`store.WithAudit` through the importer's context). Answers: `201` with the
   document, `200` with `{"duplicate": true, "existing": {id, title}}`
-  (`existing` left out if the lookup failed), `413` `too_large`, `415`
+  (`existing` left out if the lookup failed, and for an API key without
+  `read`, so an `upload` key learns only that the file is there), `413` `too_large`, `415`
   `unsupported`, `422` `unreadable` or `too_many_pixels` (with `reason`),
   `400` for a body that broke off, `503` without the audit log.
 - **`GET /api/documents`** lists and searches the scope's documents

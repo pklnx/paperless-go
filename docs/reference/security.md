@@ -259,6 +259,9 @@ only over HTTPS or on `localhost`, so they do not work this way.
   which needs `upload` or `write`. A key with the wrong scope gets `403`
   with the missing `scope`. A key for a phone or a scanner gets `upload`
   only: whoever finds it can add documents, but not read or change any.
+  For a file that is already in the archive, a key without `read` gets
+  only `200` `{"duplicate": true}`, not which document it is (id and
+  title); sessions and keys with `read` get both.
 - **Creating one** happens on the profile page and needs the password and,
   with 2FA on, a current TOTP or recovery code, like adding a passkey;
   wrong ones count towards the login limits. A key gets a name (unique

@@ -293,8 +293,15 @@ func TestAPIKeyUploadScope(t *testing.T) {
 		t.Fatalf("upload: %d %v", resp.StatusCode, out)
 	}
 	id, _ := out["id"].(string)
-	if resp, out := f.keyUpload(phone, "again.pdf", pdf("scan")); resp.StatusCode != 200 || out["duplicate"] != true {
-		t.Errorf("duplicate upload: %d %v", resp.StatusCode, out)
+	// The duplicate answer does not name the existing document to a key
+	// without read; a key with read gets it.
+	if resp, out := f.keyUpload(phone, "again.pdf", pdf("scan")); resp.StatusCode != 200 || len(out) != 1 || out["duplicate"] != true {
+		t.Errorf("duplicate upload with an upload key: %d %v, want only duplicate", resp.StatusCode, out)
+	}
+	rw := f.createKey("rw", []string{"read", "write"}, "")
+	resp, out = f.keyUpload(rw, "again.pdf", pdf("scan"))
+	if ex, _ := out["existing"].(map[string]any); resp.StatusCode != 200 || out["duplicate"] != true || ex["id"] != id || ex["title"] != "scan" {
+		t.Errorf("duplicate upload with a read+write key: %d %v", resp.StatusCode, out)
 	}
 	tag := f.expect("POST", "/api/tags", map[string]any{"name": "Bills"}, 201)["id"].(string)
 	refused := []struct{ method, path, scope string }{
@@ -334,7 +341,7 @@ func TestAPIKeyUploadScope(t *testing.T) {
 		k := k.(map[string]any)
 		scopes[k["name"].(string)] = fmt.Sprint(k["scopes"])
 	}
-	if scopes["iPhone"] != "[upload]" || scopes["script"] != "[write]" {
+	if scopes["iPhone"] != "[upload]" || scopes["script"] != "[write]" || scopes["rw"] != "[read write]" {
 		t.Errorf("listed scopes %v", scopes)
 	}
 
@@ -344,7 +351,7 @@ func TestAPIKeyUploadScope(t *testing.T) {
 			created = append(created, r.TargetName+"="+fmt.Sprint(details(t, r)["scopes"]))
 		}
 	}
-	if strings.Join(created, " ") != "iPhone=[upload] script=[write]" {
+	if strings.Join(created, " ") != "iPhone=[upload] rw=[read write] script=[write]" {
 		t.Errorf("api_key.create entries: %v", created)
 	}
 
