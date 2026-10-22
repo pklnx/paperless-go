@@ -236,6 +236,15 @@ proxies](../reference/security#trusted-proxies)), else all clients share
 one login limit. Rolling the migration back (`migrate down`) only drops the
 network caps.
 
+Behind a proxy without `PAPERLESS_GO_TRUSTED_PROXIES` all browsers share
+the limit of 30 passkey-login starts per minute for one address; with the
+cookie this is now the first limit users hit (`429` "too many attempts").
+The fix is the trusted-proxy setting. The warning is logged once per
+start, and any client that sends `X-Forwarded-For` straight to the server
+can trigger it first: the line then names that client's address, not the
+proxy's. So when the warning names an unexpected address, check the proxy
+setup anyway.
+
 **Audit entries by the server (#49).** Run `./pgo migrate` before `docker
 compose up -d web`. The consume folder now writes a `document.consume`
 entry to the audit log for each scan that imported, deleted or moved files
