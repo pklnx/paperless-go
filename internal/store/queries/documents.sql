@@ -21,14 +21,22 @@ RETURNING id;
 SELECT id, title FROM documents WHERE owner_id = $1 AND original_sha256 = $2;
 
 -- name: GetDocument :one
-SELECT d.*,
+-- The columns are listed: the search vectors (search_text, search_links)
+-- can be large and are never read.
+SELECT d.id, d.owner_id, d.title, d.document_date, d.created_at, d.modified_at, d.notes, d.is_favorite,
+       d.is_inbox, d.archive_serial_number, d.page_count, d.extracted_text, d.text_source, d.source,
+       d.original_file_name, d.original_sha256, d.original_size, d.original_mime, d.archive_sha256,
+       d.archive_size, d.correspondent_id, d.document_type_id, d.thumbnail_sha256, d.processing_note,
        COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
                  WHERE dt.document_id = d.id), '{}')::uuid[] AS tag_ids
 FROM documents d
 WHERE d.id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR d.owner_id = sqlc.narg(owner));
 
 -- name: ListDocuments :many
-SELECT d.*,
+SELECT d.id, d.owner_id, d.title, d.document_date, d.created_at, d.modified_at, d.notes, d.is_favorite,
+       d.is_inbox, d.archive_serial_number, d.page_count, d.extracted_text, d.text_source, d.source,
+       d.original_file_name, d.original_sha256, d.original_size, d.original_mime, d.archive_sha256,
+       d.archive_size, d.correspondent_id, d.document_type_id, d.thumbnail_sha256, d.processing_note,
        COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
                  WHERE dt.document_id = d.id), '{}')::uuid[] AS tag_ids
 FROM documents d

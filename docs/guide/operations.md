@@ -102,6 +102,22 @@ processes them after `docker compose up -d web`. A PDF that opens without
 a password is OCRed unless its permissions forbid changes; the archive PDF
 is then not encrypted (the original stays as it is).
 
+**Full-text search index (#6).** The migration indexes every document's
+text once: plan on a few minutes per 100 000 documents (about 4–5 for
+documents of about 5 000 characters; it depends on the machine), during which the documents table is locked (the web server does not
+run while migrations are pending), and on about 1.5–2 times the stored text
+in extra disk space. It creates the PostgreSQL extension `unaccent`, a trusted extension
+that needs no superuser: in the Compose setup the database user creates it
+itself. With your own PostgreSQL server and a user without the `CREATE`
+privilege on the database, have an administrator run
+`CREATE EXTENSION unaccent SCHEMA public;` in it first. The extension
+must be in the `public` schema: if it is already installed in another
+one, the migration fails; move it with `ALTER EXTENSION unaccent SET
+SCHEMA public;`. Rolling the migration back (`migrate down`) drops the
+index, and the extension too if the paperless-go database user owns it
+(it created it) and nothing else uses it; one an administrator created
+stays.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build
