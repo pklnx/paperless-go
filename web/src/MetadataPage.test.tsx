@@ -39,7 +39,8 @@ describe("metadata page", () => {
     render(<App />);
     fireEvent.click(within(await screen.findByTestId("sidebar")).getByRole("button", { name: t.manageMetadata }));
     expect(window.location.search).toBe("?view=metadata");
-    await page().findByText("Steuer");
+    // The view switch renders asynchronously: wait for the panel, not just the text in it.
+    await within(await screen.findByRole("tabpanel")).findByText("Steuer");
     expect(tagNames()).toEqual(["<b>Arzt</b>", "Steuer", "2024"]);
     expect(document.querySelector("b")).toBeNull();
     const steuer = screen.getByTestId("tag-row-t1");
