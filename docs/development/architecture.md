@@ -416,7 +416,14 @@ first) and its retry loop.
   `store.DisableOwnerLock` (test-only; it also turns the guard off) the
   same tests deadlock (`ErrRetry`); with the lock they pass.
 - **Cost** (the load test of `scripts/loadtest`, before and after on one
-  host): MEASURED_COST
+  host, 4 CPUs, the server's default pool of 4 connections; #108): one
+  user's concurrent writes (S2, 21 threads as one user) went from 22.7 to
+  25.6 requests/s (bulk p99 3.6 s → 2.4 s, patch p99 3.4 s → 2.6 s), since
+  the 56 deadlocks and their retries are gone; with two users (S1) from
+  33.9 to 38.1 requests/s, 45 deadlocks and one `503` → none. An upload of
+  the owner whose bulk changes over 5 000 documents loop waits for at
+  most one of them (S3: p99 2.6 s, the bulk loop's p99 2.8 s; 8 ms p50
+  alone); another owner's upload does not wait (p99 16 ms).
 
 ## Blob durability
 
