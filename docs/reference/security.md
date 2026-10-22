@@ -217,6 +217,10 @@ only over HTTPS or on `localhost`, so they do not work this way.
   total for everybody; failed passkey logins count towards the address
   limit of the login limits. Concurrent logins with one passkey are
   serialized, so a replayed answer with the same sign count fails.
+  Known, accepted limit of a total cap: the 1000 can be filled from four
+  IPv6 `/48`s, or from about 50 IPv4 addresses spread over at least ten
+  `/24`s. Passkey login then answers `429` for everybody for up to 5
+  minutes, while password login keeps working.
 - **The browser's open login.** The login page starts an autofill login
   each time it loads. The server keeps its token in a cookie
   (`paperless_go_passkey_login`, `__Host-` over HTTPS; `HttpOnly`,
@@ -227,7 +231,13 @@ only over HTTPS or on `localhost`, so they do not work this way.
   browser's own login, which needs the authenticator to finish; clients
   without it count in full against every cap. Two tabs share it: a login
   started in the second tab replaces the first tab's, whose autofill then
-  answers "expired" once and starts a new one.
+  answers "expired" once and starts a new one. The server reads up to 4
+  cookies of each name, since a sibling subdomain can set the plain name
+  for this host too and a cookie with a longer path is sent before the
+  browser's own. A sibling host that sets more than 3 cookies of that name
+  with a longer path can still shadow the browser's cookie while the plain
+  (non-`__Host-`) name is in use; the only effect is that reloads count
+  again until they expire.
 - **Removing.** A user removes a passkey on the profile page; that ends
   their other sessions. An admin removes all of a user's passkeys on the
   Users page (or `./pgo user remove-passkeys NAME`), which logs the user

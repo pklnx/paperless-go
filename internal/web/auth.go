@@ -99,23 +99,32 @@ func (s *Server) secureRequest(r *http.Request) bool {
 // Each token costs a database lookup, so at most maxSessionCookies distinct
 // tokens per name are returned, however many cookies a request carries.
 func sessionTokens(r *http.Request) []string {
-	var tokens []string
+	return cookieValues(r, []string{secureCookieName, cookieName}, maxSessionCookies)
+}
+
+// cookieValues returns the values of the request's cookies with the given
+// names, name by name in that order and each name in header order. Empty
+// values and values already returned are skipped; at most perName values
+// of one name are returned, the rest of that name is not read.
+func cookieValues(r *http.Request, names []string, perName int) []string {
+	var values []string
 	seen := make(map[string]bool)
-	for _, name := range []string{secureCookieName, cookieName} {
+	cookies := r.Cookies()
+	for _, name := range names {
 		n := 0
-		for _, c := range r.Cookies() {
+		for _, c := range cookies {
 			if c.Name != name || c.Value == "" || seen[c.Value] {
 				continue
 			}
-			if n == maxSessionCookies {
+			if n == perName {
 				break
 			}
 			seen[c.Value] = true
-			tokens = append(tokens, c.Value)
+			values = append(values, c.Value)
 			n++
 		}
 	}
-	return tokens
+	return values
 }
 
 // maxSessionCookies is how many cookies of one session cookie name count.
