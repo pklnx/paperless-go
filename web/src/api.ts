@@ -75,15 +75,19 @@ export interface User {
 /** The answer to the password step: a user, or the challenge for the second step. */
 export type LoginResult = { user: User } | { twoFactorRequired: true; challenge: string };
 
-/** The login state: a user, or none and whether the first admin is missing. */
-export type SessionState = { user: User } | { user: null; setupRequired: boolean };
+/**
+ * The login state: a user, or none and whether the first admin is missing.
+ * passkeyOrigin is where passkey logins work, if the server offers them.
+ */
+export type SessionState = { user: User } | { user: null; setupRequired: boolean; passkeyOrigin?: string };
 
 export const sessionApi = {
   get: async (signal?: AbortSignal): Promise<SessionState> => {
     const res = await fetch(sessionPath, { signal, headers: { Accept: "application/json" } });
     if (res.status === 401) {
       const err = await errorFrom(res);
-      return { user: null, setupRequired: err.body.setupRequired === true };
+      const origin = err.body.passkeyOrigin;
+      return { user: null, setupRequired: err.body.setupRequired === true, passkeyOrigin: typeof origin === "string" ? origin : undefined };
     }
     if (!res.ok) throw await errorFrom(res);
     return (await res.json()) as { user: User };
@@ -125,6 +129,47 @@ export const profileApi = {
   },
 };
 
+/** A ceremony the server started: publicKey goes to navigator.credentials, token back with the answer. */
+export interface Ceremony {
+  token: string;
+  publicKey: Record<string, unknown>;
+}
+
+/** A registered passkey of the logged-in user. */
+export interface Passkey {
+  id: number;
+  name: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export interface PasskeyList {
+  /** False without PAPERLESS_GO_PUBLIC_URL on the server. */
+  available: boolean;
+  /** Where passkeys work, like https://docs.example.ts.net. */
+  origin?: string;
+  max: number;
+  passkeys: Passkey[];
+}
+
+/** The server's answer for a passkey it does not know. */
+export function unknownPasskey(err: unknown): { rpId: string; credentialId: string } | null {
+  if (!(err instanceof ApiError) || err.body.unknownCredential !== true) return null;
+  const { rpId, credentialId } = err.body;
+  return typeof rpId === "string" && typeof credentialId === "string" ? { rpId, credentialId } : null;
+}
+
+export const passkeyApi = {
+  beginLogin: async () => (await send<Ceremony>("POST", `${sessionPath}/passkey/begin`))!,
+  finishLogin: async (token: string, credential: unknown) =>
+    (await send<{ user: User }>("POST", `${sessionPath}/passkey/finish`, { token, credential }))!.user,
+  list: () => getJSON<PasskeyList>("/api/profile/passkeys"),
+  beginRegistration: async (name: string, currentPassword: string, code: string) =>
+    (await send<Ceremony>("POST", "/api/profile/passkeys/begin", { name, currentPassword, code }))!,
+  finishRegistration: (token: string, credential: unknown) => send("POST", "/api/profile/passkeys/finish", { token, credential }),
+  remove: async (id: number) => (await send<{ credentialId: string; rpId?: string }>("DELETE", `/api/profile/passkeys/${id}`))!,
+};
+
 /** A user as admins see them on the users page. */
 export interface ManagedUser {
   name: string;
@@ -132,6 +177,7 @@ export interface ManagedUser {
   locked: boolean;
   mustChangePassword: boolean;
   twoFactorEnabled: boolean;
+  passkeys: number;
   /** The rows the user owns; any of them keeps the user from being removed. */
   owned: { documents: number; tags: number; correspondents: number; documentTypes: number; savedViews: number };
   createdAt: string;
@@ -156,11 +202,14 @@ const userPath = (name: string) => `/api/users/${encodeURIComponent(name)}`;
 export const usersApi = {
   list: async (signal?: AbortSignal) => (await getJSON<{ users: ManagedUser[] }>("/api/users", signal)).users,
   create: async (name: string, admin: boolean) => (await send<GeneratedPassword>("POST", "/api/users", { name, admin }))!,
-  resetPassword: async (name: string) => (await send<GeneratedPassword>("POST", `${userPath(name)}/password`))!,
+  /** A new password; the user's passkeys are removed unless removePasskeys is false. */
+  resetPassword: async (name: string, removePasskeys: boolean) =>
+    (await send<GeneratedPassword>("POST", `${userPath(name)}/password`, { removePasskeys }))!,
   setAdmin: (name: string, admin: boolean) => send("PATCH", userPath(name), { admin }),
   setLocked: (name: string, locked: boolean) => send("PATCH", userPath(name), { locked }),
   remove: (name: string) => send("DELETE", userPath(name)),
   reset2FA: (name: string) => send("POST", `${userPath(name)}/2fa/reset`),
+  removePasskeys: (name: string) => send("DELETE", `${userPath(name)}/passkeys`),
 };
 
 /** One entry of the audit log, as GET /api/audit lists it. */
@@ -202,4 +251,24 @@ export function auditQuery(f: AuditFilter, cursor = ""): string {
 export const auditApi = {
   list: (f: AuditFilter, cursor: string, signal?: AbortSignal) =>
     getJSON<{ entries: AuditEntry[]; nextCursor?: string }>(`/api/audit?${auditQuery(f, cursor)}`, signal),
+};
+
+/** A document as GET /api/documents lists it (the fields the UI uses). */
+export interface DocumentSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  documentDate: string;
+  originalFileName: string;
+  originalMime: string;
+  originalSize: number;
+  hasArchive: boolean;
+}
+
+export const documentsApi = {
+  /** The caller's newest documents (an admin's: everyone's), at most limit (the server caps it at 100), and the upload limit in bytes. */
+  list: (limit: number, signal?: AbortSignal) =>
+    getJSON<{ documents: DocumentSummary[]; maxUploadSize: number }>(`/api/documents?limit=${limit}`, signal),
+  /** The download URL of a document's original file or archive PDF. */
+  fileURL: (id: string, kind: "original" | "archive" = "original") => `/api/documents/${encodeURIComponent(id)}/file?kind=${kind}`,
 };

@@ -9,11 +9,17 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
+
 	"github.com/pklnx/paperless-go/internal/auth"
+	"github.com/pklnx/paperless-go/internal/blobstore"
+	"github.com/pklnx/paperless-go/internal/config"
 	"github.com/pklnx/paperless-go/internal/crypto"
+	"github.com/pklnx/paperless-go/internal/ingest"
 	"github.com/pklnx/paperless-go/internal/store"
 )
 
@@ -40,6 +46,15 @@ type Server struct {
 	sealer     *crypto.Sealer
 	secretKey  []byte
 	require2FA bool
+	// webauthn is nil without a public URL: no passkeys. publicOrigin is
+	// where they work.
+	webauthn      *webauthn.WebAuthn
+	publicOrigin  string
+	passkeyBegins *auth.Rate
+	// blobs holds the document files and importer imports uploads into
+	// it; without blobs the document routes answer 503.
+	blobs    *blobstore.Store
+	importer *ingest.Importer
 }
 
 // Options configure a Server.
@@ -66,6 +81,15 @@ type Options struct {
 	// Require2FA makes 2FA required for every user, not only admins
 	// (PAPERLESS_GO_REQUIRE_2FA).
 	Require2FA bool
+	// PublicURL is the address users open (PAPERLESS_GO_PUBLIC_URL). It
+	// turns passkeys on; its host is accepted in addition to AllowedHosts.
+	PublicURL string
+	// Blobs holds the document files. Without it the document routes
+	// answer 503.
+	Blobs *blobstore.Store
+	// MaxUploadSize is the largest upload in bytes
+	// (PAPERLESS_GO_MAX_UPLOAD_SIZE); 0 means config.DefaultMaxUploadSize.
+	MaxUploadSize int64
 }
 
 // New creates a Server.
@@ -94,21 +118,48 @@ func New(st *store.Store, log *slog.Logger, opts Options) *Server {
 	if opts.Pinger != nil {
 		pinger = opts.Pinger
 	}
-	return &Server{
+	wa, origin, err := newWebAuthn(opts.PublicURL)
+	if err != nil {
+		// config.Load checked the URL already; this is a programming error.
+		log.Error("passkeys are off", "err", err)
+	}
+	if wa != nil && !slices.Contains(hosts, wa.Config.RPID) {
+		hosts = append(hosts, wa.Config.RPID)
+	}
+	passkeyBegins := auth.NewRate(passkeyBeginLimit, passkeyBeginWindow)
+	passkeyBegins.SetClock(now)
+	s := &Server{
 		store: st, db: pinger, log: log, allowedHosts: hosts, hasher: hasher, now: now, limiter: limiter,
 		trustedProxies: opts.TrustedProxies, sealer: opts.Sealer, secretKey: opts.SecretKey, require2FA: opts.Require2FA,
+		webauthn: wa, publicOrigin: origin, passkeyBegins: passkeyBegins,
 	}
+	if opts.Blobs != nil && st != nil {
+		maxSize := opts.MaxUploadSize
+		if maxSize <= 0 {
+			maxSize = config.DefaultMaxUploadSize
+		}
+		// maxSize is positive, so New cannot fail.
+		s.importer, _ = ingest.New(st, opts.Blobs, maxSize)
+		s.blobs = opts.Blobs
+	}
+	return s
 }
 
 // Handler returns the HTTP handler with all routes and protections.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	accessOf := make(map[string]access)
+	bodyOf := make(map[string]body)
 	for _, rt := range s.routes() {
 		mux.Handle(rt.pattern, rt.handler)
 		accessOf[rt.pattern] = rt.access
+		bodyOf[rt.pattern] = rt.body
 	}
-	return s.protect(s.authenticate(mux, accessOf))
+	routeBody := func(r *http.Request) body {
+		_, pattern := mux.Handler(r)
+		return bodyOf[pattern]
+	}
+	return s.protect(s.authenticate(mux, accessOf), routeBody)
 }
 
 // handleHealth answers 200 while the database answers, for container
@@ -162,8 +213,8 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 const auditMonthsAhead = 3
 
 // housekeeping runs at start and then every hour until ctx ends: it creates
-// the audit log partitions ahead and deletes expired sessions and 2FA
-// login challenges.
+// the audit log partitions ahead and deletes expired sessions, 2FA login
+// challenges and passkey ceremonies.
 func (s *Server) housekeeping(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
@@ -171,6 +222,7 @@ func (s *Server) housekeeping(ctx context.Context) {
 		s.ensureAuditPartitions(ctx)
 		s.deleteExpiredSessions(ctx)
 		s.deleteExpiredTwoFactorChallenges(ctx)
+		s.deleteExpiredWebAuthnCeremonies(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -210,6 +262,16 @@ func (s *Server) deleteExpiredTwoFactorChallenges(ctx context.Context) {
 	}
 }
 
+func (s *Server) deleteExpiredWebAuthnCeremonies(ctx context.Context) {
+	n, err := s.store.DeleteExpiredWebAuthnCeremonies(ctx, s.now())
+	switch {
+	case err != nil && ctx.Err() == nil:
+		s.log.Warn("delete expired passkey ceremonies", "err", err)
+	case n > 0:
+		s.log.Debug("deleted expired passkey ceremonies", "count", n)
+	}
+}
+
 func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -242,6 +304,10 @@ func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
 		s.fail(w, r, http.StatusNotFound, "not found", err)
 	case errors.Is(err, store.ErrInvalid):
 		s.fail(w, r, http.StatusBadRequest, "invalid input", err)
+	case errors.Is(err, store.ErrUnknownUser):
+		// The user was removed while the request ran; the session is gone
+		// with it.
+		s.fail(w, r, http.StatusUnauthorized, "login required", err)
 	default:
 		s.fail(w, r, http.StatusInternalServerError, "internal error", err)
 	}

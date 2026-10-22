@@ -15,6 +15,7 @@ export function UsersPage() {
   const [error, setError] = useState("");
   const [adding, setAdding] = useState(false);
   const [generated, setGenerated] = useState<GeneratedPassword | null>(null);
+  const [resetting, setResetting] = useState<ManagedUser | null>(null);
 
   const reload = useCallback(() => {
     usersApi.list().then(
@@ -80,6 +81,7 @@ export function UsersPage() {
               <span className={`text-sm ${u.twoFactorEnabled ? "text-ok" : "text-ink-muted"}`}>
                 {u.twoFactorEnabled ? t.twoFactorShortOn : t.twoFactorShortOff}
               </span>
+              {u.passkeys > 0 && <span className="text-sm text-ink-muted">{t.passkeyCount(u.passkeys)}</span>}
               <span className="ml-auto text-sm text-ink-muted">
                 {t.colDocuments}: {u.owned.documents} · {t.colLastLogin}: {u.lastLoginAt ? formatTime(u.lastLoginAt) : t.never}
               </span>
@@ -88,11 +90,7 @@ export function UsersPage() {
               <p className="text-sm text-ink-muted">{t.selfHint}</p>
             ) : (
               <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  className={button}
-                  onClick={() => window.confirm(t.confirmResetPassword(u.name)) && run(async () => setGenerated(await usersApi.resetPassword(u.name)))}
-                >
+                <button type="button" className={button} onClick={() => setResetting(u)}>
                   {t.resetPassword}
                 </button>
                 <button
@@ -111,6 +109,15 @@ export function UsersPage() {
                     {t.twoFactorReset}
                   </button>
                 )}
+                {u.passkeys > 0 && (
+                  <button
+                    type="button"
+                    className={button}
+                    onClick={() => window.confirm(t.confirmRemovePasskeys(u.name, u.passkeys)) && run(() => usersApi.removePasskeys(u.name))}
+                  >
+                    {t.removePasskeys}
+                  </button>
+                )}
                 <button type="button" className={button} onClick={() => run(() => usersApi.setAdmin(u.name, !u.admin))}>
                   {u.admin ? t.removeAdmin : t.makeAdmin}
                 </button>
@@ -126,9 +133,46 @@ export function UsersPage() {
               </div>
             )}
             {!u.self && ownsData(u) && <p className="text-sm text-ink-muted">{t.ownsData}</p>}
+            {resetting?.name === u.name && (
+              <ResetPasswordConfirm
+                user={u}
+                cancel={() => setResetting(null)}
+                confirm={(removePasskeys) => {
+                  setResetting(null);
+                  void run(async () => setGenerated(await usersApi.resetPassword(u.name, removePasskeys)));
+                }}
+              />
+            )}
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/**
+ * Asks before a password reset. Passkeys are removed by default: after a
+ * compromise, a new password alone would not lock the attacker out.
+ */
+function ResetPasswordConfirm({ user, cancel, confirm }: { user: ManagedUser; cancel: () => void; confirm: (removePasskeys: boolean) => void }) {
+  const [removePasskeys, setRemovePasskeys] = useState(true);
+  return (
+    <div role="group" className="flex flex-col gap-2 rounded-md border border-warning-line bg-warning-soft p-3 text-sm">
+      <p>{t.confirmResetPassword(user.name)}</p>
+      {user.passkeys > 0 && (
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={removePasskeys} onChange={(e) => setRemovePasskeys(e.target.checked)} />
+          {t.resetAlsoPasskeys(user.passkeys)}
+        </label>
+      )}
+      <div className="flex gap-2">
+        <button type="button" className={primary} onClick={() => confirm(removePasskeys)}>
+          {t.confirmReset}
+        </button>
+        <button type="button" className={button} onClick={cancel}>
+          {t.cancel}
+        </button>
+      </div>
     </div>
   );
 }

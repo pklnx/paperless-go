@@ -2,8 +2,8 @@
 
 ::: warning Keep it on this computer for now
 Every page and API call except the health check and the UI code needs a
-login, and admins log in with a password and a TOTP code. Passkeys, API
-keys and the review of these docs follow (see the
+login, and admins log in with a password and a TOTP code, or with a
+passkey. API keys and the review of these docs follow (see the
 [roadmap](../development/roadmap)); until then keep the default: the web UI
 is published on `127.0.0.1` only.
 :::
@@ -12,8 +12,9 @@ is published on `127.0.0.1` only.
 
 | What | Protection |
 |---|---|
-| Web UI and API | Login with user name and password, plus a TOTP code for admins and everybody who turned it on (below). Reachable from this computer only (`WEB_BIND=127.0.0.1`). Host check and same-origin check below. |
+| Web UI and API | Login with user name and password, plus a TOTP code for admins and everybody who turned it on (below), or with a passkey. Reachable from this computer only (`WEB_BIND=127.0.0.1`). Host check and same-origin check below. |
 | TOTP secrets, recovery codes | Secrets encrypted with `PAPERLESS_GO_SECRET_KEY`; recovery codes only as keyed hashes (see [Secret key](#secret-key)). |
+| Passkeys | Only public keys are stored; the private key never leaves the user's device. |
 | Database | Published on `127.0.0.1` only; password in `.env`. |
 | Document files | Plain files in the data directory, readable for the container user (UID 65532). Use an encrypted disk. |
 | Backups | `./pgo backup` writes the dump with mode `0600`. |
@@ -21,8 +22,8 @@ is published on `127.0.0.1` only.
 ## Network access
 
 Docker Compose publishes the web UI on `127.0.0.1`, so only this computer can
-reach it. Until passkeys, API keys and the security review are done, keep
-it that way. Then the same
+reach it. Until API keys and the security review are done, keep it that
+way. Then the same
 rules as in mail-archive will apply: HTTPS through `tailscale serve` or
 a reverse proxy, every host name in `PAPERLESS_GO_ALLOWED_HOSTS`, and the
 port published only as far as needed with `WEB_BIND`. Never forward the port
@@ -38,7 +39,8 @@ from the internet.
   same answer and take the same time.
 - **Failed logins are limited**: from the 5th failure within 15 minutes a
   user name is blocked for 1 minute, doubling up to 15 minutes; 20 failures
-  from one address block it for 15 minutes. Behind a reverse proxy, set
+  from one address block it for 15 minutes. IPv6 clients count per `/64`
+  (the block a host or network usually gets), IPv4 clients per address. Behind a reverse proxy, set
   `PAPERLESS_GO_TRUSTED_PROXIES` so the limits count per client.
 - **Sessions** end after 7 days without use and after 30 days at the latest.
   The cookie is `HttpOnly` and `SameSite=Strict`; over HTTPS (also behind a
@@ -49,7 +51,8 @@ from the internet.
 - **Generated passwords** (a new user or a reset in the web UI, `user
   reset-password`) are shown once and must be replaced at the first login.
 - **Admins** manage users and see every user's documents; users see only
-  their own. The last admin who can log in cannot be demoted, locked or
+  their own: another user's document answers `404`, as a missing one does.
+  An upload always belongs to whoever uploads it, also for an admin. The last admin who can log in cannot be demoted, locked or
   removed.
 
 ## Two-factor login
@@ -86,6 +89,45 @@ from the internet.
 - **Refused codes and passwords** when a logged-in user changes their own
   2FA count towards the login limits and are logged as `profile.2fa_failed`.
 
+## Passkeys
+
+- **Off without `PAPERLESS_GO_PUBLIC_URL`.** Passkeys (WebAuthn) are bound
+  to a host name, the relying party ID: the host of
+  `PAPERLESS_GO_PUBLIC_URL`, which must be `https://` (or
+  `http://localhost`). They work only when the browser shows exactly that
+  origin; the server checks origin and relying party ID of every answer.
+  Without the URL the passkey endpoints answer `503`.
+- **A passkey login replaces password and second factor.** The server
+  requires user verification (Face ID, Touch ID, Windows Hello, a PIN), a
+  discoverable credential (no user name typed) and a sign count that goes
+  up, so a copied authenticator is refused. It ends in the same state as a
+  password login: a locked user is refused (only after a valid passkey, as
+  with a password), a generated password must still be replaced, and an
+  admin whose 2FA is not set up (after a reset) still gets only the 2FA
+  setup.
+- **Adding one needs the same as a login**: the current password and, with
+  2FA on, a current TOTP or recovery code (recorded as the entry's
+  `factor`). Otherwise a taken-over session
+  plus a phished password would skip TOTP for good. Wrong passwords and
+  codes count towards the login limits and are logged as
+  `profile.2fa_failed`. A user has at most 10 passkeys.
+- **Ceremonies** (a registration or login in progress) last 5 minutes on
+  the server clock, are used up by the first answer, also a wrong one, and
+  only their token's hash is stored. Starting a login needs no session, so
+  it is limited to 30 per minute and address, to 20 open logins per
+  address and to 1000 open logins in total, so one client cannot use up
+  the total for everybody (IPv6 per `/64`, as for the login limits);
+  failed passkey logins count towards the address limit of the login
+  limits. Concurrent logins with one passkey are serialized, so a
+  replayed answer with the same sign count fails.
+- **Removing.** A user removes a passkey on the profile page; that ends
+  their other sessions. An admin removes all of a user's passkeys on the
+  Users page (or `./pgo user remove-passkeys NAME`), which logs the user
+  out everywhere. A password reset by an admin (or `user reset-password`)
+  removes the passkeys too unless the admin keeps them: after a
+  compromise, a new password alone would not lock the attacker out.
+  Rolling the migration back (`migrate down`) removes every passkey.
+
 ## Secret key
 
 `PAPERLESS_GO_SECRET_KEY` (32 random bytes, base64; `./pgo keygen`) encrypts
@@ -105,10 +147,11 @@ The [audit log](../guide/audit-log) records:
 
 | What | Recorded |
 |---|---|
-| Logins and logouts | The user, client address, user agent, method (`password`, or `2fa` with the factor `totp` or `recovery_code` and, for a recovery code, how many are left). |
-| Failed logins | The reason (`wrong_password`, `unknown_user`, `locked`, `second_factor`) and the user, if known. For an unknown user the tried name is kept only if it is a valid user name, so a password typed into the name field is not stored. Attempts the login limit refuses are not recorded. |
+| Logins and logouts | The user, client address, user agent, method (`password`, `passkey` with the passkey's name, or `2fa` with the factor `totp` or `recovery_code` and, for a recovery code, how many are left). |
+| Failed logins | The reason (`wrong_password`, `unknown_user`, `locked`, `second_factor`, `unknown_passkey`, `passkey_invalid`) and the user, if known. For an unknown user the tried name is kept only if it is a valid user name, so a password typed into the name field is not stored. Attempts the login limit refuses are not recorded. |
 | User changes | Adding, removing, locking, unlocking, promoting and demoting users, password resets and passwords set on the command line: who did it and to whom. |
-| Own login changes | Who changed their password, turned 2FA on or off or created new recovery codes, and which factor confirmed it. |
+| Own login changes | Who changed their password, turned 2FA on or off, created new recovery codes, or added or removed a passkey (with its name), and which factor confirmed it. |
+| Passkey removals | Who removed all of a user's passkeys, in the web UI or with `user remove-passkeys`, and how many; a password reset records how many passkeys it removed. |
 | 2FA resets | Who reset whose two-factor login, in the web UI or with `user reset-2fa`. |
 | Command line | Every command that changes a user, and `audit export`, with the command, the operating system user and `PAPERLESS_GO_OPERATOR` (`./pgo` sets the host user; not verified). |
 
@@ -141,11 +184,30 @@ State-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) must have an
 JSON content type. Plain HTML forms and simple cross-site requests can do
 neither.
 
+The upload (`POST /api/documents`) is the one route that takes a file
+instead of JSON: the raw file with the type `application/pdf`,
+`image/jpeg`, `image/png`, `image/heic`, `image/heif` or
+`application/octet-stream`, and its name in an `X-File-Name` header. None of
+these types (nor the header) is allowed in a simple cross-site request, so
+another site cannot send them without the browser asking the server first,
+which it refuses. Forms (`multipart/form-data`,
+`application/x-www-form-urlencoded`) and `text/plain` answer `415` there
+too. The server decides the file type from the content, never from the
+declared type or the name.
+
 ### Headers
 
 The UI is served with a strict Content Security Policy (only same-origin
 scripts, styles and requests, no framing), `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer` and `Cross-Origin-Opener-Policy: same-origin`.
+
+Document files (`GET /api/documents/{id}/file`) are always sent as a
+download (`Content-Disposition: attachment`) with `nosniff` and
+`Content-Security-Policy: sandbox`, so a file is never run as a page of
+the server, even when a browser shows it. They are sent with their type only if
+it is one the server imports (PDF, JPEG, PNG, HEIC/HEIF), otherwise as
+`application/octet-stream`, and the offered file name gets the extension
+of that type, not the one the file was uploaded with.
 
 ## Reporting a vulnerability
 

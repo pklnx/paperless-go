@@ -6,7 +6,7 @@ the web server, and a one-shot container for commands.
 ::: warning Early development
 There are no documents and no OCR yet: after the login, the web UI shows
 that the server runs. Keep the web UI on `localhost` (the default) until
-passkeys, API keys and the security review are done. See the
+API keys and the security review are done. See the
 [roadmap](../development/roadmap).
 :::
 

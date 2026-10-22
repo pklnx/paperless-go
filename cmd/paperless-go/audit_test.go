@@ -72,7 +72,8 @@ func TestCLIAudit(t *testing.T) {
 		{"", []string{"admin", "carol"}, "user.promote", "user promote", nil},
 		{"", []string{"unadmin", "carol"}, "user.demote", "user demote", nil},
 		{pw, []string{"set-password", "carol", "--password-stdin"}, "user.password_set", "user set-password", nil},
-		{"", []string{"reset-password", "carol"}, "user.password_reset", "user reset-password", nil},
+		{"", []string{"reset-password", "carol"}, "user.password_reset", "user reset-password", map[string]any{"passkeysRemoved": 0}},
+		{"", []string{"remove-passkeys", "carol"}, "user.passkeys_removed", "user remove-passkeys", map[string]any{"count": 0}},
 		{"", []string{"reset-2fa", "carol"}, "user.2fa_reset", "user reset-2fa", nil},
 		{"", []string{"remove", "carol"}, "user.remove", "user remove", nil},
 		// Reading commands are not logged.

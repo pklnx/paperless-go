@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, UNAUTHORIZED_EVENT, ownsData, profileApi, retryAfter, sessionApi, usersApi, type ManagedUser } from "./api";
+import { ApiError, UNAUTHORIZED_EVENT, ownsData, passkeyApi, profileApi, retryAfter, sessionApi, unknownPasskey, usersApi, type ManagedUser } from "./api";
 
 const reply = (status: number, body?: unknown) =>
   vi
@@ -24,6 +24,25 @@ describe("session", () => {
     expect(await sessionApi.get()).toEqual({ user: null, setupRequired: true });
     reply(401, { error: "login required", setupRequired: false });
     expect(await sessionApi.get()).toEqual({ user: null, setupRequired: false });
+  });
+  it("reads where passkeys work", async () => {
+    reply(401, { error: "login required", setupRequired: false, passkeyOrigin: "https://docs.example.test" });
+    expect(await sessionApi.get()).toEqual({ user: null, setupRequired: false, passkeyOrigin: "https://docs.example.test" });
+  });
+  it("does not announce a failed passkey login", async () => {
+    const { seen, stop } = listen();
+    try {
+      reply(401, { error: "the passkey was not accepted" });
+      await expect(passkeyApi.finishLogin("t", {})).rejects.toBeInstanceOf(ApiError);
+      expect(seen).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+  it("recognizes an unknown passkey", () => {
+    expect(unknownPasskey(new ApiError(401, "x", { unknownCredential: true, rpId: "a.test", credentialId: "AQ" }))).toEqual({ rpId: "a.test", credentialId: "AQ" });
+    expect(unknownPasskey(new ApiError(401, "x", {}))).toBeNull();
+    expect(unknownPasskey(new Error("x"))).toBeNull();
   });
   it("throws on other errors", async () => {
     reply(500, { error: "internal error" });
@@ -103,10 +122,21 @@ describe("users and profile", () => {
     expect(fetch.mock.calls[1]![1]?.method).toBe("DELETE");
   });
 
-  it("resets a password", async () => {
+  it("resets a password, removing passkeys or not", async () => {
     const fetch = reply(200, { name: "kim", password: "p" });
-    expect(await usersApi.resetPassword("kim")).toEqual({ name: "kim", password: "p" });
+    expect(await usersApi.resetPassword("kim", true)).toEqual({ name: "kim", password: "p" });
     expect(fetch.mock.calls[0]![0]).toBe("/api/users/kim/password");
+    expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual({ removePasskeys: true });
+    reply(200, { name: "kim", password: "p" });
+    await usersApi.resetPassword("kim", false);
+    expect(JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls.at(-1)![1]?.body))).toEqual({ removePasskeys: false });
+  });
+
+  it("removes a user's passkeys", async () => {
+    const fetch = reply(204);
+    await usersApi.removePasskeys("a b");
+    expect(fetch.mock.calls[0]![0]).toBe("/api/users/a%20b/passkeys");
+    expect(fetch.mock.calls[0]![1]?.method).toBe("DELETE");
   });
 
   it("sends the password change", async () => {
@@ -137,6 +167,7 @@ describe("users and profile", () => {
       locked: false,
       mustChangePassword: false,
       twoFactorEnabled: false,
+      passkeys: 0,
       owned: { documents: 0, tags: 0, correspondents: 0, documentTypes: 0, savedViews: 0, ...owned },
       createdAt: "",
       lastLoginAt: null,

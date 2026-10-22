@@ -4,7 +4,9 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -39,6 +41,10 @@ const (
 	// EnvRequire2FA set to true makes two-factor login required for every
 	// user; admins always need it.
 	EnvRequire2FA = "PAPERLESS_GO_REQUIRE_2FA"
+	// EnvPublicURL is the address users open in the browser, like
+	// https://docs.example.ts.net. Passkeys need it: they are bound to
+	// its host name. Its host is accepted in addition to the allowed hosts.
+	EnvPublicURL = "PAPERLESS_GO_PUBLIC_URL"
 	// EnvOCRWorkers is how many documents serve processes at once; 0 turns
 	// processing in serve off.
 	EnvOCRWorkers = "PAPERLESS_GO_OCR_WORKERS"
@@ -91,6 +97,9 @@ type Config struct {
 	Require2FA bool
 	// ConsumeDir is the consume folder serve imports from; empty: none.
 	ConsumeDir string
+	// PublicURL is the web UI's origin (scheme, host and port, no path);
+	// empty turns passkeys off.
+	PublicURL string
 }
 
 // DataDirFromEnv returns the data directory, ./data unless set.
@@ -139,6 +148,13 @@ func Load() (*Config, error) {
 	if cfg.Require2FA, err = parseBool(EnvRequire2FA, os.Getenv(EnvRequire2FA)); err != nil {
 		return nil, err
 	}
+	if v := strings.TrimSpace(os.Getenv(EnvPublicURL)); v != "" {
+		origin, _, err := ParsePublicURL(v)
+		if err != nil {
+			return nil, err
+		}
+		cfg.PublicURL = origin
+	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
@@ -152,6 +168,39 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// ParsePublicURL checks a public URL and returns its origin (scheme, host
+// and port) and the WebAuthn relying party ID (the host name alone). Only
+// https is allowed, or http on localhost: browsers offer passkeys nowhere
+// else. Paths, queries and IP addresses are refused.
+func ParsePublicURL(v string) (origin, rpID string, err error) {
+	bad := func(why string) (string, string, error) {
+		return "", "", fmt.Errorf("%s: %s, got %q (example: https://docs.example.ts.net)", EnvPublicURL, why, v)
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return bad("not a URL")
+	}
+	host := strings.ToLower(u.Hostname())
+	switch {
+	case u.Scheme != "https" && (u.Scheme != "http" || host != "localhost"):
+		return bad("want https://, or http://localhost")
+	case host == "":
+		return bad("no host name")
+	case net.ParseIP(host) != nil:
+		return bad("passkeys need a host name, not an IP address")
+	case u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "":
+		return bad("want only scheme, host and port")
+	}
+	origin = u.Scheme + "://" + host
+	if port := u.Port(); port != "" {
+		defaultPort := u.Scheme == "https" && port == "443" || u.Scheme == "http" && port == "80"
+		if !defaultPort {
+			origin += ":" + port
+		}
+	}
+	return origin, host, nil
 }
 
 // sizeUnits are the suffixes ParseSize accepts.

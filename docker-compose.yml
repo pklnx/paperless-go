@@ -55,6 +55,8 @@ services:
       # Required: serve refuses to start without it (generate with ./pgo keygen).
       PAPERLESS_GO_SECRET_KEY: ${PAPERLESS_GO_SECRET_KEY:-}
       PAPERLESS_GO_REQUIRE_2FA: ${PAPERLESS_GO_REQUIRE_2FA:-false}
+      # Turns passkeys on; the address users open, like https://docs.example.ts.net.
+      PAPERLESS_GO_PUBLIC_URL: ${PAPERLESS_GO_PUBLIC_URL:-}
       PAPERLESS_GO_MAX_UPLOAD_SIZE: ${PAPERLESS_GO_MAX_UPLOAD_SIZE:-}
       PAPERLESS_GO_OCR_WORKERS: ${PAPERLESS_GO_OCR_WORKERS:-1}
       PAPERLESS_GO_OCR_LANGUAGES: ${PAPERLESS_GO_OCR_LANGUAGES:-deu+eng}

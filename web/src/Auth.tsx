@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { ApiError, UNAUTHORIZED_EVENT, retryAfter, sessionApi, type SessionState, type User } from "./api";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { ApiError, UNAUTHORIZED_EVENT, passkeyApi, retryAfter, sessionApi, unknownPasskey, type SessionState, type User } from "./api";
 import { PasswordForm, TwoFactorSettings } from "./Profile";
 import { ThemeToggle } from "./ThemeToggle";
 import { t } from "./i18n";
 import logo from "./logo.svg";
-import { input, primary } from "./styles";
+import { button, input, primary } from "./styles";
+import { autofillSupported, browserError, credentialJSON, forgetPasskey, passkeysSupported, requestOptions } from "./webauthn";
 
 /** How to create the first admin, shown while no user exists. */
 export const firstAdminCommand = "./pgo user add NAME --admin";
@@ -80,7 +81,7 @@ export function AuthGate({ children }: Props) {
     return children(state.user, logout);
   }
   if (state.setupRequired) return <SetupNotice check={check} />;
-  return <LoginPage done={(user) => setState({ user })} />;
+  return <LoginPage done={(user) => setState({ user })} passkeyOrigin={state.passkeyOrigin} />;
 }
 
 function Centered({ children }: { children: ReactNode }) {
@@ -111,13 +112,91 @@ function loginError(err: unknown): string {
   return t.failed(err instanceof Error ? err.message : String(err));
 }
 
-function LoginPage({ done }: { done: (user: User) => void }) {
+/** The message for a failed passkey login. */
+export function passkeyError(err: unknown): string {
+  const wait = retryAfter(err);
+  if (wait !== null) return t.tooManyAttempts(wait);
+  const name = browserError(err);
+  if (name === "NotAllowedError" || name === "AbortError") return t.passkeyCancelled;
+  if (unknownPasskey(err)) return t.passkeyUnknown;
+  if (err instanceof ApiError && err.status === 401) return err.message.includes("expired") ? t.passkeyExpired : t.passkeyFailed;
+  if (err instanceof ApiError && err.status === 403 && err.message.includes("locked")) return t.userLocked;
+  return t.failed(err instanceof Error ? err.message : String(err));
+}
+
+function LoginPage({ done, passkeyOrigin }: { done: (user: User) => void; passkeyOrigin?: string }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [challenge, setChallenge] = useState<string | null>(null);
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  // Passkeys work only at the server's public URL.
+  const passkeys = !!passkeyOrigin && passkeyOrigin === window.location.origin && passkeysSupported();
+  // The running passkey request; a new one (or leaving the page) aborts it.
+  const pending = useRef<AbortController | null>(null);
+  const doneRef = useRef(done);
+  doneRef.current = done;
+  // A page left open longer than a ceremony lasts: its autofill offer
+  // expired. That restarts the offer once, not again and again.
+  const expiredRetried = useRef(false);
+
+  const passkeyLogin = useCallback(async (autofill: boolean): Promise<void> => {
+    pending.current?.abort();
+    if (!autofill) expiredRetried.current = false;
+    const ctrl = new AbortController();
+    pending.current = ctrl;
+    let token: string;
+    let cred: PublicKeyCredential | null;
+    try {
+      const ceremony = await passkeyApi.beginLogin();
+      token = ceremony.token;
+      cred = (await navigator.credentials.get({
+        publicKey: requestOptions(ceremony.publicKey),
+        signal: ctrl.signal,
+        ...(autofill ? { mediation: "conditional" as CredentialMediationRequirement } : {}),
+      })) as PublicKeyCredential | null;
+    } catch (err) {
+      // Autofill fails quietly; it is only an offer. After a failed button
+      // press, offer it again.
+      if (!ctrl.signal.aborted && !autofill) {
+        setError(passkeyError(err));
+        if (await autofillSupported()) void passkeyLogin(true);
+      }
+      return;
+    }
+    if (!cred || ctrl.signal.aborted) return;
+    setBusy(true);
+    setError("");
+    try {
+      doneRef.current(await passkeyApi.finishLogin(token, credentialJSON(cred)));
+    } catch (err) {
+      const unknown = unknownPasskey(err);
+      if (unknown) await forgetPasskey(unknown.rpId, unknown.credentialId);
+      setError(passkeyError(err));
+      setBusy(false);
+      // An expired ceremony (the page was open too long) gets one fresh
+      // offer; other failures offer the autofill again for the next try.
+      if (err instanceof ApiError && err.status === 401 && err.message.includes("expired")) {
+        if (expiredRetried.current) return;
+        expiredRetried.current = true;
+      }
+      if (await autofillSupported()) void passkeyLogin(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!passkeys || challenge) return;
+    let stopped = false;
+    void autofillSupported().then((ok) => {
+      if (ok && !stopped) void passkeyLogin(true);
+    });
+    return () => {
+      stopped = true;
+      pending.current?.abort();
+    };
+  }, [passkeys, challenge, passkeyLogin]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -204,7 +283,7 @@ function LoginPage({ done }: { done: (user: User) => void }) {
             required
             autoFocus
             autoCapitalize="none"
-            autoComplete="username"
+            autoComplete={passkeys ? "username webauthn" : "username"}
             spellCheck={false}
             value={username}
             onChange={(e) => setUsername(e.target.value)}
@@ -230,6 +309,26 @@ function LoginPage({ done }: { done: (user: User) => void }) {
           {busy ? t.loggingIn : t.logIn}
         </button>
       </form>
+      {passkeys && (
+        <>
+          <div className="flex items-center gap-3 text-ink-muted">
+            <span className="h-px flex-1 bg-line" />
+            {t.or}
+            <span className="h-px flex-1 bg-line" />
+          </div>
+          <button
+            type="button"
+            className={button}
+            disabled={busy}
+            onClick={() => {
+              setError("");
+              void passkeyLogin(false);
+            }}
+          >
+            {t.passkeySignIn}
+          </button>
+        </>
+      )}
     </Centered>
   );
 }

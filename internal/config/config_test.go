@@ -211,3 +211,43 @@ func TestLoadConsumeDir(t *testing.T) {
 		t.Fatalf("set: %q, %v", cfg.ConsumeDir, err)
 	}
 }
+
+func TestParsePublicURL(t *testing.T) {
+	for _, c := range []struct{ in, origin, rpID string }{
+		{"https://docs.example.ts.net", "https://docs.example.ts.net", "docs.example.ts.net"},
+		{"https://Docs.Example.ts.net:8443/", "https://docs.example.ts.net:8443", "docs.example.ts.net"},
+		{"https://docs.example.ts.net:443", "https://docs.example.ts.net", "docs.example.ts.net"},
+		{"http://localhost:8080", "http://localhost:8080", "localhost"},
+	} {
+		origin, rpID, err := ParsePublicURL(c.in)
+		if err != nil || origin != c.origin || rpID != c.rpID {
+			t.Errorf("%s: %q %q %v", c.in, origin, rpID, err)
+		}
+	}
+	for _, in := range []string{
+		"http://docs.example.ts.net", "https://192.168.1.10", "https://[::1]:8080", "http://127.0.0.1:8080",
+		"https://docs.example.ts.net/paperless", "https://docs.example.ts.net?x=1", "https://user@docs.example.ts.net",
+		"docs.example.ts.net", "ftp://localhost", "https://docs.example.ts.net#x",
+	} {
+		if _, _, err := ParsePublicURL(in); err == nil {
+			t.Errorf("%s accepted", in)
+		}
+	}
+}
+
+func TestLoadPublicURL(t *testing.T) {
+	t.Setenv(EnvDatabaseURL, "postgres://x")
+	t.Setenv(EnvPublicURL, " https://Docs.Example.ts.net:443/ ")
+	cfg, err := Load()
+	if err != nil || cfg.PublicURL != "https://docs.example.ts.net" {
+		t.Fatalf("public URL: %+v %v", cfg, err)
+	}
+	t.Setenv(EnvPublicURL, "http://docs.example.ts.net")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), EnvPublicURL) {
+		t.Fatalf("plain http accepted: %v", err)
+	}
+	t.Setenv(EnvPublicURL, "")
+	if cfg, err := Load(); err != nil || cfg.PublicURL != "" {
+		t.Fatalf("without: %+v %v", cfg, err)
+	}
+}
