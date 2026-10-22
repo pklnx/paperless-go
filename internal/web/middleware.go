@@ -19,6 +19,22 @@ import (
 //     attack uses the attacker's domain as Host, so it is rejected.
 //   - State-changing requests must come from the same origin and carry a
 //     JSON body, which a cross-site form or simple request cannot send.
+//     The upload route (bodyFile in the route table) takes the raw file
+//     instead, with one of uploadContentTypes: none of them is
+//     CORS-safelisted either, so a cross-site page cannot send them
+//     without a preflight, and form and text types stay refused.
+
+// uploadContentTypes are the content types a bodyFile route accepts. The
+// type of the file is detected from its content; the declared one only
+// has to be one of these.
+var uploadContentTypes = map[string]bool{
+	"application/pdf":          true,
+	"image/jpeg":               true,
+	"image/png":                true,
+	"image/heic":               true,
+	"image/heif":               true,
+	"application/octet-stream": true,
+}
 
 // hostAllowed reports whether the request's Host (without port) is allowed.
 func (s *Server) hostAllowed(r *http.Request) bool {
@@ -35,7 +51,9 @@ func (s *Server) hostAllowed(r *http.Request) bool {
 	return false
 }
 
-func (s *Server) protect(next http.Handler) http.Handler {
+// protect applies the browser protections; bodyOf names the body kind of
+// the request's route.
+func (s *Server) protect(next http.Handler, bodyOf func(*http.Request) body) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
@@ -54,9 +72,19 @@ func (s *Server) protect(next http.Handler) http.Handler {
 				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
 				return
 			}
-			if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
-				http.Error(w, "content type must be application/json", http.StatusUnsupportedMediaType)
-				return
+			mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			switch bodyOf(r) {
+			case bodyFile:
+				if !uploadContentTypes[mt] {
+					http.Error(w, "content type must be application/pdf, image/jpeg, image/png, image/heic, image/heif or application/octet-stream",
+						http.StatusUnsupportedMediaType)
+					return
+				}
+			default:
+				if mt != "application/json" {
+					http.Error(w, "content type must be application/json", http.StatusUnsupportedMediaType)
+					return
+				}
 			}
 		}
 		next.ServeHTTP(w, r)

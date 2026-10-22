@@ -304,6 +304,99 @@ func (q *Queries) ListDocuments(ctx context.Context, owner *int64) ([]ListDocume
 	return items, nil
 }
 
+const listRecentDocuments = `-- name: ListRecentDocuments :many
+SELECT d.id, d.owner_id, d.title, d.document_date, d.created_at, d.modified_at, d.notes, d.is_favorite,
+       d.is_inbox, d.archive_serial_number, d.page_count, ''::text AS extracted_text, d.text_source, d.source,
+       d.original_file_name, d.original_sha256, d.original_size, d.original_mime, d.archive_sha256,
+       d.archive_size, d.correspondent_id, d.document_type_id, d.thumbnail_sha256, d.processing_note,
+       COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
+                 WHERE dt.document_id = d.id), '{}')::uuid[] AS tag_ids
+FROM documents d
+WHERE $1::bigint IS NULL OR d.owner_id = $1
+ORDER BY d.created_at DESC, d.id
+LIMIT $2
+`
+
+type ListRecentDocumentsParams struct {
+	Owner *int64
+	Lim   int32
+}
+
+type ListRecentDocumentsRow struct {
+	ID                  pgtype.UUID
+	OwnerID             int64
+	Title               string
+	DocumentDate        time.Time
+	CreatedAt           time.Time
+	ModifiedAt          time.Time
+	Notes               string
+	IsFavorite          bool
+	IsInbox             bool
+	ArchiveSerialNumber *int32
+	PageCount           int32
+	ExtractedText       string
+	TextSource          string
+	Source              string
+	OriginalFileName    string
+	OriginalSha256      string
+	OriginalSize        int64
+	OriginalMime        string
+	ArchiveSha256       *string
+	ArchiveSize         *int64
+	CorrespondentID     pgtype.UUID
+	DocumentTypeID      pgtype.UUID
+	ThumbnailSha256     *string
+	ProcessingNote      string
+	TagIds              []pgtype.UUID
+}
+
+// The newest documents without their extracted text, which can be large.
+func (q *Queries) ListRecentDocuments(ctx context.Context, arg ListRecentDocumentsParams) ([]ListRecentDocumentsRow, error) {
+	rows, err := q.db.Query(ctx, listRecentDocuments, arg.Owner, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRecentDocumentsRow
+	for rows.Next() {
+		var i ListRecentDocumentsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OwnerID,
+			&i.Title,
+			&i.DocumentDate,
+			&i.CreatedAt,
+			&i.ModifiedAt,
+			&i.Notes,
+			&i.IsFavorite,
+			&i.IsInbox,
+			&i.ArchiveSerialNumber,
+			&i.PageCount,
+			&i.ExtractedText,
+			&i.TextSource,
+			&i.Source,
+			&i.OriginalFileName,
+			&i.OriginalSha256,
+			&i.OriginalSize,
+			&i.OriginalMime,
+			&i.ArchiveSha256,
+			&i.ArchiveSize,
+			&i.CorrespondentID,
+			&i.DocumentTypeID,
+			&i.ThumbnailSha256,
+			&i.ProcessingNote,
+			&i.TagIds,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockDocument = `-- name: LockDocument :one
 SELECT owner_id FROM documents
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)

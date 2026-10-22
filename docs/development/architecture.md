@@ -216,6 +216,9 @@ before the next starts:
 4. **Insert** with `CreateDocument`, in the inbox; the title is the file's
    base name without extension (NFC, no control characters, at most 200
    characters). An `ErrDuplicate` from a concurrent import is a duplicate too.
+   Titles and file names also lose bidirectional formatting characters
+   (U+061C, U+200E/F, U+202A–E, U+2066–9), which could make a name display
+   as something else.
 
 The result is `Imported`, `Duplicate` (with the existing document's ID and
 title) or `Refused` (`unsupported`, `too_large`, `too_many_pixels`,
@@ -303,10 +306,46 @@ A queue in PostgreSQL turns stored documents into searchable ones
 `serve` refuses to start while migrations are pending or the data directory
 is not writable. Every request passes `protect` (`internal/web/middleware.go`):
 the `Host` must be allowed (DNS rebinding), and state-changing requests need
-a same-origin `Origin` (or `Sec-Fetch-Site: same-origin`) and a JSON body
-(CSRF). Then `authenticate` checks the login (see [Login](#login)). Unknown
+a same-origin `Origin` (or `Sec-Fetch-Site: same-origin`) and the body kind
+of their route in the route table (CSRF): `bodyJSON`, the zero value, takes
+`application/json` only; `bodyFile`, only on `POST /api/documents`, takes a
+raw file with a type from `uploadContentTypes` and never a form or text.
+Then `authenticate` checks the login (see [Login](#login)). Unknown
 `/api/` paths answer `404` in JSON after the login. `/healthz` pings the
 database and answers `503` when it does not answer.
+
+## Documents API
+
+`internal/web/documents.go`; the scope comes from `requestScope`, so
+another user's document answers `404` and an admin sees all.
+
+- **`POST /api/documents`** streams the body through `ingest`
+  (`http.MaxBytesReader` as a second cap; a `Content-Length` above
+  `PAPERLESS_GO_MAX_UPLOAD_SIZE` answers `413` before reading). The read
+  and write deadlines are extended to an hour for this request
+  (`http.ResponseController`). `X-File-Name` is percent-decoded and reduced
+  to a clean base name (`ingest.FileName`); without one, the title is
+  `upload-<UTC time>`. The owner is the caller, also for an admin.
+  `document.create` is written in the creating transaction
+  (`store.WithAudit` through the importer's context). Answers: `201` with the
+  document, `200` with `{"duplicate": true, "existing": {id, title}}`
+  (`existing` left out if the lookup failed), `413` `too_large`, `415`
+  `unsupported`, `422` `unreadable` or `too_many_pixels` (with `reason`),
+  `400` for a body that broke off, `503` without the audit log.
+- **`GET /api/documents?limit=N`** lists the scope's newest documents
+  (default and maximum 100; the start page asks for 10), without their
+  text (`RecentDocuments` does not even read it), with `maxUploadSize` for
+  the UI. Paging and filters come with #7.
+- **`GET /api/documents/{id}`** returns one document with its text.
+- **`GET /api/documents/{id}/file?kind=original|archive`** sends the file
+  from the blob store (`OpenHash`) with `Content-Disposition: attachment`
+  (RFC 6266: an ASCII `filename` plus `filename*=UTF-8''`), `nosniff` and
+  `Content-Security-Policy: sandbox`. The Content-Type is the stored type
+  only if the importer produces it (PDF, JPEG, PNG, HEIC, HEIF), otherwise
+  `application/octet-stream`; the file name is the stem of the original
+  name with the stored type's extension, so `x.html` holding a PDF
+  downloads as `x.pdf`. The archive PDF answers `404` until processing
+  made one.
 
 ## Login
 
@@ -418,8 +457,10 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   and CLI), `profile.password_change`, `profile.2fa_enable`,
   `profile.2fa_disable`, `profile.recovery_codes` (with the `factor` that
   confirmed it), `profile.passkey_add` (also with the confirming `factor`
-  when 2FA is on), `profile.passkey_remove` (with the passkey's `name`), `user.passkeys_removed` (`count`; web and CLI),
-  `audit.export` (CLI, written before the export starts).
+  when 2FA is on), `profile.passkey_remove` (with the passkey's `name`),
+  `user.passkeys_removed` (`count`; web and CLI), `audit.export` (CLI,
+  written before the export starts), `document.create` (upload, with
+  `via: upload`; the target is the new document).
   A two-factor login records `method: 2fa` and its `factor` (`totp`,
   `recovery_code` with `recoveryCodesLeft`); a wrong code gives
   `auth.login_failed` with `reason: second_factor`. Requests refused

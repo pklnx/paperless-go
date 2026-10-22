@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import type { User } from "./api";
 import { AuthGate } from "./Auth";
+import { DocumentsHome, WindowDrop } from "./Documents";
 import { fetchHealth, type Health } from "./health";
 import { t } from "./i18n";
 import logo from "./logo.svg";
 import { LogPage } from "./LogPage";
 import { ProfilePage } from "./Profile";
 import { ThemeToggle } from "./ThemeToggle";
+import { UploadQueue } from "./uploads";
 import { UsersPage } from "./UsersPage";
 
 const docsURL = "https://pklnx.github.io/paperless-go/";
@@ -20,6 +22,8 @@ export function App() {
 
 function Shell({ user, logout }: { user: User; logout: () => void }) {
   const [view, setView] = useState<View>("home");
+  // One queue for the session: uploads keep running while another page is open.
+  const [queue] = useState(() => new UploadQueue());
   const nav: { id: View; label: string }[] = [
     { id: "home", label: t.home },
     { id: "profile", label: t.profile },
@@ -28,6 +32,12 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
   ];
   return (
     <div className="flex min-h-full flex-col">
+      <WindowDrop
+        onFiles={(files) => {
+          queue.add(files);
+          setView("home");
+        }}
+      />
       <header className="flex flex-wrap items-center gap-3 border-b border-line px-4 py-2">
         <img src={logo} alt="" className="size-7" />
         <h1 className="text-base font-semibold">{t.appName}</h1>
@@ -53,7 +63,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
         <ThemeToggle />
       </header>
       <main className="flex-1">
-        {view === "home" && <Home />}
+        {view === "home" && <Home queue={queue} />}
         {view === "profile" && <ProfilePage user={user} />}
         {view === "log" && <LogPage admin={user.admin} />}
         {view === "users" && user.admin && <UsersPage />}
@@ -62,8 +72,8 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
   );
 }
 
-/** The start page until documents exist: what this server is and whether it is healthy. */
-function Home() {
+/** The start page: upload and the newest documents, then what this server is and whether it is healthy. */
+function Home({ queue }: { queue: UploadQueue }) {
   const [health, setHealth] = useState<Health>("checking");
   useEffect(() => {
     let live = true;
@@ -77,8 +87,8 @@ function Home() {
   const statusColor = { checking: "text-ink-muted", ok: "text-ok", down: "text-danger" }[health];
 
   return (
-    <div className="mx-auto w-full max-w-xl px-4 py-10">
-      <p className="text-lg">{t.tagline}</p>
+    <div className="mx-auto w-full max-w-3xl px-4 py-8">
+      <DocumentsHome queue={queue} />
       <section className="mt-8 rounded-lg border border-line bg-surface-sunken p-5">
         <h2 className="font-semibold">{t.buildingTitle}</h2>
         <p className="mt-2 text-sm text-ink-muted">{t.buildingText}</p>

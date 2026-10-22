@@ -16,7 +16,10 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/pklnx/paperless-go/internal/auth"
+	"github.com/pklnx/paperless-go/internal/blobstore"
+	"github.com/pklnx/paperless-go/internal/config"
 	"github.com/pklnx/paperless-go/internal/crypto"
+	"github.com/pklnx/paperless-go/internal/ingest"
 	"github.com/pklnx/paperless-go/internal/store"
 )
 
@@ -48,6 +51,10 @@ type Server struct {
 	webauthn      *webauthn.WebAuthn
 	publicOrigin  string
 	passkeyBegins *auth.Rate
+	// blobs holds the document files and importer imports uploads into
+	// it; without blobs the document routes answer 503.
+	blobs    *blobstore.Store
+	importer *ingest.Importer
 }
 
 // Options configure a Server.
@@ -77,6 +84,12 @@ type Options struct {
 	// PublicURL is the address users open (PAPERLESS_GO_PUBLIC_URL). It
 	// turns passkeys on; its host is accepted in addition to AllowedHosts.
 	PublicURL string
+	// Blobs holds the document files. Without it the document routes
+	// answer 503.
+	Blobs *blobstore.Store
+	// MaxUploadSize is the largest upload in bytes
+	// (PAPERLESS_GO_MAX_UPLOAD_SIZE); 0 means config.DefaultMaxUploadSize.
+	MaxUploadSize int64
 }
 
 // New creates a Server.
@@ -115,22 +128,38 @@ func New(st *store.Store, log *slog.Logger, opts Options) *Server {
 	}
 	passkeyBegins := auth.NewRate(passkeyBeginLimit, passkeyBeginWindow)
 	passkeyBegins.SetClock(now)
-	return &Server{
+	s := &Server{
 		store: st, db: pinger, log: log, allowedHosts: hosts, hasher: hasher, now: now, limiter: limiter,
 		trustedProxies: opts.TrustedProxies, sealer: opts.Sealer, secretKey: opts.SecretKey, require2FA: opts.Require2FA,
 		webauthn: wa, publicOrigin: origin, passkeyBegins: passkeyBegins,
 	}
+	if opts.Blobs != nil && st != nil {
+		maxSize := opts.MaxUploadSize
+		if maxSize <= 0 {
+			maxSize = config.DefaultMaxUploadSize
+		}
+		// maxSize is positive, so New cannot fail.
+		s.importer, _ = ingest.New(st, opts.Blobs, maxSize)
+		s.blobs = opts.Blobs
+	}
+	return s
 }
 
 // Handler returns the HTTP handler with all routes and protections.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	accessOf := make(map[string]access)
+	bodyOf := make(map[string]body)
 	for _, rt := range s.routes() {
 		mux.Handle(rt.pattern, rt.handler)
 		accessOf[rt.pattern] = rt.access
+		bodyOf[rt.pattern] = rt.body
 	}
-	return s.protect(s.authenticate(mux, accessOf))
+	routeBody := func(r *http.Request) body {
+		_, pattern := mux.Handler(r)
+		return bodyOf[pattern]
+	}
+	return s.protect(s.authenticate(mux, accessOf), routeBody)
 }
 
 // handleHealth answers 200 while the database answers, for container
@@ -275,6 +304,10 @@ func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
 		s.fail(w, r, http.StatusNotFound, "not found", err)
 	case errors.Is(err, store.ErrInvalid):
 		s.fail(w, r, http.StatusBadRequest, "invalid input", err)
+	case errors.Is(err, store.ErrUnknownUser):
+		// The user was removed while the request ran; the session is gone
+		// with it.
+		s.fail(w, r, http.StatusUnauthorized, "login required", err)
 	default:
 		s.fail(w, r, http.StatusInternalServerError, "internal error", err)
 	}

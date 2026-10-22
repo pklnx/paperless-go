@@ -51,7 +51,8 @@ from the internet.
 - **Generated passwords** (a new user or a reset in the web UI, `user
   reset-password`) are shown once and must be replaced at the first login.
 - **Admins** manage users and see every user's documents; users see only
-  their own. The last admin who can log in cannot be demoted, locked or
+  their own: another user's document answers `404`, as a missing one does.
+  An upload always belongs to whoever uploads it, also for an admin. The last admin who can log in cannot be demoted, locked or
   removed.
 
 ## Two-factor login
@@ -183,11 +184,30 @@ State-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) must have an
 JSON content type. Plain HTML forms and simple cross-site requests can do
 neither.
 
+The upload (`POST /api/documents`) is the one route that takes a file
+instead of JSON: the raw file with the type `application/pdf`,
+`image/jpeg`, `image/png`, `image/heic`, `image/heif` or
+`application/octet-stream`, and its name in an `X-File-Name` header. None of
+these types (nor the header) is allowed in a simple cross-site request, so
+another site cannot send them without the browser asking the server first,
+which it refuses. Forms (`multipart/form-data`,
+`application/x-www-form-urlencoded`) and `text/plain` answer `415` there
+too. The server decides the file type from the content, never from the
+declared type or the name.
+
 ### Headers
 
 The UI is served with a strict Content Security Policy (only same-origin
 scripts, styles and requests, no framing), `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer` and `Cross-Origin-Opener-Policy: same-origin`.
+
+Document files (`GET /api/documents/{id}/file`) are always sent as a
+download (`Content-Disposition: attachment`) with `nosniff` and
+`Content-Security-Policy: sandbox`, so a file is never run as a page of
+the server, even when a browser shows it. They are sent with their type only if
+it is one the server imports (PDF, JPEG, PNG, HEIC/HEIF), otherwise as
+`application/octet-stream`, and the offered file name gets the extension
+of that type, not the one the file was uploaded with.
 
 ## Reporting a vulnerability
 

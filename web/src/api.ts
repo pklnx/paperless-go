@@ -252,3 +252,23 @@ export const auditApi = {
   list: (f: AuditFilter, cursor: string, signal?: AbortSignal) =>
     getJSON<{ entries: AuditEntry[]; nextCursor?: string }>(`/api/audit?${auditQuery(f, cursor)}`, signal),
 };
+
+/** A document as GET /api/documents lists it (the fields the UI uses). */
+export interface DocumentSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  documentDate: string;
+  originalFileName: string;
+  originalMime: string;
+  originalSize: number;
+  hasArchive: boolean;
+}
+
+export const documentsApi = {
+  /** The caller's newest documents (an admin's: everyone's), at most limit (the server caps it at 100), and the upload limit in bytes. */
+  list: (limit: number, signal?: AbortSignal) =>
+    getJSON<{ documents: DocumentSummary[]; maxUploadSize: number }>(`/api/documents?limit=${limit}`, signal),
+  /** The download URL of a document's original file or archive PDF. */
+  fileURL: (id: string, kind: "original" | "archive" = "original") => `/api/documents/${encodeURIComponent(id)}/file?kind=${kind}`,
+};

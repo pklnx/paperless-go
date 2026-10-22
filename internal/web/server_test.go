@@ -159,6 +159,7 @@ func TestFailStore(t *testing.T) {
 	}{
 		{"validation", &store.ValidationError{Field: "source", Constraint: "documents_source_check"}, http.StatusBadRequest, `{"error":"invalid input"}`},
 		{"not found", store.ErrNotFound, http.StatusNotFound, `{"error":"not found"}`},
+		{"user removed meanwhile", fmt.Errorf("ingest: create document: %w", store.ErrUnknownUser), http.StatusUnauthorized, `{"error":"login required"}`},
 		{"raw database error", raw, http.StatusInternalServerError, `{"error":"internal error"}`},
 		{"wrapped unknown error", fmt.Errorf("query: %w", raw), http.StatusInternalServerError, `{"error":"internal error"}`},
 	} {

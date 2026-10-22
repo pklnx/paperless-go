@@ -23,6 +23,7 @@ change or delete entries.
 | `profile.passkey_add`, `profile.passkey_remove` | A user adds or removes one of their passkeys, with its name; adding one with two-factor login on records the factor that confirmed it. |
 | `profile.2fa_failed` | A wrong code or password when a user sets up, turns off or renews their two-factor login, or adds a passkey. |
 | `audit.export` | `audit export` writes the log out. |
+| `document.create` | A user uploads a document in the web UI (with the title). |
 | `document.reprocess` | `reprocess` queues documents for processing again (with the selection and how many it queued). |
 | `document.import` | `import` added documents: one entry per run that imported something, naming the user who owns them, the path and the counts of imported, duplicate and failed files. |
 
