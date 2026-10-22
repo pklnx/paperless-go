@@ -225,11 +225,18 @@ describe("metadata page", () => {
 
   it("names the owner of another user's rows with Everyone's documents on, not the admin's own", async () => {
     server.user = { id: 1, name: "root", admin: true };
-    server.tags = [tag("t1", "Steuer", null, { ownerId: 1, ownerName: "root" }), tag("t2", "Steuer", null, { ownerId: 2, ownerName: "bob" })];
+    // Owners compare by ID: the admin's own tag under a stale name has no
+    // note, another user who is also called "root" has one.
+    server.tags = [
+      tag("t1", "Steuer", null, { ownerId: 1, ownerName: "root-old" }),
+      tag("t2", "Steuer", null, { ownerId: 2, ownerName: "bob" }),
+      tag("t3", "Steuer", null, { ownerId: 3, ownerName: "root" }),
+    ];
     server.correspondents = [{ ...named("c1", "Amt", 1, 1), ownerName: "root" }, { ...named("c2", "Amt", 1, 2), ownerName: "bob" }];
     await open("?view=metadata&all=1");
     expect(within(screen.getByTestId("tag-row-t2")).getByText(t.ownedBy("bob"))).toBeTruthy();
-    expect(within(screen.getByTestId("tag-row-t1")).queryByText(t.ownedBy("root"))).toBeNull();
+    expect(within(screen.getByTestId("tag-row-t1")).queryByText(t.ownedBy("root-old"))).toBeNull();
+    expect(within(screen.getByTestId("tag-row-t3")).getByText(t.ownedBy("root"))).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: t.correspondents }));
     const rows = within(page().getByRole("list", { name: t.correspondents })).getAllByRole("listitem");
     expect(rows.map((li) => li.textContent?.includes(t.ownedBy("bob")))).toEqual(expect.arrayContaining([true, false]));

@@ -550,6 +550,36 @@ describe("a save that answers late (#105)", () => {
     expect(detail().queryByText(t.documentChanged)).toBeNull();
   });
 
+  it("A, then B, then A again: the late answer of the first visit does not overwrite the new form", async () => {
+    serve(doc("d1", "A"), doc("d2", "B"));
+    const calls = watchPatches();
+    await openAt("/?doc=d2");
+    fireEvent.click(detail().getByRole("button", { name: t.previousDocument }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    fireEvent.change(titleField(), { target: { value: "A2" } });
+    const release = holdPatches();
+    fireEvent.click(detail().getByRole("button", { name: t.done }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    vi.mocked(window.confirm).mockReturnValue(true);
+    act(() => window.history.back());
+    await waitFor(() => expect(docParam()).toBe("d2"));
+    await waitFor(() => expect(titleField().value).toBe("B"));
+    act(() => window.history.forward());
+    await waitFor(() => expect(docParam()).toBe("d1"));
+    // A is open again (the held save has not changed it yet); the user edits anew.
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    fireEvent.change(titleField(), { target: { value: "A-new" } });
+    await act(async () => {
+      release();
+      await calls[0];
+    });
+    expect(titleField().value).toBe("A-new");
+    expect(docParam()).toBe("d1");
+    expect(detail().queryByText(t.saved)).toBeNull();
+    // The list row shows the save that did happen.
+    expect(await screen.findByRole("link", { name: "A2" })).toBeTruthy();
+  });
+
   it("no previous or next while saving: buttons disabled, arrow keys do nothing", async () => {
     serve(doc("d1", "A"), doc("d2", "B"), doc("d3", "C"));
     const calls = watchPatches();
@@ -560,6 +590,9 @@ describe("a save that answers late (#105)", () => {
     await waitFor(() => expect(patches()).toHaveLength(1));
     expect((detail().getByRole("button", { name: t.nextDocument }) as HTMLButtonElement).disabled).toBe(true);
     expect((detail().getByRole("button", { name: t.previousDocument }) as HTMLButtonElement).disabled).toBe(true);
+    // Leaving would be allowed: only the save in flight keeps the keys and
+    // the swipe from navigating.
+    vi.mocked(window.confirm).mockReturnValue(true);
     fireEvent.keyDown(document.body, { key: "ArrowRight" });
     fireEvent.keyDown(document.body, { key: "ArrowLeft" });
     const section = screen.getByTestId("document-detail");
