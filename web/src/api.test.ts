@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, UNAUTHORIZED_EVENT, apiKeyApi, searchQuery, ownsData, passkeyApi, profileApi, retryAfter, sessionApi, unknownPasskey, usersApi, type ManagedUser } from "./api";
+import { ApiError, UNAUTHORIZED_EVENT, apiKeyApi, documentListQuery, emptyDocumentQuery, ownsData, passkeyApi, profileApi, retryAfter, sessionApi, unknownPasskey, usersApi, type ManagedUser } from "./api";
 
 const reply = (status: number, body?: unknown) =>
   vi
@@ -198,9 +198,28 @@ describe("users and profile", () => {
   });
 });
 
-describe("searchQuery", () => {
+describe("documentListQuery", () => {
   it("sends the query, the page size, the time zone and the cursor", () => {
-    expect(searchQuery("Rechnung tag:Steuer", 25, "", "Europe/Berlin")).toBe("q=Rechnung+tag%3ASteuer&limit=25&tz=Europe%2FBerlin");
-    expect(searchQuery("a&b", 25, "abc", "")).toBe("q=a%26b&limit=25&cursor=abc");
+    expect(documentListQuery({ ...emptyDocumentQuery, q: "Rechnung tag:Steuer" }, 25, "", "Europe/Berlin")).toBe("q=Rechnung+tag%3ASteuer&limit=25&tz=Europe%2FBerlin");
+    expect(documentListQuery({ ...emptyDocumentQuery, q: "a&b" }, 25, "abc", "")).toBe("q=a%26b&limit=25&cursor=abc");
+  });
+  it("sends the sidebar's filters as parameters, never in q", () => {
+    const p = new URLSearchParams(
+      documentListQuery({ ...emptyDocumentQuery, inbox: true, favorite: true, tag: "t1", correspondent: "c1", type: "d1", ownOnly: true }, 50, "", ""),
+    );
+    expect([...p.entries()]).toEqual([
+      ["limit", "50"],
+      ["inbox", "true"],
+      ["tag", "t1"],
+      ["correspondent", "c1"],
+      ["type", "d1"],
+      ["favorite", "true"],
+      ["owner", "me"],
+    ]);
+  });
+  it("sends the sort, and the direction only where there is one", () => {
+    expect(documentListQuery({ ...emptyDocumentQuery, sort: "date", ascending: true }, 50, "", "")).toBe("limit=50&sort=date&order=asc");
+    expect(documentListQuery({ ...emptyDocumentQuery, sort: "added" }, 50, "", "")).toBe("limit=50&sort=added");
+    expect(documentListQuery({ ...emptyDocumentQuery, q: "x", sort: "relevance", ascending: true }, 50, "", "")).toBe("q=x&limit=50&sort=relevance");
   });
 });

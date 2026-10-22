@@ -6,14 +6,17 @@ and the names of their correspondent, document type and tags. Words in
 German and English are found in their inflected forms too. Filters narrow a
 search to tags, correspondents, types, dates and status flags.
 
-You only ever find your own documents. An admin searches all users'
-documents.
+You only ever find your own documents. An admin searches their own
+documents too, and all users' documents with "Everyone's documents" in the
+sidebar (see [Documents](./documents)); through the API an admin searches
+all users' documents.
 
-Type a search into the field on the start page and press Enter. The
-results replace the recent documents; "Load more" shows the next 25, and
-clearing the field brings the recent documents back. Each search is
-recorded in your [audit log](./audit-log), with the text you searched
-for. Scripts search with `GET /api/documents?q=…` and an API key with the
+Type a search into the field above the document list and press Enter. The
+results replace the list; "Load more" shows the next 50, and clearing the
+field brings the whole list back. An entry chosen in the sidebar (a tag,
+the inbox) narrows the search further. Each search you type is recorded in
+your [audit log](./audit-log), with the text you searched for; choosing
+an entry in the sidebar is browsing and is not recorded. Scripts search with `GET /api/documents?q=…` and an API key with the
 `read` scope (see [Architecture](../development/architecture#documents-api)
 for the parameters).
 
@@ -78,9 +81,9 @@ A search with words lists the best matches first: a word in the title
 counts most, then the tags, correspondent and type, then the notes and file
 name, then the text. Without words, or with only excluded words (`-Mahnung`), the newest added
 documents come first.
-Through the API (`sort`, `order`), a search can also be sorted by the
-date added or by the document's date, newest or oldest first; the web UI
-gets sort menus with the document list.
+The sort menu next to the list's heading (or `sort` and `order` through the
+API) sorts a search by the date added or by the document's date instead,
+newest or oldest first.
 
 Each result shows up to two passages of the text around the words it
 matched.
