@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -41,17 +40,20 @@ const passkeyCeremonyTTL = 5 * time.Minute
 const passkeyCookieName = "paperless_go_passkey_login" //nolint:gosec // a cookie name, not a credential
 
 // passkeyLoginTokens returns the tokens of the request's passkey login
-// cookies, the __Host- one first; one per name. A browser can hold both
-// names, as with the session cookie (sessionTokens).
+// cookies, the __Host- one first. A browser can hold both names, as with
+// the session cookie (sessionTokens), and several cookies of one name: a
+// sibling subdomain can set the plain name for this host too, and a cookie
+// with a longer path is sent before the browser's own (Path=/). So up to
+// maxPasskeyCookies values per name are read; one that names no open login
+// matches nothing.
 func passkeyLoginTokens(r *http.Request) []string {
-	var tokens []string
-	for _, name := range []string{"__Host-" + passkeyCookieName, passkeyCookieName} {
-		if c, err := r.Cookie(name); err == nil && c.Value != "" && !slices.Contains(tokens, c.Value) {
-			tokens = append(tokens, c.Value)
-		}
-	}
-	return tokens
+	return cookieValues(r, []string{"__Host-" + passkeyCookieName, passkeyCookieName}, maxPasskeyCookies)
 }
+
+// maxPasskeyCookies is how many cookies of one passkey cookie name count.
+// Each costs one hash in a single statement, so a few more than the one
+// cookie a browser sets are cheap.
+const maxPasskeyCookies = 4
 
 // dropPasskeyLogin deletes the open passkey login of the request's cookie
 // and expires the cookie. A failure is only logged: the login expires
@@ -243,7 +245,13 @@ func (s *Server) handleFinishPasskeyLogin(w http.ResponseWriter, r *http.Request
 	login, err := s.store.CompletePasskeyLogin(withAudit(r, e), in.Token, parsed.RawID, now, verify,
 		hash, now.Add(auth.MaxSessionAge), truncateUserAgent(r.UserAgent()))
 	// The login is used up now, whatever the outcome; the cookie that
-	// named it goes too.
+	// named it goes too. The cookie is cleared even when it names another
+	// login, such as another tab's: a stale tab's finish ("expired") is
+	// followed by a new begin in that tab, and with the other tab's token
+	// still in the cookie that begin would replace the other tab's live
+	// login, so the two tabs would keep invalidating each other. Clearing
+	// it costs at most one open login that counts until it expires; the
+	// other tab can still finish it with the token in its body.
 	if len(passkeyLoginTokens(r)) > 0 {
 		s.clearHostCookies(w, r, passkeyCookieName)
 	}
