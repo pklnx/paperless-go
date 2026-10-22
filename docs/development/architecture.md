@@ -362,8 +362,8 @@ A queue in PostgreSQL turns stored documents into searchable ones
   PDF that forbids copying text, and one OCRmyPDF refuses although poppler
   reads it (exit status 2, 6 or 8: a digital signature, input it cannot
   parse, earlier OCR, encryption). Its other exit statuses are retried.
-- **Images.** JPEG and PNG become a one-page PDF with `img2pdf --imgsize
-  <dpi>dpi --rotation=ifvalid`, which embeds the image without re-encoding.
+- **Images.** JPEG and PNG become a one-page PDF with
+  `img2pdf --imgsize <dpi>dpi --rotation=ifvalid`, which embeds the image without re-encoding.
   The DPI comes from the image (JFIF, then EXIF for JPEG; `pHYs` for PNG)
   when it is between 100 and 2400; otherwise (cameras write 72 or 96) it is
   300. It only sets the page size. HEIC/HEIF is decoded with `heif-dec`
