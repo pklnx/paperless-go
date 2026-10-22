@@ -87,11 +87,13 @@ type Worker struct {
 	// Test hooks. after returns a channel that fires after d (heartbeat,
 	// idle wait); nil means time.After. listening is called each time the
 	// listener is ready, heartbeat after each lease renewal, completing
-	// before the result is stored.
-	after      func(d time.Duration) <-chan time.Time
-	listening  func()
-	heartbeat  func(error)
-	completing func()
+	// before the result is stored. attemptContext makes the context of an
+	// attempt from the job's; nil means a timeout of Timeout.
+	after          func(d time.Duration) <-chan time.Time
+	listening      func()
+	heartbeat      func(error)
+	completing     func()
+	attemptContext func(parent context.Context) (context.Context, context.CancelFunc)
 }
 
 func (w *Worker) now() time.Time {
@@ -115,6 +117,13 @@ func (w *Worker) wait(d time.Duration) <-chan time.Time {
 	return time.After(d)
 }
 
+func (w *Worker) newAttemptContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if w.attemptContext != nil {
+		return w.attemptContext(parent)
+	}
+	return context.WithTimeout(parent, w.Timeout)
+}
+
 // errLeaseLost cancels an attempt whose lease another worker or the reaper
 // took.
 var errLeaseLost = errors.New("lease lost")
@@ -135,7 +144,7 @@ func (w *Worker) RunOnce(ctx context.Context) (Outcome, error) {
 	stop := make(chan struct{})
 	var hb sync.WaitGroup
 	hb.Go(func() { w.renewLease(jobCtx, job, cancelJob, stop, log) })
-	runCtx, cancelRun := context.WithTimeout(jobCtx, w.Timeout)
+	runCtx, cancelRun := w.newAttemptContext(jobCtx)
 	res, err := w.attempt(runCtx, job, log)
 	timedOut := err != nil && errors.Is(runCtx.Err(), context.DeadlineExceeded) && jobCtx.Err() == nil
 	cancelRun()
@@ -304,8 +313,15 @@ func (w *Worker) attempt(ctx context.Context, job *store.Job, log *slog.Logger) 
 	thumb, err := w.Pipeline.Thumbnail(ctx, dir, archive)
 	switch {
 	case err != nil && ctx.Err() != nil:
+		// ctx is the attempt's context: its end (shutdown, lost lease,
+		// the attempt's limit) ends the attempt, also when the
+		// thumbnail's own limit ran out at the same time. RunOnce
+		// decides what becomes of the job.
 		return store.ProcessResult{}, err
 	case err != nil:
+		// Best effort: the thumbnail failed or ran out of its own limit
+		// (errThumbnailTimeout). The text is stored, and an earlier
+		// thumbnail stays.
 		attrs := []any{"err", err}
 		var tool *ToolError
 		if errors.As(err, &tool) && tool.Stderr != "" {

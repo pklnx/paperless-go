@@ -271,6 +271,30 @@ func TestAPIKeyOwnerScope(t *testing.T) {
 	b.loginOK("bob", keyPassword)
 	bobDoc := b.uploadOK("bob.pdf", pdf("bob"))
 	bobCookie := b.sessionCookie()
+	// Bob's document failed, so a reprocess that got through would queue
+	// a new job.
+	now := time.Now().Truncate(time.Microsecond)
+	j, err := f.st.ClaimJob(t.Context(), now, time.Minute)
+	if err != nil || j == nil || j.DocumentID != bobDoc {
+		t.Fatalf("claim bob's job: %+v, %v", j, err)
+	}
+	if err := f.st.FailJob(t.Context(), j, now, "The PDF cannot be read."); err != nil {
+		t.Fatal(err)
+	}
+	bobJobs := func() []*store.Job {
+		t.Helper()
+		jobs, err := f.st.DocumentJobs(t.Context(), bobDoc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return jobs
+	}
+	onlyFailed := func(what string) {
+		t.Helper()
+		if jobs := bobJobs(); len(jobs) != 1 || jobs[0].ID != j.ID || jobs[0].State != store.JobFailed {
+			t.Errorf("bob's jobs after %s: %+v", what, jobs)
+		}
+	}
 
 	resp, out := f.keyUpload(aliceKey, "alice.pdf", pdf("alice"))
 	if resp.StatusCode != 201 {
@@ -280,11 +304,16 @@ func TestAPIKeyOwnerScope(t *testing.T) {
 	if d, err := f.st.GetDocument(t.Context(), store.Scope{UserID: alice.ID}, aliceDoc); err != nil || d.OwnerID != alice.ID {
 		t.Fatalf("owner of the key's upload: %+v %v", d, err)
 	}
-	for _, p := range []string{"/api/documents/" + bobDoc, "/api/documents/" + bobDoc + "/file"} {
+	for _, p := range []string{"/api/documents/" + bobDoc, "/api/documents/" + bobDoc + "/file", "/api/documents/" + bobDoc + "/thumbnail"} {
 		if s := f.keyStatus(aliceKey, "GET", p); s != 404 {
 			t.Errorf("GET %s with alice's key: %d, want 404", p, s)
 		}
 	}
+	reprocess := "/api/documents/" + bobDoc + "/reprocess"
+	if resp, _ := f.keyRequest(aliceKey, "POST", reprocess, []byte("{}"), "application/json", nil); resp.StatusCode != 404 {
+		t.Errorf("POST %s with alice's key: %d, want 404", reprocess, resp.StatusCode)
+	}
+	onlyFailed("alice's reprocess")
 	// The key's user counts, not the cookie's.
 	resp, out = f.keyRequest(aliceKey, "GET", "/api/documents", nil, "", bobCookie)
 	if ids := listedIDs(t, out); resp.StatusCode != 200 || len(ids) != 1 || ids[0] != aliceDoc {
@@ -300,6 +329,11 @@ func TestAPIKeyOwnerScope(t *testing.T) {
 	if s := r.keyStatus(rootKey, "GET", "/api/documents/"+bobDoc); s != 200 {
 		t.Errorf("admin key reads bob's document: %d", s)
 	}
+	// Reprocess needs the write scope, also for an admin's key.
+	if resp, _ := r.keyRequest(rootKey, "POST", reprocess, []byte("{}"), "application/json", nil); resp.StatusCode != 403 {
+		t.Errorf("POST %s with the admin's read key: %d, want 403", reprocess, resp.StatusCode)
+	}
+	onlyFailed("the admin's reprocess")
 }
 
 // TestAPIKeyNoCookieFallback: a key request is decided by the key alone. A

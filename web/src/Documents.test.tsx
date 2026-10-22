@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import type { DocumentSummary } from "./api";
+import { documentsApi, type DocumentSummary } from "./api";
 import { DocumentsHome, WindowDrop, pollDelay, pollTimer, searchPageSize } from "./Documents";
 import { SNIPPET_START, SNIPPET_STOP } from "./snippet";
 import { FakeXHR, stubXHR } from "./fakeXHR";
@@ -333,6 +333,62 @@ describe("processing status", () => {
     act(() => live()[0]!.fn());
     await vi.waitFor(() => expect(row("Scan").querySelector("img")).toBeTruthy());
     expect(listCalls).toBe(3);
+    expect(within(row("Scan")).queryByRole("status")).toBeNull();
+    expect(live()).toHaveLength(0);
+  });
+
+  it("keeps polling after a failed load, but not after an aborted one", async () => {
+    docs = [withStatus("1", "Scan", { state: "queued", attempts: 0, maxAttempts: 3 })];
+    await renderHome();
+    await screen.findByText("Scan");
+    expect(timers).toHaveLength(1);
+
+    // From now on the list loads wait until the test settles them.
+    const loads: { reject: (e: unknown) => void }[] = [];
+    let aborts = 0;
+    const list = globalThis.fetch;
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (url !== "/api/documents?limit=10") return list(url);
+      return new Promise((_, reject) => {
+        loads.push({ reject });
+        init?.signal?.addEventListener("abort", () => {
+          aborts++;
+          reject(new DOMException("aborted", "AbortError"));
+        });
+      });
+    });
+    // The page's loads, to wait until the page has handled their end.
+    const pageLoads: Promise<unknown>[] = [];
+    const load = documentsApi.list;
+    vi.spyOn(documentsApi, "list").mockImplementation((...args) => {
+      const p = load(...args);
+      pageLoads.push(p);
+      return p;
+    });
+    const handled = (p: Promise<unknown>) => act(async () => void (await p.catch(() => undefined)));
+
+    act(() => timers[0]!.fn());
+    await vi.waitFor(() => expect(loads).toHaveLength(1));
+    // The next poll comes before the load ended: that load is aborted, and
+    // arms no timer.
+    act(() => timers[0]!.fn());
+    await vi.waitFor(() => expect(loads).toHaveLength(2));
+    expect(aborts).toBe(1);
+    await handled(pageLoads[0]!);
+    expect(timers).toHaveLength(1);
+
+    // The next load fails: the error shows, and a new timer is armed.
+    loads[1]!.reject(new TypeError("Failed to fetch"));
+    await handled(pageLoads[1]!);
+    expect(screen.getByRole("alert").textContent).toBe(t.failed("Failed to fetch"));
+    expect(timers).toHaveLength(2);
+    expect(timers[0]!.cleared).toBe(true);
+    expect(live().map((x) => x.ms)).toEqual([pollDelay]);
+
+    vi.stubGlobal("fetch", list);
+    docs = [withStatus("1", "Scan", { state: "done", attempts: 1, maxAttempts: 3 })];
+    act(() => live()[0]!.fn());
+    await vi.waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
     expect(within(row("Scan")).queryByRole("status")).toBeNull();
     expect(live()).toHaveLength(0);
   });

@@ -104,7 +104,8 @@ archive PDF. Text that did not come from processing (`PDF-Text` or
 `Tesseract`), such as text imported from the app or edited by hand, is kept.
 `reprocess` writes a `document.reprocess` entry to the audit log. Processing
 also renders a thumbnail of the first page (a JPEG, 512 pixels on the longer
-side); when that fails, the document is stored without a new one.
+side); when that fails or takes longer than 60 s, the document is stored
+without a new one.
 
 The web UI shows the status of each document: a badge while it is queued or
 being processed, and the error with a Retry button when processing failed.

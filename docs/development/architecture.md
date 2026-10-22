@@ -549,13 +549,18 @@ A queue in PostgreSQL turns stored documents into searchable ones
 - **Thumbnail.** After the pipeline, `pdftoppm -f 1 -l 1 -singlefile
   -scale-to 512 -jpeg -jpegopt quality=80` renders the first page of the
   archive (the original PDF, OCRmyPDF's output or the image's PDF) as a
-  JPEG whose longer side is 512 pixels. It must decode as a JPEG of at most
-  512×512 pixels and 2 MiB. It is stored in the blob store before the result
-  commits, like the archive, and `documents.thumbnail_sha256` points to it.
-  A thumbnail that cannot be made is logged (with the tool's standard
-  error) and left out: the result is stored without it, and an earlier
-  thumbnail stays. Only an ended context (shutdown, timeout, lost lease)
-  ends the attempt there.
+  JPEG whose longer side is 512 pixels. It must be at most 2 MiB, have a
+  JPEG header of at most 512×512 pixels and then decode in full (a
+  truncated file is refused). It is stored in the blob store before the
+  result commits, like the archive, and `documents.thumbnail_sha256`
+  points to it. `pdftoppm` has a limit of its own, 60 s, within the
+  attempt's. A thumbnail that cannot be made or runs out of that limit is
+  logged (with the tool's standard error) and left out: the result is
+  stored without it, and an earlier thumbnail stays. Only the end of the
+  attempt's context (shutdown, the attempt's limit, lost lease) ends the
+  attempt there; it wins when both end at once. A PDF that makes
+  `pdftoppm` hang costs the 60 s (plus the 10 s before the kill) on each
+  processing, also on a reprocess.
 - **Status.** The document JSON has `processing`: the state of the
   document's newest job (`queued`, `running`, `done`, `failed`; `done`
   when it has none, as done jobs are deleted after a week), `attempts`,
@@ -563,7 +568,8 @@ A queue in PostgreSQL turns stored documents into searchable ones
   a failed job and for a queued one that failed before, which also has
   `retryAt`. One query per page reads the newest jobs
   (`LatestDocumentJobs`, `DISTINCT ON`). The start page loads the list
-  again every 5 s while one of its documents is queued or running.
+  again every 5 s while one of its documents is queued or running, also
+  after a load that failed (the error stays until a load succeeds).
 - **Upgrade.** Migration `00010_requeue_ocr.sql` queues again the
   documents the version before OCR failed for good (scans and images,
   selected by its messages) and those it left with the old owner-password
