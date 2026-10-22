@@ -344,15 +344,16 @@ func clampInt32(n int) int32 {
 
 // The action groups a filter may name instead of exact actions.
 var auditGroups = map[string][]string{
-	"login":   {"auth.%"},
-	"users":   {"user.%"},
-	"profile": {"profile.%"},
-	"export":  {"audit.export"},
+	"login":    {"auth.%"},
+	"users":    {"user.%"},
+	"profile":  {"profile.%"},
+	"api_keys": {"api_key.%"},
+	"export":   {"audit.export"},
 }
 
 // AuditGroups are the names of the action groups, for help texts.
 func AuditGroups() []string {
-	return []string{"login", "users", "profile", "export"}
+	return []string{"login", "users", "profile", "api_keys", "export"}
 }
 
 var auditActionPattern = regexp.MustCompile(`^[a-z0-9_]+\.[a-z0-9_]+$`)

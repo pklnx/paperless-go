@@ -170,6 +170,50 @@ export const passkeyApi = {
   remove: async (id: number) => (await send<{ credentialId: string; rpId?: string }>("DELETE", `/api/profile/passkeys/${id}`))!,
 };
 
+export type ApiKeyScope = "read" | "write";
+
+/** An API key as listed: never the key itself. */
+export interface ApiKey {
+  id: number;
+  /** Only in the admin list. */
+  user?: string;
+  name: string;
+  /** The last 4 characters of the key. */
+  hint: string;
+  scopes: ApiKeyScope[];
+  createdAt: string;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  state: "active" | "expired" | "revoked";
+}
+
+export interface ApiKeyList {
+  max: number;
+  keys: ApiKey[];
+}
+
+/** A key just created: the key itself is in this answer only. */
+export type NewApiKey = ApiKey & { key: string };
+
+export interface ApiKeyInput {
+  name: string;
+  scopes: ApiKeyScope[];
+  /** Days until the key expires; null for never. */
+  expiresInDays: number | null;
+  currentPassword: string;
+  code: string;
+}
+
+export const apiKeyApi = {
+  list: () => getJSON<ApiKeyList>("/api/profile/api-keys"),
+  create: async (input: ApiKeyInput) => (await send<NewApiKey>("POST", "/api/profile/api-keys", input))!,
+  revoke: (id: number) => send("DELETE", `/api/profile/api-keys/${id}`),
+  /** Every user's keys, for admins. */
+  listAll: async () => (await getJSON<{ keys: ApiKey[] }>("/api/api-keys")).keys,
+  revokeAny: (id: number) => send("DELETE", `/api/api-keys/${id}`),
+};
+
 /** A user as admins see them on the users page. */
 export interface ManagedUser {
   name: string;
@@ -178,6 +222,8 @@ export interface ManagedUser {
   mustChangePassword: boolean;
   twoFactorEnabled: boolean;
   passkeys: number;
+  /** Keys that are neither revoked nor expired. */
+  apiKeys: number;
   /** The rows the user owns; any of them keeps the user from being removed. */
   owned: { documents: number; tags: number; correspondents: number; documentTypes: number; savedViews: number };
   createdAt: string;
@@ -202,9 +248,9 @@ const userPath = (name: string) => `/api/users/${encodeURIComponent(name)}`;
 export const usersApi = {
   list: async (signal?: AbortSignal) => (await getJSON<{ users: ManagedUser[] }>("/api/users", signal)).users,
   create: async (name: string, admin: boolean) => (await send<GeneratedPassword>("POST", "/api/users", { name, admin }))!,
-  /** A new password; the user's passkeys are removed unless removePasskeys is false. */
-  resetPassword: async (name: string, removePasskeys: boolean) =>
-    (await send<GeneratedPassword>("POST", `${userPath(name)}/password`, { removePasskeys }))!,
+  /** A new password; the user's passkeys are removed and API keys revoked unless told otherwise. */
+  resetPassword: async (name: string, removePasskeys: boolean, revokeApiKeys: boolean) =>
+    (await send<GeneratedPassword>("POST", `${userPath(name)}/password`, { removePasskeys, revokeApiKeys }))!,
   setAdmin: (name: string, admin: boolean) => send("PATCH", userPath(name), { admin }),
   setLocked: (name: string, locked: boolean) => send("PATCH", userPath(name), { locked }),
   remove: (name: string) => send("DELETE", userPath(name)),

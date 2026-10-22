@@ -150,6 +150,93 @@ func TestMigrationBackfillsJobs(t *testing.T) {
 	}
 }
 
+func TestMigrationRequeuesOCRJobs(t *testing.T) {
+	// The messages of the version before OCR (#5, part 2), as it stored
+	// them.
+	const (
+		ocrLater    = "This PDF has pages without text, and this version cannot run OCR yet; run reprocess --failed after the update."
+		imagesLater = "Images cannot be processed by this version yet; run reprocess --failed after the update."
+		ownerNote   = "The PDF is protected by an owner password, so pages without text were not OCRed."
+		unreadable  = "The PDF cannot be read: it is damaged, or it needs a password to open."
+	)
+	st, url := storetest.NewWithURL(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	// Rolls back 00010 only, whatever comes before it.
+	if err := st.MigrateDownTo(ctx, 9); err != nil {
+		t.Fatal(err)
+	}
+	conn := connect(t, url)
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := conn.Exec(ctx, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// job adds a finished job of the document with its last error.
+	job := func(doc, state, lastError string) {
+		t.Helper()
+		exec(`INSERT INTO jobs (document_id, state, attempts, last_error, finished_at) VALUES ($1, $2, 1, $3, now())`, doc, state, lastError)
+	}
+	doc := func(name string) string {
+		t.Helper()
+		d := mustDoc(t, st, alice, newDoc(name))
+		exec(`DELETE FROM jobs WHERE document_id = $1`, d.ID)
+		return d.ID
+	}
+	scan := doc("scan")
+	job(scan, store.JobFailed, ocrLater)
+	photo := doc("photo")
+	job(photo, store.JobFailed, imagesLater)
+	job(photo, store.JobFailed, imagesLater) // two failed jobs: queued once
+	broken := doc("broken")
+	job(broken, store.JobFailed, unreadable)
+	later := doc("later") // failed once, then processed
+	job(later, store.JobFailed, ocrLater)
+	job(later, store.JobDone, "")
+	owner := doc("owner")
+	job(owner, store.JobDone, "")
+	exec(`UPDATE documents SET processing_note = $2 WHERE id = $1`, owner, ownerNote)
+	ownerQueued := doc("owner, queued") // queued already: no second job
+	exec(`UPDATE documents SET processing_note = $2 WHERE id = $1`, ownerQueued, ownerNote)
+	exec(`INSERT INTO jobs (document_id) VALUES ($1)`, ownerQueued)
+
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		id     string
+		jobs   int
+		latest string
+	}{
+		{"scan", scan, 2, store.JobQueued},
+		{"photo", photo, 3, store.JobQueued},
+		{"broken", broken, 1, store.JobFailed},
+		{"later", later, 2, store.JobDone},
+		{"owner", owner, 2, store.JobQueued},
+		{"owner, queued", ownerQueued, 1, store.JobQueued},
+	} {
+		jobs := jobsOf(t, st, tc.id)
+		if len(jobs) != tc.jobs || jobs[0].State != tc.latest {
+			t.Errorf("%s: %d jobs, latest %+v; want %d, %s", tc.name, len(jobs), jobs[0], tc.jobs, tc.latest)
+		}
+		if tc.latest == store.JobQueued && (jobs[0].Attempts != 0 || jobs[0].LastError != "") {
+			t.Errorf("%s: requeued job %+v", tc.name, jobs[0])
+		}
+	}
+	// Down and up again: nothing to undo, and no job is queued twice.
+	if err := st.MigrateDownTo(ctx, 9); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if jobs := jobsOf(t, st, scan); len(jobs) != 2 {
+		t.Fatalf("scan after down and up: %d jobs", len(jobs))
+	}
+}
+
 func TestClaimSkipsLockedJobs(t *testing.T) {
 	st, url := storetest.NewWithURL(t)
 	ctx := context.Background()

@@ -373,7 +373,7 @@ func TestDeleteUserWithPasskeys(t *testing.T) {
 	if _, err := st.BeginPasskeyRegistration(ctx, kim.ID, "Key", "", now, now.Add(time.Minute), noBegin); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.DeleteUser(ctx, kim.ID); err != nil {
+	if err := st.DeleteUser(ctx, kim.ID, time.Now()); err != nil {
 		t.Fatalf("remove a user with passkeys: %v", err)
 	}
 }

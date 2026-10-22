@@ -26,11 +26,15 @@ name: Claude
 # (repository only), Grep, Glob and gh issue/pr view, gh pr diff, gh pr checks.
 # No git and no other shell commands, since git accepts paths and output files
 # outside the repository (git diff --no-index, --output, -O). They
-# return their comment as structured output, and a separate job with write
-# access checks it (heading, signature, no secrets, no at-mentions) and posts
-# it. They never execute code from the repository or the pull request. A
-# failed run (no output, max turns, timeout) posts a short failure comment and
-# removes the trigger label, so adding the label again retries.
+# return their comment as structured output; the Claude job checks it for
+# secrets and passes it on as a short-lived artifact (retention one day), never
+# as a job output, because GitHub silently drops a job output that contains any
+# masked value. A separate job with write access downloads it, checks it
+# (heading, signature, no secrets, no at-mentions) and posts it. They never
+# execute code from the repository or the pull request. A failed run (no
+# output, missing artifact, max turns, timeout, rejected comment) posts a short
+# failure comment and removes the trigger label, so adding the label again
+# retries; a run never ends silently.
 
 on:
   issues:
@@ -65,7 +69,7 @@ jobs:
       # Claude Code removes secrets from the environment of its subprocesses.
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
     outputs:
-      result: ${{ steps.claude.outputs.structured_output }}
+      has_result: ${{ steps.save.outputs.has_result }}
     steps:
       # A queued run after an earlier one already handled the label does nothing.
       - name: Label still set
@@ -137,28 +141,72 @@ jobs:
             --allowedTools "Read(./**),Grep,Glob,Bash(gh issue view:*)"
             --disallowedTools "Read(//proc/**),Read(//sys/**),Read(//home/runner/work/_temp/**)"
             --json-schema '{"type":"object","properties":{"body":{"type":"string","description":"The plan comment in Markdown, starting with ## Plan"}},"required":["body"],"additionalProperties":false}'
+      - if: steps.gate.outputs.run == 'true'
+        id: save
+        name: Save the result
+        env:
+          RESULT: ${{ steps.claude.outputs.structured_output }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: &save |
+          set -euo pipefail
+          # The result goes to the post job as an artifact, never as a job
+          # output: GitHub drops a job output that contains any masked value,
+          # and the post job would then be skipped without a word. No result
+          # fails this job, so the failure job reports it. Nothing is logged.
+          if [ -z "$RESULT" ] || [ -z "$(jq -r '.body // empty' <<<"$RESULT" 2>/dev/null)" ]; then
+            echo "::error::Claude returned no structured output with a body"; exit 1
+          fi
+          # The artifact is readable with read access: never put a secret in it.
+          # Also the forms GitHub masks for the token, like checkout's
+          # basic-auth header.
+          AUTH_B64=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
+          if grep -qF -e "$ANTHROPIC_API_KEY" -e "$GITHUB_TOKEN" -e "$AUTH_B64" <<<"$RESULT" ||
+             grep -qE 'sk-ant-|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_' <<<"$RESULT"; then
+            echo "::error::Result looks like it contains a secret; not passed on"; exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/claude-result"
+          printf '%s' "$RESULT" > "$RUNNER_TEMP/claude-result/result.json"
+          echo "has_result=true" >> "$GITHUB_OUTPUT"
+      - if: steps.save.outputs.has_result == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: claude-plan-result
+          path: ${{ runner.temp }}/claude-result/result.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
 
   plan-post:
+    # Runs when the Claude job saved a result; a missing or empty artifact
+    # fails this job, and the failure job reports it.
     needs: plan
-    if: needs.plan.outputs.result != ''
+    if: needs.plan.outputs.has_result == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       issues: write
     steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: claude-plan-result
+          path: ${{ runner.temp }}/result
       - name: Post the plan and set review
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number }}
-          RESULT: ${{ needs.plan.outputs.result }}
           SIGNATURE: "— Claude (Action), planner"
           HEADING: "## Plan"
         run: &post |
           set -euo pipefail
           # Drop \r, trailing spaces and leading blank lines; break every
           # at-mention with a zero-width space so the comment notifies nobody.
-          jq -r .body <<<"$RESULT" |
+          RESULT_FILE="$RUNNER_TEMP/result/result.json"
+          if [ ! -s "$RESULT_FILE" ]; then
+            echo "::error::The result artifact is missing or empty; not posted"; exit 1
+          fi
+          jq -er .body "$RESULT_FILE" |
             perl -CSD -pe 's/\r//g; s/[ \t]+$//; s/@(?=[A-Za-z0-9_-])/\@\x{200B}/g' |
             sed '/./,$!d' > "$RUNNER_TEMP/body.md"
           if [ "$(head -n 1 "$RUNNER_TEMP/body.md")" != "$HEADING" ]; then
@@ -180,8 +228,9 @@ jobs:
         run: gh issue edit "$ISSUE" --remove-label needs-plan --add-label review
 
   plan-failed:
-    # The run failed (no structured output, max turns, timeout, or the comment
-    # was rejected): say so and remove the trigger label for a clean retry.
+    # The run failed (no structured output, missing artifact, max turns,
+    # timeout, or the comment was rejected): say so and remove the trigger
+    # label for a clean retry.
     needs: [plan, plan-post]
     if: failure()
     runs-on: ubuntu-latest
@@ -220,7 +269,7 @@ jobs:
       # Claude Code removes secrets from the environment of its subprocesses.
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
     outputs:
-      result: ${{ steps.claude.outputs.structured_output }}
+      has_result: ${{ steps.save.outputs.has_result }}
     steps:
       - name: Label still set
         id: gate
@@ -288,21 +337,42 @@ jobs:
             --allowedTools "Read(./**),Grep,Glob,Bash(gh issue view:*)"
             --disallowedTools "Read(//proc/**),Read(//sys/**),Read(//home/runner/work/_temp/**)"
             --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","changes requested"]},"body":{"type":"string","description":"The review comment in Markdown, starting with ## Independent plan review"}},"required":["verdict","body"],"additionalProperties":false}'
+      - if: steps.gate.outputs.run == 'true'
+        id: save
+        name: Save the result
+        env:
+          RESULT: ${{ steps.claude.outputs.structured_output }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: *save
+      - if: steps.save.outputs.has_result == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: claude-plan-review-result
+          path: ${{ runner.temp }}/claude-result/result.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
 
   plan-review-post:
+    # Runs when the Claude job saved a result; a missing or empty artifact
+    # fails this job, and the failure job reports it.
     needs: plan-review
-    if: needs.plan-review.outputs.result != ''
+    if: needs.plan-review.outputs.has_result == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       issues: write
     steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: claude-plan-review-result
+          path: ${{ runner.temp }}/result
       - name: Post the plan review
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number }}
-          RESULT: ${{ needs.plan-review.outputs.result }}
           SIGNATURE: "— Claude (Action), plan reviewer"
           HEADING: "## Independent plan review"
         run: *post
@@ -311,18 +381,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number }}
-          RESULT: ${{ needs.plan-review.outputs.result }}
         run: |
           set -euo pipefail
-          if [ "$(jq -r .verdict <<<"$RESULT")" = approve ]; then
+          if [ "$(jq -r .verdict "$RUNNER_TEMP/result/result.json")" = approve ]; then
             gh issue edit "$ISSUE" --remove-label plan-review --remove-label review --add-label ready
           else
             gh issue edit "$ISSUE" --remove-label plan-review
           fi
 
   plan-review-failed:
-    # The run failed (no structured output, max turns, timeout, or the comment
-    # was rejected): say so and remove the trigger label for a clean retry.
+    # The run failed (no structured output, missing artifact, max turns,
+    # timeout, or the comment was rejected): say so and remove the trigger
+    # label for a clean retry.
     needs: [plan-review, plan-review-post]
     if: failure()
     runs-on: ubuntu-latest
@@ -425,7 +495,7 @@ jobs:
       # Claude Code removes secrets from the environment of its subprocesses.
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
     outputs:
-      result: ${{ steps.claude.outputs.structured_output }}
+      has_result: ${{ steps.save.outputs.has_result }}
     steps:
       # Again inside the concurrency group: a queued run after an earlier one
       # already handled (and removed) the label does nothing.
@@ -499,21 +569,42 @@ jobs:
             --allowedTools "Read(./**),Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh issue view:*)"
             --disallowedTools "Read(//proc/**),Read(//sys/**),Read(//home/runner/work/_temp/**)"
             --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","approve, pending CI","changes requested"]},"body":{"type":"string","description":"The review comment in Markdown, starting with ## Review"}},"required":["verdict","body"],"additionalProperties":false}'
+      - if: steps.gate.outputs.run == 'true'
+        id: save
+        name: Save the result
+        env:
+          RESULT: ${{ steps.claude.outputs.structured_output }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: *save
+      - if: steps.save.outputs.has_result == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: claude-second-review-result
+          path: ${{ runner.temp }}/claude-result/result.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
 
   second-review-post:
+    # Runs when the Claude job saved a result; a missing or empty artifact
+    # fails this job, and the failure job reports it.
     needs: second-review
-    if: needs.second-review.outputs.result != ''
+    if: needs.second-review.outputs.has_result == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       pull-requests: write
     steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: claude-second-review-result
+          path: ${{ runner.temp }}/result
       - name: Post the review
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.pull_request.number }}
-          RESULT: ${{ needs.second-review.outputs.result }}
           SIGNATURE: "— Claude (Action), reviewer"
           HEADING: "## Review"
         run: *post
@@ -526,8 +617,9 @@ jobs:
         run: gh pr edit "$PR" --remove-label second-review
 
   second-review-failed:
-    # The run failed (no structured output, max turns, timeout, or the comment
-    # was rejected): say so and remove the trigger label for a clean retry.
+    # The run failed (no structured output, missing artifact, max turns,
+    # timeout, or the comment was rejected): say so and remove the trigger
+    # label for a clean retry.
     # Not for a failed second-review-check: that job decides only, and it
     # turns API errors into run=false.
     needs: [second-review, second-review-post]
@@ -588,9 +680,13 @@ jobs:
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "::error::The repository secret ANTHROPIC_API_KEY is missing or empty"; exit 1
           fi
+      # On a PR the action runs `git fetch origin <head branch>` before it
+      # sets up its own git credentials, so the checkout must keep its token.
+      # The action then removes the checkout's header and points origin at
+      # its own token (the same GITHUB_TOKEN) before Claude starts.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
+          persist-credentials: true
       - name: Install sandbox tools
         run: *bwrap
       - uses: anthropics/claude-code-action@a5a423f75c251dcbff8a74e99f83b2cb03c72bfa # v1.0.256

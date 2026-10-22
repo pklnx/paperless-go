@@ -91,6 +91,7 @@ export function LogPage({ admin }: { admin: boolean }) {
             <select className={control} value={filter.who} onChange={(e) => set({ who: e.target.value })}>
               <option value="">{t.logEveryone}</option>
               <option value="cli">{t.logCommandLine}</option>
+              <option value="api_key">{t.logApiKeys}</option>
               {users.map((u) => (
                 <option key={u.name} value={u.name}>
                   {u.name}

@@ -59,13 +59,14 @@ func TestExecRunnerOutput(t *testing.T) {
 func TestExecRunnerEnvironment(t *testing.T) {
 	t.Setenv("PAPERLESS_GO_DATABASE_URL", "postgres://secret")
 	c := helper(t, "env")
+	c.Env = []string{"OMP_THREAD_LIMIT=1"}
 	out, err := (&ExecRunner{}).Run(context.Background(), c)
 	if err != nil {
 		t.Fatal(err)
 	}
 	env := strings.Split(string(out), "\n")
 	slices.Sort(env)
-	want := []string{"HOME=" + c.Dir, "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "PATH=" + os.Getenv("PATH"), "TMPDIR=" + c.Dir}
+	want := []string{"HOME=" + c.Dir, "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "OMP_THREAD_LIMIT=1", "PATH=" + os.Getenv("PATH"), "TMPDIR=" + c.Dir}
 	if !slices.Equal(env, want) {
 		t.Fatalf("environment %q, want %q", env, want)
 	}

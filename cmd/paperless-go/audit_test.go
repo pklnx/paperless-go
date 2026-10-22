@@ -262,7 +262,7 @@ func TestAuditExportCommand(t *testing.T) {
 		}
 	}
 	// A removed user's entries keep the name, and --user still finds them.
-	if err := st.DeleteUser(ctx, anna.ID); err != nil {
+	if err := st.DeleteUser(ctx, anna.ID, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := run(t, url, "audit", "export", "--since", today, "--user", "anna", "--format", "jsonl"); err != nil ||

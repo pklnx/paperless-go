@@ -17,7 +17,7 @@ Planned, with the [roadmap](./roadmap):
 upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/blobstore ──▶ data/documents/ab/cd/<sha256>
                                               │                ▲
                                               ▼                │
-                                       job queue (PostgreSQL) ──▶ internal/ocr (OCRmyPDF, Tesseract; Mistral optional)
+                                       job queue (PostgreSQL) ──▶ internal/process (OCRmyPDF, Tesseract; Mistral optional)
                                                                  internal/classify (matching rules, dates, OpenAI-compatible API)
 ```
 
@@ -51,7 +51,7 @@ app and the server through the app's archive folder format:
 
 | App (SwiftData) | Server table |
 |---|---|
-| — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`, `webauthn_handle` in `00008_passkeys.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges`, `passkeys`, `webauthn_ceremonies` |
+| — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`, `webauthn_handle` in `00008_passkeys.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges`, `passkeys`, `webauthn_ceremonies`, `api_keys` (`00009_api_keys.sql`) |
 | — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; see [Audit log](#audit-log)) |
 | `Document`: id (UUID), title, documentDate, createdAt, modifiedAt, notes, isFavorite, isInbox, archiveSerialNumber, pageCount, fileSize, extractedText, source, originalFileName, textSource, contentHash | `documents`, with the UUID as primary key; the original file (`original_sha256`, size, MIME type) and the archive PDF (`archive_sha256`, size) |
 | `Tag`: name, colorHex, symbol, parent, matchText, matchMode | `tags`, `document_tags` (nested through `parent_id`) |
@@ -424,12 +424,44 @@ A queue in PostgreSQL turns stored documents into searchable ones
   dump, not a document).
   A page with fewer than 15 characters (white space does not count) needs
   OCR. With text on every page, the original is the archive and
-  `text_source` is `PDF-Text`. A PDF that opens without a password but is
-  encrypted (an owner password) is not changed: the original is the
-  archive, with a `processing_note`; so is one that forbids copying text.
-  OCR (`text_source` `Tesseract`, the server's own value next to the app's)
-  and image conversion come with part 3; until then such documents fail
-  with a message that says so.
+  `text_source` is `PDF-Text`.
+- **OCR.** The pages that need it go to `ocrmypdf --pages <those pages>
+  --rotate-pages -l <PAPERLESS_GO_OCR_LANGUAGES> --output-type pdf
+  --optimize 1 --jobs <n>`: a plain PDF (no PDF/A; the original is kept
+  anyway) with an invisible text layer, the other pages unchanged. Pages
+  without any text get `--skip-text`; when one of them has a little text
+  (a scanner's header, a page number), `--redo-ocr` runs instead, because
+  `--skip-text` would skip such a page; it keeps the visible text. `--jobs`
+  is the usable CPUs (`GOMAXPROCS`) divided by the workers, and each
+  Tesseract runs with `OMP_THREAD_LIMIT=1`. The OCRed PDF becomes the
+  archive, stored content-addressed in the blob store before the result
+  commits, and its text (`pdftotext` again, same cap) the document's text
+  with `text_source` `Tesseract` (the server's own value next to the
+  app's), but only when it has more characters on the OCRed pages than
+  before; otherwise (blank back sides, nothing readable) the document
+  stays as without OCR.
+- **Encrypted PDFs.** One that needs a password to open fails at once. One
+  that opens without a password (an empty user password) is OCRed when its
+  permissions allow changes (`change:yes` in `pdfinfo`): OCRmyPDF opens it
+  itself and writes the archive without encryption. When they forbid
+  changes, the original is the archive, with a `processing_note`; so is a
+  PDF that forbids copying text, and one OCRmyPDF refuses although poppler
+  reads it (exit status 2, 6 or 8: a digital signature, input it cannot
+  parse, earlier OCR, encryption). Its other exit statuses are retried.
+- **Images.** JPEG and PNG become a one-page PDF with
+  `img2pdf --imgsize <dpi>dpi --rotation=ifvalid`, which embeds the image without re-encoding.
+  The DPI comes from the image (JFIF, then EXIF for JPEG; `pHYs` for PNG)
+  when it is between 100 and 2400; otherwise (cameras write 72 or 96) it is
+  300. It only sets the page size. HEIC/HEIF is decoded with `heif-dec`
+  to a JPEG (quality 92, 300 DPI) first. Before any conversion the pixel
+  limit of ingest (50 MP) is checked again on the stored file, and on the
+  decoded HEIC once more. The converted PDF then goes through the PDF
+  steps; it is the archive even when OCR finds no text. An image the tools
+  cannot read (exit status 1) fails at once.
+- **Upgrade.** Migration `00010_requeue_ocr.sql` queues again the
+  documents the version before OCR failed for good (scans and images,
+  selected by its messages) and those it left with the old owner-password
+  note.
 - **Text rule.** The result replaces `extracted_text` and `text_source` only
   when the text is empty or came from processing (`PDF-Text`,
   `Tesseract`), so text imported from the app (`Mistral OCR`) or edited
@@ -438,8 +470,10 @@ A queue in PostgreSQL turns stored documents into searchable ones
 - **Tests.** Unit tests use a fake `Runner`, the test database and an
   injected clock. The tests with the real tools have the build tag `tools`
   and run in the Dockerfile's `toolstest` stage as UID 65532 (CI job
-  `toolstest`); they generate every PDF and encrypt with pikepdf, which
-  comes with ocrmypdf.
+  `toolstest`). They generate every document: PDFs in Go, scans rendered
+  from them with `pdftoppm` (a Go-written image-only PDF, a JPEG, a PNG),
+  HEIC with `heif-enc` (the x265 plugin is only in that stage); pikepdf,
+  which comes with ocrmypdf, encrypts and marks a PDF as signed.
 
 ## Web server
 
@@ -447,7 +481,8 @@ A queue in PostgreSQL turns stored documents into searchable ones
 is not writable. Every request passes `protect` (`internal/web/middleware.go`):
 the `Host` must be allowed (DNS rebinding), and state-changing requests need
 a same-origin `Origin` (or `Sec-Fetch-Site: same-origin`) and the body kind
-of their route in the route table (CSRF): `bodyJSON`, the zero value, takes
+of their route in the route table (CSRF; requests with an API key are
+exempt, see [Login](#login)): `bodyJSON`, the zero value, takes
 `application/json` only; `bodyFile`, only on `POST /api/documents`, takes a
 raw file with a type from `uploadContentTypes` and never a form or text.
 Then `authenticate` checks the login (see [Login](#login)). Unknown
@@ -494,11 +529,14 @@ and `internal/store`, `cmd/paperless-go/users.go`).
 
 - **Route table.** `internal/web/routes.go` lists every route with its
   `access`: `accessPublic` (`GET /healthz`, `GET /{$}`, `GET /assets/`),
-  `accessLogin` (`/api/session`: read, log in, log out, and `/api/session/2fa`) or `accessSession`.
+  `accessLogin` (`/api/session`: read, log in, log out, and `/api/session/2fa`),
+  `accessSession`, `accessRead` or `accessWrite` (a session, or an API key
+  with that scope: the document routes; the upload is `accessWrite`).
   The zero value is `accessSession`, so a route that forgets it gets the
   strictest rule, and so does every path without a route (the JSON `404`
   under `/api/` comes only after the login). `authenticate` enforces the
-  table; a test walks it and expects `401` without a session.
+  table; one test walks it and expects `401` without a session, another
+  calls every route with a `read`, a `write` and a both-scopes key.
 - **Sessions.** The cookie `paperless_go_session` (`__Host-` prefixed over
   HTTPS) holds a random token; `sessions` stores its SHA-256 with the user,
   creation, last use and absolute expiry. Sessions end after 7 days unused
@@ -509,8 +547,8 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   user) restricts the session to `PUT /api/profile/password`; everything
   else answers `403` with `passwordChangeRequired`.
 - **Scope.** `requestScope` (`internal/web/auth.go`) is the one place that
-  turns the request's principal into a `store.Scope`: the session's user,
-  with `All` for admins. Handlers that touch documents or metadata take
+  turns the request's principal into a `store.Scope`: the session's or API
+  key's user, with `All` for admins. Handlers that touch documents or metadata take
   their scope from it.
 - **Removing users.** Auth tables reference `users` with `ON DELETE
   CASCADE`, owned data with `ON DELETE RESTRICT`. `DeleteUser` counts the
@@ -520,7 +558,30 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   before) gives the same error. The last unlocked admin stays.
 - **Client address.** The login limits count per user name and per client
   address (IPv6 per `/64`; logs and the audit log keep the full address);
-  `X-Forwarded-For` counts only from `PAPERLESS_GO_TRUSTED_PROXIES`.
+  `X-Forwarded-For` counts only from `PAPERLESS_GO_TRUSTED_PROXIES`, and
+  `X-Forwarded-Proto` (`secureRequest`: the `__Host-` cookie with
+  `Secure`) only from those or loopback.
+- **API keys** (`internal/auth/apikey.go`, `internal/store/api_keys.go`,
+  `internal/web/api_keys.go`, migration `00009_api_keys.sql`). A key is
+  `pl_` and 32 random bytes in lower-case base32; `api_keys` stores its
+  SHA-256 (unique index; the lookup compares hashes), the last 4
+  characters, name (unique among a user's keys that are not revoked),
+  scopes (`read`, `write`), creation, expiry, last use (written at most once
+  a minute) and revocation, all on the server clock. `authenticate` treats
+  every request with `Authorization: Bearer pl_…` as a key request and
+  never reads its cookie; `protect` skips the Origin and content type checks
+  for it. `authenticateKey` checks the key (invalid: `401`, 30 per client and
+  minute, then `429`), the per-key rate (600 a minute), the owner's gates
+  (must change password, 2FA required), and the route's scope
+  (`requiredScope`; `403` for every other access). The key's user becomes
+  the request's session, so `requestScope` and the audit entry (actor
+  `api_key`, `api_key_id`, `api_key_name`) follow. Creating a key
+  (`POST /api/profile/api-keys`) checks password and second factor like a
+  passkey registration and writes `api_key.create` in the insert's
+  transaction; revoking (`DELETE /api/profile/api-keys/{id}`, admins
+  `DELETE /api/api-keys/{id}`, `user revoke-api-keys`, a password reset)
+  writes `api_key.revoke`. `serve` deletes keys revoked or expired 30 days
+  ago hourly.
 - **Two-factor login** (`internal/auth/totp.go`, `internal/store/two_factor.go`,
   `internal/web/two_factor.go`). Admins always need it,
   `PAPERLESS_GO_REQUIRE_2FA` extends it to everyone. A user who needs it but
@@ -598,7 +659,10 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   `profile.2fa_disable`, `profile.recovery_codes` (with the `factor` that
   confirmed it), `profile.passkey_add` (also with the confirming `factor`
   when 2FA is on), `profile.passkey_remove` (with the passkey's `name`),
-  `user.passkeys_removed` (`count`; web and CLI), `audit.export` (CLI,
+  `user.passkeys_removed` (`count`; web and CLI), `api_key.create` (target
+  the key, `scopes`, `expiresAt`), `api_key.revoke` (target the key and
+  `owner`, or for all of a user's keys the user and `apiKeysRevoked`;
+  `reason` `user`, `admin` or `cli`), `audit.export` (CLI,
   written before the export starts), `document.create` (upload, with
   `via: upload`; the target is the new document).
   A two-factor login records `method: 2fa` and its `factor` (`totp`,
@@ -629,7 +693,7 @@ OCR needs external programs, installed with `--no-install-recommends`:
 | `tesseract-ocr-deu`, `-eng`, `-osd` | German and English, page orientation |
 | `poppler-utils` | `pdfinfo`, `pdftotext` (text per page), `pdftoppm` (thumbnails) |
 | `img2pdf` | JPEG and PNG to PDF without re-encoding |
-| `libheif-examples`, `libheif-plugin-libde265` | `heif-dec` (HEIC to PNG; trixie keeps `heif-convert` as a link to it) and its HEVC decoder plugin, which is not installed without recommended packages |
+| `libheif-examples`, `libheif-plugin-libde265` | `heif-dec` (HEIC to JPEG; trixie keeps `heif-convert` as a link to it) and its HEVC decoder plugin, which is not installed without recommended packages |
 | `ca-certificates` | TLS to optional external services |
 
 The image is about 145 MB compressed per architecture (about 540 MB
