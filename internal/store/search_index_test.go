@@ -469,26 +469,26 @@ func TestSearchLinkPropagation(t *testing.T) {
 	other := textDoc(t, st, alice, "other", "")
 
 	// Tags.
-	if err := st.SetDocumentTags(ctx, alice, doc.ID, []string{steuer.ID}); err != nil {
+	if _, err := st.PatchDocument(ctx, alice, doc.ID, store.DocumentPatch{SetTags: true, TagIDs: []string{steuer.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	wantTitles(t, "tag added", find("Steuer"), "doc")
-	if err := st.SetDocumentTags(ctx, alice, doc.ID, []string{auto.ID}); err != nil {
+	if _, err := st.PatchDocument(ctx, alice, doc.ID, store.DocumentPatch{SetTags: true, TagIDs: []string{auto.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	wantTitles(t, "tag removed", find("Steuer"))
 	wantTitles(t, "tag replaced", find("Auto"), "doc")
 
 	// Correspondent and type.
-	update := store.DocumentUpdate{Title: "doc", CorrespondentID: &telekom.ID, DocumentTypeID: &invoice.ID}
-	if _, err := st.UpdateDocument(ctx, alice, doc.ID, update); err != nil {
+	update := store.DocumentPatch{SetCorrespondent: true, CorrespondentID: &telekom.ID, SetDocumentType: true, DocumentTypeID: &invoice.ID}
+	if _, err := st.PatchDocument(ctx, alice, doc.ID, update); err != nil {
 		t.Fatal(err)
 	}
 	wantTitles(t, "correspondent set", find("Telekom"), "doc")
 	wantTitles(t, "type set", find("Rechnung"), "doc")
 	wantTitles(t, "tags kept", find("Auto"), "doc")
 	update.CorrespondentID, update.DocumentTypeID = &vodafone.ID, &contract.ID
-	if _, err := st.UpdateDocument(ctx, alice, doc.ID, update); err != nil {
+	if _, err := st.PatchDocument(ctx, alice, doc.ID, update); err != nil {
 		t.Fatal(err)
 	}
 	wantTitles(t, "old correspondent", find("Telekom"))
@@ -540,7 +540,7 @@ func TestSearchLinkPropagation(t *testing.T) {
 		t.Fatal(err)
 	}
 	links("deleted type", doc.ID, 1)
-	if err := st.SetDocumentTags(ctx, alice, other.ID, []string{auto.ID}); err != nil {
+	if _, err := st.PatchDocument(ctx, alice, other.ID, store.DocumentPatch{SetTags: true, TagIDs: []string{auto.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	wantTitles(t, "two documents", find("Fahrzeug"), "doc", "other")
@@ -756,7 +756,7 @@ func TestSearchTextLeavesRoomForLinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetDocumentTags(ctx, alice, doc.ID, tags); err != nil {
+	if _, err := st.PatchDocument(ctx, alice, doc.ID, store.DocumentPatch{SetTags: true, TagIDs: tags}); err != nil {
 		t.Fatalf("2000 tags on a document with a large vector: %v", err)
 	}
 	var textSize, links int

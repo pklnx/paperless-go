@@ -174,7 +174,7 @@ func TestSearchAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.st.SetDocumentTags(ctx, f.alice, f.ids["Strom"], []string{tag.ID}); err != nil {
+	if _, err := f.st.PatchDocument(ctx, f.alice, f.ids["Strom"], store.DocumentPatch{SetTags: true, TagIDs: []string{tag.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	f.search([]string{"Strom"}, "tag", tag.ID)

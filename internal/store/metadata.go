@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -62,8 +61,11 @@ func (s *Store) CreateCorrespondent(ctx context.Context, sc Scope, in Correspond
 		return nil, err
 	}
 	var out *Correspondent
-	err = s.inTx(ctx, func(q *db.Queries) error {
-		r, err := q.CreateCorrespondent(ctx, db.CreateCorrespondentParams{
+	err = s.inTxWith(ctx, func(t *writeTx) error {
+		if err := t.lockOwners(ctx, owner); err != nil {
+			return err
+		}
+		r, err := t.q.CreateCorrespondent(ctx, db.CreateCorrespondentParams{
 			OwnerID: owner, Name: in.Name, MatchText: in.MatchText, MatchMode: orDefault(in.MatchMode, DefaultMatchMode),
 		})
 		if err != nil {
@@ -105,15 +107,24 @@ func (s *Store) ListCorrespondents(ctx context.Context, sc Scope) ([]*Correspond
 	return out, nil
 }
 
-// UpdateCorrespondent replaces a correspondent's fields.
+// UpdateCorrespondent replaces a correspondent's fields, under the owner's
+// write lock.
 func (s *Store) UpdateCorrespondent(ctx context.Context, sc Scope, id string, in CorrespondentInput) (*Correspondent, error) {
 	u, ok := parseID(id)
 	if !ok {
 		return nil, ErrNotFound
 	}
-	r, err := s.q.UpdateCorrespondent(ctx, db.UpdateCorrespondentParams{
-		ID: u, Owner: sc.owner(), Name: in.Name, MatchText: in.MatchText,
-		MatchMode: orDefault(in.MatchMode, DefaultMatchMode),
+	var r db.Correspondent
+	err := s.inOwnerTx(ctx, sc, u, kindCorrespondent, func(t *writeTx) error {
+		var err error
+		r, err = t.q.UpdateCorrespondent(ctx, db.UpdateCorrespondentParams{
+			ID: u, Owner: sc.owner(), Name: in.Name, MatchText: in.MatchText,
+			MatchMode: orDefault(in.MatchMode, DefaultMatchMode),
+		})
+		if err != nil {
+			return err
+		}
+		return t.holds(r.OwnerID)
 	})
 	if err != nil {
 		return nil, mapErr(err)
@@ -122,34 +133,25 @@ func (s *Store) UpdateCorrespondent(ctx context.Context, sc Scope, id string, in
 }
 
 // DeleteCorrespondent removes a correspondent, with the audit entry of
-// ctx; its documents keep existing without one. It locks the row, then
-// its documents in id order, the order every writer linking documents
-// takes (architecture.md, "Lock order"); a deadlock all the same (a writer
-// outside that order) is retried (see retryDeadlock).
+// ctx; its documents keep existing without one. It reads the owner, takes
+// the owner's write lock (locking.go), then deletes; the SET NULL on the
+// documents and the search triggers run under that lock.
 func (s *Store) DeleteCorrespondent(ctx context.Context, sc Scope, id string) error {
 	u, ok := parseID(id)
 	if !ok {
 		return ErrNotFound
 	}
-	return mapErr(s.retryDeadlock(func() error {
-		return s.inTx(ctx, func(q *db.Queries) error {
-			// The lock order of every metadata delete (architecture.md,
-			// "Lock order"): the row, then its documents in id order, then
-			// the DELETE, whose SET NULL touches only documents held here.
-			if _, err := q.LockCorrespondentForDelete(ctx, db.LockCorrespondentForDeleteParams{ID: u, Owner: sc.owner()}); err != nil {
-				return err
-			}
-			if err := q.LockCorrespondentDocuments(ctx, u); err != nil {
-				return err
-			}
-			afterLock(ctx)
-			r, err := q.DeleteCorrespondent(ctx, db.DeleteCorrespondentParams{ID: u, Owner: sc.owner()})
-			if err != nil {
-				return err
-			}
-			auditRow(ctx, sc, TargetCorrespondent, idString(r.ID), r.Name, r.OwnerID)
-			return nil
-		})
+	return mapErr(s.inOwnerTx(ctx, sc, u, kindCorrespondent, func(t *writeTx) error {
+		afterLock(ctx)
+		r, err := t.q.DeleteCorrespondent(ctx, db.DeleteCorrespondentParams{ID: u, Owner: sc.owner()})
+		if err != nil {
+			return err
+		}
+		if err := t.holds(r.OwnerID); err != nil {
+			return err
+		}
+		auditRow(ctx, sc, TargetCorrespondent, idString(r.ID), r.Name, r.OwnerID)
+		return nil
 	}))
 }
 
@@ -192,8 +194,11 @@ func (s *Store) CreateDocumentType(ctx context.Context, sc Scope, in DocumentTyp
 		return nil, err
 	}
 	var out *DocumentType
-	err = s.inTx(ctx, func(q *db.Queries) error {
-		r, err := q.CreateDocumentType(ctx, db.CreateDocumentTypeParams{
+	err = s.inTxWith(ctx, func(t *writeTx) error {
+		if err := t.lockOwners(ctx, owner); err != nil {
+			return err
+		}
+		r, err := t.q.CreateDocumentType(ctx, db.CreateDocumentTypeParams{
 			OwnerID: owner, Name: in.Name, Symbol: orDefault(in.Symbol, DefaultDocumentTypeSymbol),
 			MatchText: in.MatchText, MatchMode: orDefault(in.MatchMode, DefaultMatchMode),
 		})
@@ -236,15 +241,24 @@ func (s *Store) ListDocumentTypes(ctx context.Context, sc Scope) ([]*DocumentTyp
 	return out, nil
 }
 
-// UpdateDocumentType replaces a document type's fields.
+// UpdateDocumentType replaces a document type's fields, under the owner's
+// write lock.
 func (s *Store) UpdateDocumentType(ctx context.Context, sc Scope, id string, in DocumentTypeInput) (*DocumentType, error) {
 	u, ok := parseID(id)
 	if !ok {
 		return nil, ErrNotFound
 	}
-	r, err := s.q.UpdateDocumentType(ctx, db.UpdateDocumentTypeParams{
-		ID: u, Owner: sc.owner(), Name: in.Name, Symbol: orDefault(in.Symbol, DefaultDocumentTypeSymbol),
-		MatchText: in.MatchText, MatchMode: orDefault(in.MatchMode, DefaultMatchMode),
+	var r db.DocumentType
+	err := s.inOwnerTx(ctx, sc, u, kindDocumentType, func(t *writeTx) error {
+		var err error
+		r, err = t.q.UpdateDocumentType(ctx, db.UpdateDocumentTypeParams{
+			ID: u, Owner: sc.owner(), Name: in.Name, Symbol: orDefault(in.Symbol, DefaultDocumentTypeSymbol),
+			MatchText: in.MatchText, MatchMode: orDefault(in.MatchMode, DefaultMatchMode),
+		})
+		if err != nil {
+			return err
+		}
+		return t.holds(r.OwnerID)
 	})
 	if err != nil {
 		return nil, mapErr(err)
@@ -253,32 +267,24 @@ func (s *Store) UpdateDocumentType(ctx context.Context, sc Scope, id string, in 
 }
 
 // DeleteDocumentType removes a document type, with the audit entry of
-// ctx; its documents keep existing without one. It locks the row, then
-// its documents in id order, the order every writer linking documents
-// takes (architecture.md, "Lock order"); a deadlock all the same (a writer
-// outside that order) is retried (see retryDeadlock).
+// ctx; its documents keep existing without one. It locks as
+// DeleteCorrespondent.
 func (s *Store) DeleteDocumentType(ctx context.Context, sc Scope, id string) error {
 	u, ok := parseID(id)
 	if !ok {
 		return ErrNotFound
 	}
-	return mapErr(s.retryDeadlock(func() error {
-		return s.inTx(ctx, func(q *db.Queries) error {
-			// The lock order of DeleteCorrespondent.
-			if _, err := q.LockDocumentTypeForDelete(ctx, db.LockDocumentTypeForDeleteParams{ID: u, Owner: sc.owner()}); err != nil {
-				return err
-			}
-			if err := q.LockDocumentTypeDocuments(ctx, u); err != nil {
-				return err
-			}
-			afterLock(ctx)
-			r, err := q.DeleteDocumentType(ctx, db.DeleteDocumentTypeParams{ID: u, Owner: sc.owner()})
-			if err != nil {
-				return err
-			}
-			auditRow(ctx, sc, TargetDocumentType, idString(r.ID), r.Name, r.OwnerID)
-			return nil
-		})
+	return mapErr(s.inOwnerTx(ctx, sc, u, kindDocumentType, func(t *writeTx) error {
+		afterLock(ctx)
+		r, err := t.q.DeleteDocumentType(ctx, db.DeleteDocumentTypeParams{ID: u, Owner: sc.owner()})
+		if err != nil {
+			return err
+		}
+		if err := t.holds(r.OwnerID); err != nil {
+			return err
+		}
+		auditRow(ctx, sc, TargetDocumentType, idString(r.ID), r.Name, r.OwnerID)
+		return nil
 	}))
 }
 
@@ -331,8 +337,11 @@ func (s *Store) CreateTag(ctx context.Context, sc Scope, in TagInput) (*Tag, err
 		return nil, err
 	}
 	var out *Tag
-	err = s.inTx(ctx, func(q *db.Queries) error {
-		r, err := q.CreateTag(ctx, db.CreateTagParams{
+	err = s.inTxWith(ctx, func(t *writeTx) error {
+		if err := t.lockOwners(ctx, owner); err != nil {
+			return err
+		}
+		r, err := t.q.CreateTag(ctx, db.CreateTagParams{
 			OwnerID: owner, Name: in.Name, ColorHex: orDefault(in.ColorHex, DefaultTagColor),
 			Symbol: orDefault(in.Symbol, DefaultTagSymbol), ParentID: parent,
 			MatchText: in.MatchText, MatchMode: orDefault(in.MatchMode, DefaultMatchMode),
@@ -378,7 +387,7 @@ func (s *Store) ListTags(ctx context.Context, sc Scope) ([]*Tag, error) {
 
 // UpdateTag replaces a tag's fields, including its parent. A parent that
 // would make the tag its own ancestor gives ErrTagCycle; a parent of another
-// owner gives ErrOwnerMismatch.
+// owner gives ErrOwnerMismatch. It runs under the owner's write lock.
 func (s *Store) UpdateTag(ctx context.Context, sc Scope, id string, in TagInput) (*Tag, error) {
 	u, ok := parseID(id)
 	if !ok {
@@ -388,10 +397,18 @@ func (s *Store) UpdateTag(ctx context.Context, sc Scope, id string, in TagInput)
 	if err != nil {
 		return nil, err
 	}
-	r, err := s.q.UpdateTag(ctx, db.UpdateTagParams{
-		ID: u, Owner: sc.owner(), Name: in.Name, ColorHex: orDefault(in.ColorHex, DefaultTagColor),
-		Symbol: orDefault(in.Symbol, DefaultTagSymbol), ParentID: parent,
-		MatchText: in.MatchText, MatchMode: orDefault(in.MatchMode, DefaultMatchMode),
+	var r db.Tag
+	err = s.inOwnerTx(ctx, sc, u, kindTag, func(t *writeTx) error {
+		var err error
+		r, err = t.q.UpdateTag(ctx, db.UpdateTagParams{
+			ID: u, Owner: sc.owner(), Name: in.Name, ColorHex: orDefault(in.ColorHex, DefaultTagColor),
+			Symbol: orDefault(in.Symbol, DefaultTagSymbol), ParentID: parent,
+			MatchText: in.MatchText, MatchMode: orDefault(in.MatchMode, DefaultMatchMode),
+		})
+		if err != nil {
+			return err
+		}
+		return t.holds(r.OwnerID)
 	})
 	if err != nil {
 		return nil, mapErr(err)
@@ -402,38 +419,25 @@ func (s *Store) UpdateTag(ctx context.Context, sc Scope, id string, in TagInput)
 // DeleteTag removes a tag, with the audit entry of ctx. Its children
 // become root tags and its documents lose the tag. When a child would then
 // collide with a root tag of the same name, nothing changes and the error
-// is a *TagNameConflictError (ErrTagNameConflict). It locks the tag, its
-// direct children, then its documents in id order (architecture.md, "Lock
-// order"); a deadlock all the same is retried (see retryDeadlock).
+// is a *TagNameConflictError (ErrTagNameConflict). It locks as
+// DeleteCorrespondent; the SET NULL on the children, the cascade to
+// document_tags and its search trigger run under the owner's lock.
 func (s *Store) DeleteTag(ctx context.Context, sc Scope, id string) error {
 	u, ok := parseID(id)
 	if !ok {
 		return ErrNotFound
 	}
-	err := s.retryDeadlock(func() error {
-		return s.inTx(ctx, func(q *db.Queries) error {
-			// The lock order of DeleteCorrespondent, with the tag's direct
-			// children (its SET NULL updates them) between the tag and its
-			// documents: a child's delete holds the child and then waits
-			// only for documents, so this one waits for it before it holds
-			// any.
-			if _, err := q.LockTagForDelete(ctx, db.LockTagForDeleteParams{ID: u, Owner: sc.owner()}); err != nil {
-				return err
-			}
-			if err := q.LockTagChildren(ctx, u); err != nil {
-				return err
-			}
-			if err := q.LockTagDocuments(ctx, u); err != nil {
-				return err
-			}
-			afterLock(ctx)
-			r, err := q.DeleteTag(ctx, db.DeleteTagParams{ID: u, Owner: sc.owner()})
-			if err != nil {
-				return err
-			}
-			auditRow(ctx, sc, TargetTag, idString(r.ID), r.Name, r.OwnerID)
-			return nil
-		})
+	err := s.inOwnerTx(ctx, sc, u, kindTag, func(t *writeTx) error {
+		afterLock(ctx)
+		r, err := t.q.DeleteTag(ctx, db.DeleteTagParams{ID: u, Owner: sc.owner()})
+		if err != nil {
+			return err
+		}
+		if err := t.holds(r.OwnerID); err != nil {
+			return err
+		}
+		auditRow(ctx, sc, TargetTag, idString(r.ID), r.Name, r.OwnerID)
+		return nil
 	})
 	if isUniqueViolation(err, "tags_owner_parent_name_key") {
 		// The delete rolled back, so the colliding child is still a child.
@@ -446,22 +450,37 @@ func (s *Store) DeleteTag(ctx context.Context, sc Scope, id string) error {
 	return mapErr(err)
 }
 
-// deadlockAttempts is how often retryDeadlock runs a transaction that
-// PostgreSQL aborted as a deadlock victim.
-const deadlockAttempts = 3
+// Kinds of metadata rows, for inOwnerTx.
+const (
+	kindCorrespondent = iota
+	kindDocumentType
+	kindTag
+)
 
-// retryDeadlock runs fn, a whole transaction, again when PostgreSQL aborted
-// it as the victim of a deadlock (40P01), up to deadlockAttempts times in
-// all; then the error maps to ErrRetry. Nothing of an aborted attempt was
-// written, its audit entry neither, so the next attempt writes it.
-func (s *Store) retryDeadlock(fn func() error) error {
-	var err error
-	for range deadlockAttempts {
-		if err = fn(); !errors.Is(mapErr(err), ErrRetry) {
+// inOwnerTx runs fn in a transaction that first reads the owner of the
+// metadata row id of kind in the scope (ErrNotFound outside it) and takes
+// that owner's write lock (locking.go). fn checks the owner of the row it
+// locks or writes with t.holds.
+func (s *Store) inOwnerTx(ctx context.Context, sc Scope, id pgtype.UUID, kind int, fn func(*writeTx) error) error {
+	return s.inTxWith(ctx, func(t *writeTx) error {
+		var owner int64
+		var err error
+		switch kind {
+		case kindCorrespondent:
+			owner, err = t.q.CorrespondentOwner(ctx, db.CorrespondentOwnerParams{ID: id, Owner: sc.owner()})
+		case kindDocumentType:
+			owner, err = t.q.DocumentTypeOwner(ctx, db.DocumentTypeOwnerParams{ID: id, Owner: sc.owner()})
+		default:
+			owner, err = t.q.TagOwner(ctx, db.TagOwnerParams{ID: id, Owner: sc.owner()})
+		}
+		if err != nil {
 			return err
 		}
-	}
-	return err
+		if err := t.lockOwners(ctx, owner); err != nil {
+			return err
+		}
+		return fn(t)
+	})
 }
 
 // creatorFor returns the owner of a new row: the scope's user for 0 or
@@ -505,9 +524,9 @@ func deleted(n int64, err error) error {
 	return nil
 }
 
-// afterLockKey carries a test seam: a function a patch or a metadata
-// delete calls with the rows locked, before it writes (see
-// export_test.go).
+// afterLockKey carries a test seam: a function a patch, a bulk change or
+// a metadata delete calls with the owner lock and its row locks held,
+// before it writes (see export_test.go).
 type afterLockKey struct{}
 
 func afterLock(ctx context.Context) {
@@ -524,17 +543,21 @@ type CorrespondentPatch struct {
 
 // PatchCorrespondent changes only the fields set in p, with the audit entry
 // of ctx (its target and, on a rename, oldName). The row is read and
-// written in one transaction under a row lock, so a concurrent change of
-// another field is never lost.
+// written in one transaction under the owner's write lock and a row lock,
+// so a concurrent change of another field is never lost.
 func (s *Store) PatchCorrespondent(ctx context.Context, sc Scope, id string, p CorrespondentPatch) (*Correspondent, error) {
 	u, ok := parseID(id)
 	if !ok {
 		return nil, ErrNotFound
 	}
 	var out *Correspondent
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inOwnerTx(ctx, sc, u, kindCorrespondent, func(t *writeTx) error {
+		q := t.q
 		old, err := q.LockCorrespondent(ctx, db.LockCorrespondentParams{ID: u, Owner: sc.owner()})
 		if err != nil {
+			return err
+		}
+		if err := t.holds(old.OwnerID); err != nil {
 			return err
 		}
 		afterLock(ctx)
@@ -571,9 +594,13 @@ func (s *Store) PatchDocumentType(ctx context.Context, sc Scope, id string, p Do
 		return nil, ErrNotFound
 	}
 	var out *DocumentType
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inOwnerTx(ctx, sc, u, kindDocumentType, func(t *writeTx) error {
+		q := t.q
 		old, err := q.LockDocumentType(ctx, db.LockDocumentTypeParams{ID: u, Owner: sc.owner()})
 		if err != nil {
+			return err
+		}
+		if err := t.holds(old.OwnerID); err != nil {
 			return err
 		}
 		afterLock(ctx)
@@ -622,9 +649,13 @@ func (s *Store) PatchTag(ctx context.Context, sc Scope, id string, p TagPatch) (
 		}
 	}
 	var out *Tag
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inOwnerTx(ctx, sc, u, kindTag, func(t *writeTx) error {
+		q := t.q
 		old, err := q.LockTag(ctx, db.LockTagParams{ID: u, Owner: sc.owner()})
 		if err != nil {
+			return err
+		}
+		if err := t.holds(old.OwnerID); err != nil {
 			return err
 		}
 		afterLock(ctx)

@@ -52,9 +52,11 @@ var (
 	ErrInvalid = errors.New("store: invalid value")
 
 	// ErrRetry means PostgreSQL aborted the change because it deadlocked
-	// with a concurrent one (SQLSTATE 40P01), for example a tag's delete
-	// and a change of a document's tags. Nothing was written; the same call
-	// can be tried again.
+	// with a concurrent one (SQLSTATE 40P01). Nothing was written; the
+	// same call can be tried again. Store writers of documents, tags and
+	// the other owner tables do not deadlock with each other (they take
+	// the owner's write lock first, locking.go), so this is the net for
+	// SQL outside the store and for deadlocks among jobs-only writers.
 	ErrRetry = errors.New("store: concurrent change, try again")
 
 	// ErrUnknownUser means the owner of a new row does not exist (any

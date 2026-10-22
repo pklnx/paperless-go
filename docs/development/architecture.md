@@ -224,14 +224,17 @@ document; only a document's own link changes touch its row.
 **Concurrency.** `documents_search_links_vector` reads `document_tags` and
 is `VOLATILE` (plpgsql) on purpose: each statement takes a fresh snapshot,
 so a trigger that waited for the document's row lock sees tags committed
-meanwhile. Every writer of `document_tags` locks the document row first
-(`SetDocumentTags` through `LockDocument`; the bulk edit (#7) and automatic
-tagging must do the same), so two rebuilds of one document never interleave. A tag's delete locks the tag's documents before its cascade
-reaches their `document_tags` rows (see Lock order below), so its trigger
-only updates documents the delete already holds; this replaces the order
-the comments in `00011_search.sql` describe. `document_tags` rows are never
-updated, so there is no `UPDATE` trigger. Down drops `unaccent` only when the current user
-owns it and nothing outside the extension uses it.
+meanwhile. Every writer of `document_tags` holds the owner's write lock
+(Write locking, below) and, except a tag's delete, locks the document row
+first (`PatchDocument` through `LockDocument`, the bulk edit through
+`LockDocuments`); automatic tagging must do the same, so two rebuilds of
+one document never interleave. A tag's delete cascades to its
+`document_tags` rows under the owner's write lock, so its trigger only
+updates documents no other store writer touches meanwhile; this replaces
+the order the comments in `00011_search.sql` describe. `document_tags`
+rows are never updated, so there is no `UPDATE` trigger. Down drops
+`unaccent` only when the current user owns it and nothing outside the
+extension uses it.
 
 **Reads.** No query reads the vectors back: `GetDocument` and
 `ListDocuments` list their columns instead of `d.*`.
@@ -298,59 +301,122 @@ fragments of up to 25 words. It tries `german` first, then `english`
 marks a match. `ts_headline` leaves out what its parser takes for HTML
 tags.
 
-A deadlock (`40P01`, see Concurrency) maps to `store.ErrRetry`; the call
-can be repeated.
+**Write locking** (#102). Every store transaction that writes
+`documents`, `document_tags`, `tags`, `correspondents` or `document_types`
+first takes the per-owner, transaction-level advisory lock of each owner
+whose rows it writes; a transaction over several owners (an admin's bulk
+change across owners) takes them in ascending owner id. Every row of these
+five tables belongs to exactly one owner, `owner_id` is never updated, and
+every link between them goes through a composite `(owner_id, …)` foreign
+key, so a foreign-key check, a cascade or a `SET NULL` never reaches
+another owner's row. All writes of one owner therefore serialise, no wait
+between store writers can form a cycle, and deadlocks between them are
+excluded by construction. This replaces the row-lock order of #99/#103
+(key shares before the documents, deletes locking their documents
+first) and its retry loop.
 
-**Lock order** (#99). Every writer that links a document to metadata
-takes those rows first; the deletes lock the row, then its documents in
-id order. In detail:
-
-- **Linkers** (`PatchDocument`, `BulkUpdateDocuments`) start their
-  transaction with `lockLinkTargets`: `FOR KEY SHARE` on each tag to add
-  or set and on a correspondent or type that is set (the lock the
-  foreign-key check would take later), then they lock the documents in id
-  order (`LockDocument`, `LockDocuments`). Unlinking (removing a tag,
-  clearing a field) takes no metadata lock. The key share is taken by ID
-  in any owner's scope; nothing is read, and ownership is still decided by
-  `CountOwnedTags` and the foreign keys. A row deleted meanwhile is skipped
-  (READ COMMITTED rechecks it after the wait) and the link then fails with
-  `owner_mismatch` as before.
-- **Deletes** (`DeleteTag`, `DeleteCorrespondent`, `DeleteDocumentType`)
-  lock the row `FOR UPDATE` (`Lock*ForDelete`; it waits for linkers that
-  hold a key share and keeps new links out), a tag also its direct
-  children (`LockTagChildren`, `FOR NO KEY UPDATE`; its `SET NULL
-  (parent_id)` updates them), then the linked documents in id order
-  (`LockTagDocuments`, `Lock*Documents`, `FOR NO KEY UPDATE`), and only
-  then run the `DELETE`, whose cascade, `SET NULL` and search triggers
-  touch only rows the transaction holds.
-- **Why no cycle is left.** Key shares never conflict with each other or
-  with `FOR NO KEY UPDATE`; a linker waits for a delete only while it
-  takes its key shares and holds no documents. A delete waits for a
-  linker at its row lock, before it holds any documents. Two deletes hold
-  one row each, a tag delete also its children, then wait only for
-  documents in id order; a child's delete never waits for its parent, so a
-  parent's delete that waits for a child holds no documents yet.
-  `PatchCorrespondent/Type/Tag` (`FOR NO KEY UPDATE`, no document) are
-  compatible with the key shares and meet a delete only at its row lock.
-  `DeleteDocument`, the job writers and `CreateDocument` (a new document
-  is invisible to the delete; its foreign-key check either waits for the
-  delete and fails with `owner_mismatch`, or the delete waits for it) need
-  no change.
-- `UpdateDocument` and `SetDocumentTags` (no caller outside the store
-  tests) still link in the old order; automatic tagging and any new
-  linker must follow this rule. `retryDeadlock` stays on all of them as a
-  safety net. The tests (`TestBulkUpdateNoDeadlockWithDeleteTag`,
-  `TestBulkAddTagNoDeadlockWithDeleteTag`,
-  `TestBulkSetLinkNoDeadlockWithDelete`,
-  `TestPatchDocumentNoDeadlockWithDelete`,
-  `TestMetadataDeleteLocksDocumentsFirst`,
-  `TestDeleteParentAndChildTagNoDeadlock`) hold one side after its locks
-  (`WithAfterLock`), wait for the other in `pg_stat_activity`, and give
-  the side that would lose a deadlock a 10 ms `deadlock_timeout` (the
-  other an hour), so one attempt each proves there was no cycle.
-- Cost: a delete locks the same documents its cascade locked before, held
-  to commit either way, with one more indexed pass; `DeleteTag` of a tag
-  on 5 000 documents took a median of 313 ms before and after.
+- **The key.** `hashtextextended('paperless-go:tags:' || owner_id::text,
+  0)` with `pg_advisory_xact_lock` (`LockOwner` in `queries/locking.sql`;
+  the prefix is `store.ownerLockPrefix`). It is the key the
+  `tags_no_cycle` trigger already takes (`00002_documents.sql`), so the
+  trigger's lock is folded in without a migration: inside a store writer
+  the trigger re-acquires a lock its transaction holds (transaction-level
+  advisory locks are re-entrant; `pg_locks` shows one row), and SQL
+  outside the store keeps the trigger's own protection. It reads "tags"
+  because the trigger came first; `TestOwnerLockMatchesTrigger` breaks if
+  either side changes. The other advisory locks in the code base
+  (`hashtext('audit_log_ensure_partitions')`,
+  `hashtext('webauthn_login_ceremonies')`, goose's session lock) share the
+  single-`bigint` key space; a collision has odds of about 2⁻³² and would
+  only cause a false wait, never a cycle, since none of their holders
+  holds an owner lock.
+- **The helper.** `writeTx.lockOwners(ctx, owners...)`
+  (`internal/store/locking.go`) dedupes and sorts the owners and takes one
+  `LockOwner` per owner (a Go loop: SQL does not promise the order in
+  which a function runs over rows). It runs once per transaction (a second
+  call is an internal error, so composed helpers cannot break the order)
+  and never with an empty list: a writer answers an empty selection
+  before (`ErrNotFound` for IDs that are all outside the scope, the
+  empty-match answer of a bulk change by search). The lock is released at
+  commit or rollback, also on an error or a cancelled context, so a pool
+  connection never carries it into the next request.
+- **Owners the writer does not know.** A writer of an existing row reads
+  its owner in the scope first, without a lock (`DocumentOwner`,
+  `DocumentOwners`, `TagOwner`, `CorrespondentOwner`,
+  `DocumentTypeOwner`; out of scope stays `ErrNotFound`), takes the lock,
+  then locks or writes the row and checks that the row's owner is one it
+  locked (`writeTx.holds`; owners never change, so a mismatch is an
+  internal error, never a silent write under the wrong lock). A row
+  deleted between the read and the lock gives `ErrNotFound` from the row
+  lock as before. A bulk change by search locks its one owner before the
+  match; in an admin's scope over all owners it locks the owners of the
+  first match, whose locked documents are a subset of it (the recheck
+  only removes).
+- **Every writer:** `CreateDocument` (upload, consume folder, import),
+  `DeleteDocument`, `PatchDocument`, `BulkUpdateDocuments`,
+  `Create/Update/Patch/Delete` of tags, correspondents and document
+  types, and `CompleteJob` (OCR results; it reads the document's owner
+  without a scope). The triggers (`tags_no_cycle`, the `00011` search
+  triggers), the cascades to `document_tags` and `jobs` and the `SET
+  NULL` of `documents.correspondent_id`/`document_type_id` and
+  `tags.parent_id` run inside the writer's transaction, under its lock.
+- **Not writers of the five tables** take no owner lock: the jobs writers
+  (`EnqueueDocument`, `Reprocess`, `ClaimJob`, the lease updates,
+  `ReapJobs`, `DeleteDoneJobs`), deadlines, users (`DeleteUser` refuses
+  while the user owns rows), sessions, API keys, passkeys, saved views and
+  the audit log. A jobs writer never waits for an advisory lock, and the
+  owner-lock holders it can wait for (`CompleteJob`, `CreateDocument`,
+  through the jobs unique index or a document's key share) never wait for
+  a jobs writer, so no cycle closes through them. Two jobs writers can
+  still deadlock with each other (two concurrent "reprocess all" runs on
+  the jobs unique index): the store as a whole is not deadlock-free, only
+  its writers of the five tables.
+- **No slow work under the lock.** A store transaction does no I/O, no
+  network and no blob-store access: uploads write the blob and detect the
+  type before `CreateDocument`, OCR runs before `CompleteJob`, the audit
+  user agent is looked up before the transaction begins. The longest
+  holder is a bulk change over 5 000 documents.
+- **What the row locks still do.** `LockDocument`/`LockDocuments` (`FOR
+  NO KEY UPDATE`) return the owner, `modified_at` and the IDs in scope,
+  and keep a document safe against SQL outside the store; `LockTag`,
+  `LockCorrespondent`, `LockDocumentType` make the patches'
+  read-modify-write safe; the bulk change's recheck after the lock
+  (`stillMatching`) stays for an admin's change over all owners and SQL
+  outside the store. No global row-lock order is needed any more.
+- **The guard.** Every query of the store runs through `guardedDB`: the
+  pool in `Open`, each transaction in `inTxWith` (`db.New` on the guarded
+  transaction, never `WithTx`, which would put the raw transaction back)
+  and the relevance search's read-only transaction (`readTx`). Before
+  each statement it decides whether the statement writes or row-locks
+  one of the five tables: a sqlc query by its name in `writerQueries`,
+  any other SQL by the same regular expression (`writesOwnerTables`), so
+  unnamed SQL fails closed. Such a statement outside a transaction, or in
+  one before `lockOwners`, returns `errUnlockedWrite` (`500`). Three
+  tests keep it complete: `TestWriterQueriesComplete` (the set equals the
+  queries in `queries/*.sql` that write or row-lock the five tables),
+  `TestEveryWriterLocksItsOwner` (a row per writer and admin variant with
+  the owners it must lock, ascending, before its first guarded write; a
+  reflection check fails for a new `*Store` method that is neither in the
+  table nor on the list of non-writers) and
+  `TestTransactionsOnlyThroughTheGuard` (a static check that `Begin`,
+  `pgx.BeginFunc`, `WithTx` and `db.New` appear only in the guarded
+  constructors; `collation.go`'s `REINDEX` is allowed).
+- **`ErrRetry` stays** (`40P01`, `503` with `Retry-After: 1`) as the net
+  for SQL outside the store and for deadlocks among jobs-only writers;
+  store writers of the five tables no longer retry.
+- **Raw SQL and future code outside the store** (migrations, a data
+  transfer between users) are not covered by the guard. The data transfer
+  of #21 must lock both owners, ascending.
+- **Tests.** The regression tests of the four rounds of deadlock holes
+  (#84 opposite tag moves, the #99 pairs, review A's three-party
+  `PatchTag`, review B's foreign-key re-check) hold one side after its
+  locks (`WithAfterLock`), wait for the other at the advisory lock in
+  `pg_stat_activity`, and give the side that would lose a deadlock a
+  10 ms `deadlock_timeout` (the other an hour). With
+  `store.DisableOwnerLock` (test-only; it also turns the guard off) the
+  same tests deadlock (`ErrRetry`); with the lock they pass.
+- **Cost** (the load test of `scripts/loadtest`, before and after on one
+  host): MEASURED_COST
 
 ## Blob durability
 
@@ -778,8 +844,8 @@ another user's document answers `404` and an admin sees all.
   the document's `modifiedAt` exactly as `GET` or the last `PATCH`
   answered it (RFC 3339 with microseconds; the UI keeps the string and
   never passes it through a `Date`, which has milliseconds only). One
-  transaction takes the key shares of the rows
-  it links (Lock order, under Search index), locks the row (`LockDocument`,
+  transaction reads the document's owner, takes the owner's write lock
+  (Write locking, under Search index), locks the row (`LockDocument`,
   `FOR NO KEY UPDATE`: no key column changes, so a foreign-key check of a
   row referencing the document, such as a new job, does not wait; it also
   returns `modified_at`), checks the precondition after the lock (`404`
@@ -796,7 +862,8 @@ another user's document answers `404` and an admin sees all.
   `invalid_asn`, `404` outside the scope, `409` `asn_taken` with
   `documentId` of the document that has the number, `409`
   `document_changed` with `modifiedAt`, `503` without the
-  audit log or after 3 deadlocks (`Retry-After: 1`). Without
+  audit log or after a deadlock with SQL outside the store (`Retry-After:
+  1`). Without
   `expectedModifiedAt` a change goes through as before (API clients that
   set one field need not read first); the UI always sends it, and on
   `document_changed` loads the document again and keeps the user's edits
@@ -808,8 +875,8 @@ another user's document answers `404` and an admin sees all.
   interval '1 microsecond')`: `now()` is the transaction's start, so two
   writes in one transaction, in the same microsecond or after the clock
   stepped back would otherwise get the same value, and an equal value
-  must mean "unchanged since read". `UpdateDocument`, `TouchDocument`
-  (`SetDocumentTags`), `PatchDocument` and `BulkUpdateDocuments` use it;
+  must mean "unchanged since read". `PatchDocument` and
+  `BulkUpdateDocuments` use it;
   processing (`SetDocumentProcessed`) writes no such field and leaves
   `modified_at` alone, so OCR finishing causes no false conflict. A new
   writer (classification, an import into existing documents) must use the
@@ -887,14 +954,14 @@ another user's document answers `404` and an admin sees all.
   that left the match in that window makes them differ, so the change is
   `409` instead of changing the rest (`TestBulkUpdateByMatchRecheckedAfterLock`;
   without the recheck the locked set would still fit the fingerprint and
-  the document would be changed). `ErrMatchChanged` is no deadlock, so it
-  is not retried; an attempt retried after a deadlock compares again. Before its
-  documents the bulk change takes the key shares of the rows it links,
-  so it and a metadata delete lock in one order (see Lock order under
-  Search index); a deadlock all the same (a writer outside that order) is
-  retried as a whole (`retryDeadlock`, 3 attempts, then `503` with
-  `Retry-After: 1`), and a bulk change by search resolves its matches
-  again.
+  the document would be changed). Before its documents the bulk change
+  takes the write locks of their owners (Write locking, under Search
+  index): by IDs the owners of the IDs in the scope; by `match` in a
+  scope of one owner that owner, before the match, so in that case no
+  store writer can change the match before the documents are locked
+  (only SQL outside the store); in an admin's scope over all owners the
+  owners of the first match, after it. There is no retry: a deadlock
+  with SQL outside the store answers `503` with `Retry-After: 1`.
 
   **Audit.** One `document.bulk_update` per change (no target; `count`,
   `fields`, `selection` `ids` or `match`, `ids` of the changed documents,
@@ -932,20 +999,21 @@ answers `404` and an admin may change everyone's (the row keeps its owner).
 - **`PATCH`** changes only the fields sent: `name`, for tags also `color`
   and `parentId` (`null` makes a root tag). `matchText`, `matchMode` and
   `symbol` stay as stored; unknown fields and an empty patch answer `400`.
-  `store.Patch*` locks the row (`SELECT … FOR NO KEY UPDATE`), merges and
+  `store.Patch*` takes the owner's write lock (Write locking, under
+  Search index), locks the row (`SELECT … FOR NO KEY UPDATE`), merges and
   writes in one transaction, so a concurrent patch of another field is not
-  lost. The weaker mode lets foreign-key checks on the row (a new parent
-  tag, a document's tag) go on without waiting, so opposite tag moves
-  answer `409` `tag_cycle` instead of deadlocking.
+  lost. Opposite tag moves of one owner serialise at the owner's lock:
+  one succeeds, the other answers `409` `tag_cycle`.
   Only the fields sent are checked: a name of 1 to 128 characters after
   trimming, no control characters (Unicode Cc, also NUL; checked before
   trimming, so a trailing newline is refused) (`invalid_name`), a colour `#RRGGBB` (`invalid_color`); an
   imported name that is longer does not block a colour change.
 - **`DELETE`** answers `204`; documents keep everything else, a deleted
-  tag's children become root tags. The delete locks the row, a tag's
-  children, then the documents in id order (Lock order, under Search
-  index); a deadlock all the same (`40P01`) is retried up to 3 times
-  (`retryDeadlock`), then answers `503` with `Retry-After: 1`.
+  tag's children become root tags. The delete reads the row's owner,
+  takes the owner's write lock (Write locking, under Search index) and
+  deletes; the cascade, the `SET NULL` and the search triggers run under
+  that lock. A deadlock with SQL outside the store answers `503` with
+  `Retry-After: 1`; there is no retry.
 - **Errors** carry `error` and `code`: `409` `name_taken` (case-insensitive
   per owner, per parent for tags), `409` `tag_cycle`, `409`
   `tag_name_conflict` (a child would clash with a root tag on delete;

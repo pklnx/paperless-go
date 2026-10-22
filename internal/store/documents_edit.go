@@ -13,7 +13,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/pklnx/paperless-go/internal/search"
@@ -235,9 +234,8 @@ func (p DocumentPatch) validate() error {
 // when p.ExpectedModifiedAt is set and the document's modified_at is
 // another (checked after the lock, after ErrNotFound, before any write);
 // a *ValidationError (ErrInvalid) for refused text or nothing to change.
-// The key shares of the rows it links are
-// taken before the document's lock (lockLinkTargets). A deadlock with a
-// concurrent change is retried (see retryDeadlock), then ErrRetry.
+// It reads the document's owner in the scope, takes the owner's write
+// lock (locking.go), then locks the row.
 func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p DocumentPatch) (*Document, error) {
 	u, ok := parseID(id)
 	if !ok {
@@ -259,55 +257,57 @@ func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p Docume
 		return nil, err
 	}
 	var owner int64
-	err = s.retryDeadlock(func() error {
-		return s.inTx(ctx, func(q *db.Queries) error {
-			var linkTags []pgtype.UUID
-			if p.SetTags {
-				linkTags = tags
-			}
-			if err := lockLinkTargets(ctx, q, linkTags, p.SetCorrespondent, corr, p.SetDocumentType, typ); err != nil {
+	err = s.inTxWith(ctx, func(t *writeTx) error {
+		q := t.q
+		o, err := q.DocumentOwner(ctx, db.DocumentOwnerParams{ID: u, Owner: sc.owner()})
+		if err != nil {
+			return err
+		}
+		if err := t.lockOwners(ctx, o); err != nil {
+			return err
+		}
+		locked, err := q.LockDocument(ctx, db.LockDocumentParams{ID: u, Owner: sc.owner()})
+		if err != nil {
+			return err
+		}
+		if err := t.holds(locked.OwnerID); err != nil {
+			return err
+		}
+		owner = locked.OwnerID
+		afterLock(ctx)
+		if p.ExpectedModifiedAt != nil && !locked.ModifiedAt.Equal(*p.ExpectedModifiedAt) {
+			return &DocumentChangedError{ModifiedAt: locked.ModifiedAt}
+		}
+		n, err := q.PatchDocument(ctx, db.PatchDocumentParams{
+			ID: u, Title: p.Title, DocumentDate: p.DocumentDate, Notes: p.Notes,
+			IsFavorite: p.IsFavorite, IsInbox: p.IsInbox,
+			SetAsn: p.SetASN, ArchiveSerialNumber: p.ArchiveSerialNumber,
+			SetCorrespondent: p.SetCorrespondent, CorrespondentID: corr,
+			SetDocumentType: p.SetDocumentType, DocumentTypeID: typ,
+		})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		if p.SetTags {
+			if err := q.ClearDocumentTags(ctx, u); err != nil {
 				return err
 			}
-			locked, err := q.LockDocument(ctx, db.LockDocumentParams{ID: u, Owner: sc.owner()})
-			if err != nil {
-				return err
-			}
-			owner = locked.OwnerID
-			afterLock(ctx)
-			if p.ExpectedModifiedAt != nil && !locked.ModifiedAt.Equal(*p.ExpectedModifiedAt) {
-				return &DocumentChangedError{ModifiedAt: locked.ModifiedAt}
-			}
-			n, err := q.PatchDocument(ctx, db.PatchDocumentParams{
-				ID: u, Title: p.Title, DocumentDate: p.DocumentDate, Notes: p.Notes,
-				IsFavorite: p.IsFavorite, IsInbox: p.IsInbox,
-				SetAsn: p.SetASN, ArchiveSerialNumber: p.ArchiveSerialNumber,
-				SetCorrespondent: p.SetCorrespondent, CorrespondentID: corr,
-				SetDocumentType: p.SetDocumentType, DocumentTypeID: typ,
-			})
-			if err != nil {
-				return err
-			}
-			if n == 0 {
-				return ErrNotFound
-			}
-			if p.SetTags {
-				if err := q.ClearDocumentTags(ctx, u); err != nil {
+			if len(tags) > 0 {
+				if err := q.AddDocumentTags(ctx, db.AddDocumentTagsParams{OwnerID: owner, DocumentID: u, TagIds: tags}); err != nil {
 					return err
 				}
-				if len(tags) > 0 {
-					if err := q.AddDocumentTags(ctx, db.AddDocumentTagsParams{OwnerID: owner, DocumentID: u, TagIds: tags}); err != nil {
-						return err
-					}
-				}
 			}
-			if e := auditFrom(ctx); e != nil && e.TargetType == TargetDocument {
-				e.TargetID = idString(u)
-				if owner != sc.UserID {
-					e.Detail("ownerId", owner)
-				}
+		}
+		if e := auditFrom(ctx); e != nil && e.TargetType == TargetDocument {
+			e.TargetID = idString(u)
+			if owner != sc.UserID {
+				e.Detail("ownerId", owner)
 			}
-			return nil
-		})
+		}
+		return nil
 	})
 	if isUniqueViolation(err, "documents_owner_asn_key") {
 		taken := &ASNTakenError{}
@@ -441,7 +441,7 @@ func (s *Store) resolveMatch(ctx context.Context, sc Scope, q search.Query) (res
 // match runs the search of m on d: the matches in id order, at most
 // MaxBulkMatches+1, and the number of all of them. With only, a non-nil
 // list, it returns only matches among those IDs.
-func (s *Store) match(ctx context.Context, d db.DBTX, m resolvedMatch, only []pgtype.UUID) ([]db.MatchDocumentIDsRow, int, error) {
+func (s *Store) match(ctx context.Context, d guardedDB, m resolvedMatch, only []pgtype.UUID) ([]db.MatchDocumentIDsRow, int, error) {
 	if m.none {
 		return nil, 0, nil
 	}
@@ -476,7 +476,7 @@ func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelectio
 	if err != nil {
 		return BulkMatch{}, err
 	}
-	rows, total, err := s.match(ctx, s.pool, m, nil)
+	rows, total, err := s.match(ctx, s.g, m, nil)
 	if err != nil {
 		return BulkMatch{}, err
 	}
@@ -523,11 +523,16 @@ func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelectio
 // limit, so a set that grew past it is a *TooManyError);
 // ErrOwnerMismatch for a tag to add, a
 // correspondent or a type that is not the owner's (a tag to remove that
-// the documents do not have is no error). It takes the key shares of
-// the rows it links first (lockLinkTargets), so it and a metadata delete
-// lock in one order; a deadlock all the same is retried (see
-// retryDeadlock), then ErrRetry. A search that matches nothing changes
-// nothing and writes no audit entry when its dry run matched nothing too.
+// the documents do not have is no error). A search that matches nothing
+// changes nothing and writes no audit entry when its dry run matched
+// nothing too.
+//
+// Write lock (locking.go): the owners' write locks come first, in
+// ascending id. By IDs they are the owners of the IDs in the scope (read
+// before the lock; none means ErrNotFound); by search in a scope of one
+// owner that owner, before the match; by search in an admin's scope over
+// all owners the owners of the first match, before the documents are
+// locked. Every locked document's owner must be one of them.
 func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelection, c BulkChange, perDocument string) ([]string, error) {
 	if (sel.IDs == nil) == (sel.Match == nil) || (sel.Match != nil) == (sel.Fingerprint == "") {
 		return nil, invalid("selection")
@@ -592,105 +597,130 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 	}
 
 	var changed []string
-	err = s.retryDeadlock(func() error {
-		changed = nil
-		return s.inTxWith(ctx, func(tx pgx.Tx, q *db.Queries) error {
-			if err := lockLinkTargets(ctx, q, add, c.SetCorrespondent, corr, c.SetDocumentType, typ); err != nil {
-				return err
-			}
-			want := ids
-			if sel.Match != nil {
-				rows, total, err := s.match(ctx, tx, m, nil)
-				if err != nil {
+	err = s.inTxWith(ctx, func(t *writeTx) error {
+		q := t.q
+		want := ids
+		if sel.Match != nil {
+			// In a scope of one owner the lock comes first, so the
+			// match already sees that owner's documents as they will
+			// be changed.
+			if o := lsc.owner(); o != nil {
+				if err := t.lockOwners(ctx, *o); err != nil {
 					return err
 				}
-				if total > MaxBulkMatches {
-					return &TooManyError{Count: total, Limit: MaxBulkMatches}
-				}
-				if total == 0 {
-					return confirmMatch(sel.Fingerprint, nil)
-				}
-				want = make([]pgtype.UUID, len(rows))
-				for i, r := range rows {
-					want[i] = r.ID
-				}
 			}
-			beforeLock(ctx)
-			locked, err := q.LockDocuments(ctx, db.LockDocumentsParams{Ids: want, Owner: lsc.owner()})
+			rows, total, err := s.match(ctx, t.g, m, nil)
 			if err != nil {
 				return err
 			}
-			afterLock(ctx)
-			if sel.Match != nil {
-				// The match ran before the lock under READ COMMITTED: a
-				// concurrent change committed in between may have taken a
-				// document out of it. Run it again now that the documents
-				// are locked (the statement sees every change committed
-				// before the lock, and the lock keeps them as they are)
-				// and keep the locked ones that still match; a match
-				// deleted before the lock is left out too. Documents that
-				// match only now were not part of the selection.
-				locked, err = s.stillMatching(ctx, tx, m, locked)
-				if err != nil {
-					return err
-				}
-				// Only exactly the set the user confirmed is changed.
-				if err := confirmMatch(sel.Fingerprint, locked); err != nil {
-					return err
-				}
-			} else if len(locked) != len(want) {
-				// By IDs, every one must exist.
-				return ErrNotFound
+			if total > MaxBulkMatches {
+				return &TooManyError{Count: total, Limit: MaxBulkMatches}
 			}
-			if len(locked) == 0 {
-				return errNothingMatched
+			if total == 0 {
+				return confirmMatch(sel.Fingerprint, nil)
 			}
-			got := make([]pgtype.UUID, len(locked))
-			owners := map[int64]bool{}
-			for i, l := range locked {
-				got[i] = l.ID
-				owners[l.OwnerID] = true
+			want = make([]pgtype.UUID, len(rows))
+			owners := make([]int64, len(rows))
+			for i, r := range rows {
+				want[i], owners[i] = r.ID, r.OwnerID
 			}
-			if c.needsOneOwner() && len(owners) > 1 {
-				return ErrSeveralOwners
-			}
-			// Tags to add must be the owner's (the foreign key would also
-			// refuse them). Tags to remove need no check: a document
-			// links only its owner's tags, so another owner's tag, or one
-			// deleted meanwhile (a retry after a deadlock with its
-			// delete), is simply not there.
-			if len(add) > 0 {
-				n, err := q.CountOwnedTags(ctx, db.CountOwnedTagsParams{OwnerID: locked[0].OwnerID, Ids: add})
-				if err != nil {
-					return err
-				}
-				if n != int64(len(add)) {
-					return ErrOwnerMismatch
-				}
-			}
-			if len(remove) > 0 {
-				if err := q.BulkRemoveDocumentTags(ctx, db.BulkRemoveDocumentTagsParams{Ids: got, TagIds: remove}); err != nil {
+			beforeLock(ctx)
+			if lsc.owner() == nil {
+				if err := t.lockOwners(ctx, owners...); err != nil {
 					return err
 				}
 			}
-			if len(add) > 0 {
-				if err := q.BulkAddDocumentTags(ctx, db.BulkAddDocumentTagsParams{Ids: got, TagIds: add}); err != nil {
-					return err
-				}
-			}
-			if err := q.BulkUpdateDocuments(ctx, db.BulkUpdateDocumentsParams{
-				Ids: got, IsFavorite: c.IsFavorite, IsInbox: c.IsInbox,
-				SetCorrespondent: c.SetCorrespondent, CorrespondentID: corr,
-				SetDocumentType: c.SetDocumentType, DocumentTypeID: typ,
-			}); err != nil {
+		} else {
+			owners, err := q.DocumentOwners(ctx, db.DocumentOwnersParams{Ids: want, Owner: lsc.owner()})
+			if err != nil {
 				return err
 			}
-			for _, l := range locked {
-				changed = append(changed, idString(l.ID))
+			if len(owners) == 0 {
+				return ErrNotFound
 			}
-			auditBulk(ctx, sc.UserID, locked, perDocument)
-			return nil
-		})
+			beforeLock(ctx)
+			if err := t.lockOwners(ctx, owners...); err != nil {
+				return err
+			}
+		}
+		locked, err := q.LockDocuments(ctx, db.LockDocumentsParams{Ids: want, Owner: lsc.owner()})
+		if err != nil {
+			return err
+		}
+		afterLock(ctx)
+		if sel.Match != nil {
+			// The match ran before the documents were locked under READ
+			// COMMITTED. In an admin's scope over all owners it also ran
+			// before the owner locks, and SQL outside the store does not
+			// take them at all: a change committed in between may have
+			// taken a document out of it. Run it again now that the
+			// documents are locked (the statement sees every change
+			// committed before the lock, and the lock keeps them as they
+			// are) and keep the locked ones that still match; a match
+			// deleted before the lock is left out too. Documents that
+			// match only now were not part of the selection.
+			locked, err = s.stillMatching(ctx, t.g, m, locked)
+			if err != nil {
+				return err
+			}
+			// Only exactly the set the user confirmed is changed.
+			if err := confirmMatch(sel.Fingerprint, locked); err != nil {
+				return err
+			}
+		} else if len(locked) != len(want) {
+			// By IDs, every one must exist.
+			return ErrNotFound
+		}
+		if len(locked) == 0 {
+			return errNothingMatched
+		}
+		got := make([]pgtype.UUID, len(locked))
+		owners := map[int64]bool{}
+		for i, l := range locked {
+			got[i] = l.ID
+			owners[l.OwnerID] = true
+			if err := t.holds(l.OwnerID); err != nil {
+				return err
+			}
+		}
+		if c.needsOneOwner() && len(owners) > 1 {
+			return ErrSeveralOwners
+		}
+		// Tags to add must be the owner's (the foreign key would also
+		// refuse them). Tags to remove need no check: a document
+		// links only its owner's tags, so another owner's tag, or one
+		// deleted before the owner lock, is simply not there.
+		if len(add) > 0 {
+			n, err := q.CountOwnedTags(ctx, db.CountOwnedTagsParams{OwnerID: locked[0].OwnerID, Ids: add})
+			if err != nil {
+				return err
+			}
+			if n != int64(len(add)) {
+				return ErrOwnerMismatch
+			}
+		}
+		if len(remove) > 0 {
+			if err := q.BulkRemoveDocumentTags(ctx, db.BulkRemoveDocumentTagsParams{Ids: got, TagIds: remove}); err != nil {
+				return err
+			}
+		}
+		if len(add) > 0 {
+			if err := q.BulkAddDocumentTags(ctx, db.BulkAddDocumentTagsParams{Ids: got, TagIds: add}); err != nil {
+				return err
+			}
+		}
+		if err := q.BulkUpdateDocuments(ctx, db.BulkUpdateDocumentsParams{
+			Ids: got, IsFavorite: c.IsFavorite, IsInbox: c.IsInbox,
+			SetCorrespondent: c.SetCorrespondent, CorrespondentID: corr,
+			SetDocumentType: c.SetDocumentType, DocumentTypeID: typ,
+		}); err != nil {
+			return err
+		}
+		for _, l := range locked {
+			changed = append(changed, idString(l.ID))
+		}
+		auditBulk(ctx, sc.UserID, locked, perDocument)
+		return nil
 	})
 	if errors.Is(err, errNothingMatched) {
 		return []string{}, nil
@@ -699,35 +729,6 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 		return nil, mapErr(err)
 	}
 	return changed, nil
-}
-
-// lockLinkTargets takes a key share on each row a change links documents
-// to: tags to add (or to set), and a correspondent or type that is set.
-// It runs first in the transaction, before the documents are locked, so a
-// linker and a metadata delete (the row, then its documents) take their
-// locks in one order (architecture.md, "Lock order"); the foreign-key
-// check would take the same key share only after the documents. Unlinking
-// needs none. The rows are locked by ID in any owner's scope: nothing is
-// read, and ownership is still decided by CountOwnedTags and the foreign
-// keys. A row deleted meanwhile is skipped, and the link then fails with
-// ErrOwnerMismatch as before.
-func lockLinkTargets(ctx context.Context, q *db.Queries, tags []pgtype.UUID, setCorr bool, corr pgtype.UUID, setType bool, typ pgtype.UUID) error {
-	if len(tags) > 0 {
-		if err := q.KeyShareTags(ctx, tags); err != nil {
-			return err
-		}
-	}
-	if setCorr && corr.Valid {
-		if err := q.KeyShareCorrespondent(ctx, corr); err != nil {
-			return err
-		}
-	}
-	if setType && typ.Valid {
-		if err := q.KeyShareDocumentType(ctx, typ); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // beforeLockKey carries a test seam: a function each attempt of a bulk
@@ -749,7 +750,7 @@ var errNothingMatched = errors.New("store: nothing matched")
 // with the confirmed set's fingerprint: a *MatchChangedError when they
 // differ, errNothingMatched when both are empty, else nil. It runs inside
 // the transaction, so an error rolls everything back and no audit entry is
-// written; it is no deadlock, so retryDeadlock does not retry it.
+// written.
 func confirmMatch(fingerprint string, now []db.LockDocumentsRow) error {
 	ids := make([]pgtype.UUID, len(now))
 	for i, l := range now {
@@ -771,7 +772,7 @@ func confirmMatch(fingerprint string, now []db.LockDocumentsRow) error {
 // would then be left out without an error. Those new matches were not
 // part of the selection the caller confirmed, so they neither join it nor
 // make it fail (architecture.md, bulk "Locking").
-func (s *Store) stillMatching(ctx context.Context, tx pgx.Tx, m resolvedMatch, locked []db.LockDocumentsRow) ([]db.LockDocumentsRow, error) {
+func (s *Store) stillMatching(ctx context.Context, g guardedDB, m resolvedMatch, locked []db.LockDocumentsRow) ([]db.LockDocumentsRow, error) {
 	if len(locked) == 0 {
 		return locked, nil
 	}
@@ -779,7 +780,7 @@ func (s *Store) stillMatching(ctx context.Context, tx pgx.Tx, m resolvedMatch, l
 	for i, l := range locked {
 		only[i] = l.ID
 	}
-	rows, _, err := s.match(ctx, tx, m, only)
+	rows, _, err := s.match(ctx, g, m, only)
 	if err != nil {
 		return nil, err
 	}

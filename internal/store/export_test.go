@@ -35,8 +35,8 @@ func SearchFilterIDs(ctx context.Context, s *Store, sc Scope, q search.Query) (t
 // to rec before running it, so a test can EXPLAIN exactly what the store
 // runs.
 func RecordSearchSQL(s *Store, rec func(sql string, args []any)) {
-	s.searchDB = func(d db.DBTX) db.DBTX { return recorder{unnamedStatements{d}, rec} }
-	s.sq = db.New(s.searchDB(s.pool))
+	s.searchDB = func(d guardedDB) db.DBTX { return recorder{unnamedStatements{d}, rec} }
+	s.sq = db.New(s.searchDB(s.g))
 }
 
 type recorder struct {
@@ -68,19 +68,88 @@ func SetReindexLockTimeout(t *testing.T, d time.Duration) {
 }
 
 // WithAfterLock makes the next patch of a tag, correspondent, document
-// type or document, and each attempt of a bulk change of documents or of
-// a delete of a tag, correspondent or document type, call f with the rows
-// locked, before it writes (a delete: the row, a tag's children and the
-// linked documents, before the DELETE): a test holds the change there to
-// make a concurrent one wait for the lock, or counts the attempts.
+// type or document, a bulk change of documents and a delete of a tag,
+// correspondent or document type call f once it holds the owner's write
+// lock and its row locks, before it writes: a test holds the change there
+// to make a concurrent one wait for the lock.
 func WithAfterLock(ctx context.Context, f func()) context.Context {
 	return context.WithValue(ctx, afterLockKey{}, f)
 }
 
-// WithBeforeLock makes each attempt of a bulk change of documents call f
-// right before it locks the documents, by search after it ran the search:
-// a test holds it there to change a match concurrently, or to let a
-// concurrent transaction finish before a retry locks.
+// WithBeforeLock makes a bulk change of documents call f right before it
+// locks the documents: by search after the match (in a scope of one
+// owner already under that owner's write lock, in an admin's scope over
+// all owners before the owner locks), by IDs before the owner locks. A
+// test holds it there to change a match concurrently.
 func WithBeforeLock(ctx context.Context, f func()) context.Context {
 	return context.WithValue(ctx, beforeLockKey{}, f)
+}
+
+// LockEvent is what WithLockRecorder reports: a lockOwners call (Owners
+// set, ascending) or a guarded statement (Query its sqlc name, "" for
+// other SQL; Writes whether it needs the owner lock; Locked whether the
+// transaction held it).
+type LockEvent = lockEvent
+
+// WithLockRecorder makes every transaction run with ctx report its owner
+// locks and guarded statements to rec, in order.
+func WithLockRecorder(ctx context.Context, rec func(LockEvent)) context.Context {
+	return context.WithValue(ctx, lockRecorderKey{}, rec)
+}
+
+// DisableOwnerLock makes lockOwners skip the lock until the test ends, and
+// with it the guard (the writes run as if the lock were held): it shows
+// that a concurrency test fails without the owner lock.
+func DisableOwnerLock(t *testing.T) {
+	ownerLockDisabled.Store(true)
+	t.Cleanup(func() { ownerLockDisabled.Store(false) })
+}
+
+// OwnerLockPrefix is the key text of the owner lock.
+const OwnerLockPrefix = ownerLockPrefix
+
+// Errors of the write lock, for the guard tests.
+var (
+	ErrUnlockedWrite  = errUnlockedWrite
+	ErrOwnerNotLocked = errOwnerNotLocked
+	ErrLockedTwice    = errLockedTwice
+	ErrNoOwners       = errNoOwners
+)
+
+// UnlockedPatch runs the raw PatchDocument query on document id (a new
+// title) without the owner lock: in a transaction (inTx) or on the pool.
+func UnlockedPatch(ctx context.Context, s *Store, id string, inTx bool) error {
+	u, ok := parseID(id)
+	if !ok {
+		return ErrNotFound
+	}
+	title := "unlocked"
+	p := db.PatchDocumentParams{ID: u, Title: &title}
+	if !inTx {
+		_, err := s.q.PatchDocument(ctx, p)
+		return err
+	}
+	return s.inTx(ctx, func(q *db.Queries) error {
+		_, err := q.PatchDocument(ctx, p)
+		return err
+	})
+}
+
+// GuardedExec runs sql through the guard: on the pool (owners nil), or in
+// a transaction that first calls lockOwners with each list of owners in
+// turn (an empty outer list: no lock).
+func GuardedExec(ctx context.Context, s *Store, sql string, owners [][]int64) error {
+	if owners == nil {
+		_, err := s.g.Exec(ctx, sql)
+		return err
+	}
+	return s.inTxWith(ctx, func(t *writeTx) error {
+		for _, o := range owners {
+			if err := t.lockOwners(ctx, o...); err != nil {
+				return err
+			}
+		}
+		_, err := t.g.Exec(ctx, sql)
+		return err
+	})
 }

@@ -27,26 +27,6 @@ DELETE FROM correspondents
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
 RETURNING id, owner_id, name;
 
--- The deletes take their locks in one order (docs/development/
--- architecture.md, "Lock order"): the row FOR UPDATE, which waits for the
--- writers linking documents to it and keeps new links out (their foreign-
--- key check takes FOR KEY SHARE), a tag's direct children, then the linked
--- documents in id order; only then the DELETE, whose cascade and triggers
--- touch rows the transaction already holds.
-
--- LockCorrespondentForDelete locks a correspondent for its delete.
--- name: LockCorrespondentForDelete :one
-SELECT id FROM correspondents
-WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
-FOR UPDATE;
-
--- LockCorrespondentDocuments locks the documents of a correspondent for
--- its delete. FOR NO KEY UPDATE, as LockDocuments: SET NULL changes no key.
--- name: LockCorrespondentDocuments :exec
-SELECT id FROM documents WHERE correspondent_id = sqlc.arg(id)::uuid
-ORDER BY id
-FOR NO KEY UPDATE;
-
 -- LockCorrespondent reads a row for a change in the same transaction (a patch).
 -- name: LockCorrespondent :one
 SELECT * FROM correspondents
@@ -78,17 +58,6 @@ RETURNING *;
 DELETE FROM document_types
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
 RETURNING id, owner_id, name;
-
--- LockDocumentTypeForDelete is LockCorrespondentForDelete for a type.
--- name: LockDocumentTypeForDelete :one
-SELECT id FROM document_types
-WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
-FOR UPDATE;
-
--- name: LockDocumentTypeDocuments :exec
-SELECT id FROM documents WHERE document_type_id = sqlc.arg(id)::uuid
-ORDER BY id
-FOR NO KEY UPDATE;
 
 -- LockDocumentType reads a row for a change in the same transaction (a patch).
 -- name: LockDocumentType :one
@@ -123,35 +92,26 @@ DELETE FROM tags
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
 RETURNING id, owner_id, name;
 
--- LockTagForDelete is LockCorrespondentForDelete for a tag.
--- name: LockTagForDelete :one
-SELECT id FROM tags
-WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
-FOR UPDATE;
-
--- LockTagChildren locks a tag's direct children for its delete, after the
--- tag and before its documents: the delete's SET NULL (parent_id) updates
--- them, and a child's own delete (holding the child, then waiting for
--- documents) must not wait for documents the parent's delete holds.
--- name: LockTagChildren :exec
-SELECT id FROM tags WHERE parent_id = sqlc.arg(id)::uuid
-ORDER BY id
-FOR NO KEY UPDATE;
-
--- LockTagDocuments locks the documents of a tag for its delete (the
--- cascade to document_tags and its search trigger update them).
--- name: LockTagDocuments :exec
-SELECT d.id FROM documents d
-JOIN document_tags dt ON dt.document_id = d.id
-WHERE dt.tag_id = sqlc.arg(id)::uuid
-ORDER BY d.id
-FOR NO KEY UPDATE OF d;
-
 -- LockTag reads a row for a change in the same transaction (a patch).
 -- name: LockTag :one
 SELECT * FROM tags
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
 FOR NO KEY UPDATE;
+
+-- CorrespondentOwner, DocumentTypeOwner and TagOwner read a row's owner
+-- in the scope, without a lock, so a writer can take the owner's write
+-- lock (store.lockOwners) first.
+-- name: CorrespondentOwner :one
+SELECT owner_id FROM correspondents
+WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner));
+
+-- name: DocumentTypeOwner :one
+SELECT owner_id FROM document_types
+WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner));
+
+-- name: TagOwner :one
+SELECT owner_id FROM tags
+WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner));
 
 -- TagRootNameConflict finds a child of the tag that would collide with a
 -- root tag of the same name once the tag is deleted and the child becomes
