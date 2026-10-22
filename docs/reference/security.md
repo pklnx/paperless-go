@@ -46,7 +46,9 @@ In Docker Compose, requests do not come from loopback even when the proxy
 runs on the same computer: Docker's port publishing hands them to the
 container from its network's gateway. Until that address is a trusted
 proxy, the login works over HTTPS, but the cookie lacks `Secure` and the
-`__Host-` prefix, so set `PAPERLESS_GO_TRUSTED_PROXIES` as below.
+`__Host-` prefix, so set `PAPERLESS_GO_TRUSTED_PROXIES` as below. (A
+`__Host-` cookie from a time the header counted is dropped at the next
+login and does not stand in the way of the plain one.)
 
 ### Trusted proxies
 

@@ -172,6 +172,25 @@ func TestAPIKeyAdminWithTwoFactor(t *testing.T) {
 	}
 }
 
+// TestAPIKeyConflictKeepsRecoveryCode checks the name before the second
+// factor: a creation that fails on a taken name does not use up the
+// recovery code it was sent with.
+func TestAPIKeyConflictKeepsRecoveryCode(t *testing.T) {
+	f := newAuthFixture(t)
+	u := f.addUserWithout2FA("kim", keyPassword, false)
+	_, codes := f.enableTOTP(u)
+	f.loginOK("kim", keyPassword)
+
+	f.createKey("cron", []string{"read"}, codes[0])
+	body := func(name string) map[string]any {
+		return map[string]any{"name": name, "scopes": []string{"read"}, "currentPassword": keyPassword, "code": codes[1]}
+	}
+	f.expect("POST", "/api/profile/api-keys", body("cron"), 409)
+	// The code still works, once.
+	f.expect("POST", "/api/profile/api-keys", body("backup"), 201)
+	f.expect("POST", "/api/profile/api-keys", body("third"), 401)
+}
+
 // TestAPIKeyRouteAccess calls every route of the table with a read key, a
 // write key and a key with both. Driven by routes(), so new routes are
 // covered as they come: a key works only on read and write routes with the

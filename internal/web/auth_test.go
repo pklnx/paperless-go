@@ -591,10 +591,89 @@ func TestSecureCookie(t *testing.T) {
 			if c.secure {
 				want = secureCookieName
 			}
-			if len(cookies) != 1 || cookies[0].Name != want || cookies[0].Secure != c.secure {
+			if len(cookies) == 0 || cookies[0].Name != want || cookies[0].Secure != c.secure || cookies[0].MaxAge <= 0 {
 				t.Fatalf("cookies: %+v, want %s secure=%v", cookies, want, c.secure)
 			}
+			// Without HTTPS a __Host- cookie from before is expired.
+			if c.secure && len(cookies) != 1 {
+				t.Fatalf("cookies: %+v", cookies)
+			}
+			if !c.secure && (len(cookies) != 2 || cookies[1].Name != secureCookieName || cookies[1].MaxAge >= 0 || !cookies[1].Secure || cookies[1].Path != "/") {
+				t.Fatalf("cookies: %+v, want an expired %s", cookies, secureCookieName)
+			}
 		})
+	}
+}
+
+// TestStaleSecureCookieBehindUntrustedProxy covers an upgrade: a browser
+// behind a proxy that no longer counts (not trusted, not loopback) still
+// holds a __Host- cookie whose session has ended. The login sets the plain
+// cookie, the session works next to the stale cookie, and logout expires
+// both.
+func TestStaleSecureCookieBehindUntrustedProxy(t *testing.T) {
+	st := storetest.New(t)
+	s := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{
+		AllowedHosts: []string{"docs.example"}, Hasher: storetest.Hasher,
+	})
+	storetest.User(t, st, "alice", false)
+	h := s.Handler()
+	stale := &http.Cookie{Name: secureCookieName, Value: "stale-token-of-an-ended-session"}
+	send := func(method, path, body string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, "https://docs.example"+path, strings.NewReader(body))
+		req.TLS = nil
+		req.RemoteAddr = "172.18.0.1:40000"
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("Origin", "https://docs.example")
+		if method != "GET" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		for _, c := range cookies {
+			req.AddCookie(c)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	expired := func(rec *httptest.ResponseRecorder, name string) bool {
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == name && c.MaxAge < 0 && c.Path == "/" && (name != secureCookieName || c.Secure) {
+				return true
+			}
+		}
+		return false
+	}
+
+	rec := send("POST", "/api/session", `{"username":"alice","password":"`+storetest.Password+`"}`, stale)
+	if rec.Code != 200 {
+		t.Fatalf("login: %d %s", rec.Code, rec.Body)
+	}
+	var plain *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == cookieName && c.MaxAge > 0 {
+			plain = c
+		}
+	}
+	if plain == nil {
+		t.Fatalf("no session cookie: %+v", rec.Result().Cookies())
+	}
+	if !expired(rec, secureCookieName) {
+		t.Fatalf("login keeps the stale cookie: %+v", rec.Result().Cookies())
+	}
+	// A browser that still sends the stale cookie is logged in.
+	session := &http.Cookie{Name: cookieName, Value: plain.Value}
+	if rec := send("GET", "/api/session", "", stale, session); rec.Code != 200 {
+		t.Fatalf("session with stale cookie: %d %s", rec.Code, rec.Body)
+	}
+	rec = send("DELETE", "/api/session", "", stale, session)
+	if rec.Code != 204 {
+		t.Fatalf("logout: %d %s", rec.Code, rec.Body)
+	}
+	if !expired(rec, cookieName) || !expired(rec, secureCookieName) {
+		t.Fatalf("logout cookies: %+v", rec.Result().Cookies())
+	}
+	if rec := send("GET", "/api/session", "", session); rec.Code != 401 {
+		t.Fatalf("session after logout: %d", rec.Code)
 	}
 }
 

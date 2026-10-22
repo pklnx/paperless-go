@@ -56,14 +56,14 @@ func TestUsers(t *testing.T) {
 	if err := st.SetUserAdmin(ctx, admin.ID, false); !errors.Is(err, store.ErrLastAdmin) {
 		t.Fatalf("demote last admin: %v", err)
 	}
-	if err := st.DeleteUser(ctx, admin.ID); !errors.Is(err, store.ErrLastAdmin) {
+	if err := st.DeleteUser(ctx, admin.ID, time.Now()); !errors.Is(err, store.ErrLastAdmin) {
 		t.Fatalf("delete last admin: %v", err)
 	}
 	second, _ := st.CreateUser(ctx, "second", "h4", true)
 	if err := st.SetUserLocked(ctx, admin.ID, true); err != nil {
 		t.Fatalf("lock with a second admin: %v", err)
 	}
-	if err := st.DeleteUser(ctx, second.ID); !errors.Is(err, store.ErrLastAdmin) {
+	if err := st.DeleteUser(ctx, second.ID, time.Now()); !errors.Is(err, store.ErrLastAdmin) {
 		t.Fatalf("delete the only unlocked admin: %v", err)
 	}
 	if err := st.SetUserLocked(ctx, admin.ID, false); err != nil {
@@ -119,7 +119,7 @@ func TestUsers(t *testing.T) {
 		st.SetUserAdmin(ctx, 99999, true),
 		st.SetUserLocked(ctx, 99999, false),
 		st.SetUserPassword(ctx, 99999, "h", false),
-		st.DeleteUser(ctx, 99999),
+		st.DeleteUser(ctx, 99999, time.Now()),
 		second2(st.GetUserByName(ctx, "nobody")),
 	} {
 		if !errors.Is(err, store.ErrNotFound) {
@@ -165,7 +165,7 @@ func TestDeleteUserOwnsRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = st.DeleteUser(ctx, kim.ID)
+	err = st.DeleteUser(ctx, kim.ID, time.Now())
 	var owns *store.OwnsRowsError
 	if !errors.As(err, &owns) || !errors.Is(err, store.ErrOwnsRows) {
 		t.Fatalf("delete an owner: %v", err)
@@ -192,7 +192,7 @@ func TestDeleteUserOwnsRows(t *testing.T) {
 			t.Fatal(del)
 		}
 	}
-	err = st.DeleteUser(ctx, kim.ID)
+	err = st.DeleteUser(ctx, kim.ID, time.Now())
 	if !errors.As(err, &owns) || owns.Counts != (store.OwnedRows{Documents: 1}) || owns.Error() != "store: the user still owns 1 document" {
 		t.Fatalf("delete with one document: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestDeleteUserOwnsRows(t *testing.T) {
 	}
 
 	// Owns nothing, has a session: removable, and the session is gone.
-	if err := st.DeleteUser(ctx, kim.ID); err != nil {
+	if err := st.DeleteUser(ctx, kim.ID, time.Now()); err != nil {
 		t.Fatalf("delete a user who owns nothing: %v", err)
 	}
 	if _, err := st.GetSession(ctx, sessionID(1), now, now.Add(-time.Hour)); !errors.Is(err, store.ErrNotFound) {
@@ -231,7 +231,7 @@ func TestDeleteUserRefusedByDatabase(t *testing.T) {
 	if _, err := conn.Exec(ctx, `INSERT INTO later_owned VALUES ($1)`, kim.ID); err != nil {
 		t.Fatal(err)
 	}
-	err = st.DeleteUser(ctx, kim.ID)
+	err = st.DeleteUser(ctx, kim.ID, time.Now())
 	if !errors.Is(err, store.ErrOwnsRows) {
 		t.Fatalf("delete: %v, want ErrOwnsRows", err)
 	}

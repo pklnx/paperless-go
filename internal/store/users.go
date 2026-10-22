@@ -290,7 +290,7 @@ func (s *Store) SetUserLocked(ctx context.Context, id int64, locked bool) error 
 // DeleteUser deletes a user and their sessions. It fails with ErrLastAdmin
 // for the last unlocked admin and with an *OwnsRowsError while the user
 // owns documents or metadata.
-func (s *Store) DeleteUser(ctx context.Context, id int64) error {
+func (s *Store) DeleteUser(ctx context.Context, id int64, now time.Time) error {
 	err := s.inTx(ctx, func(q *db.Queries) error {
 		if err := keepAnAdmin(ctx, q, id); err != nil {
 			return err
@@ -308,7 +308,7 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 		// The sessions, passkeys and API keys go with the user (ON DELETE
 		// CASCADE).
 		if e := auditFrom(ctx); e != nil {
-			n, err := q.CountActiveAPIKeys(ctx, db.CountActiveAPIKeysParams{UserID: id, Now: time.Now()})
+			n, err := q.CountActiveAPIKeys(ctx, db.CountActiveAPIKeysParams{UserID: id, Now: now})
 			if err != nil {
 				return err
 			}

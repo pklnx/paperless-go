@@ -110,6 +110,29 @@ type NewAPIKey struct {
 	ExpiresAt *time.Time
 }
 
+// CheckNewAPIKey reports whether the user could create a key named name at
+// now: ErrAPIKeyLimit at the limit, ErrAPIKeyName when an unrevoked key has
+// the name. It runs before the second factor is checked, so a request that
+// would fail anyway does not use up a TOTP step or a recovery code.
+// CreateAPIKey checks both again under the user's lock.
+func (s *Store) CheckNewAPIKey(ctx context.Context, userID int64, name string, now time.Time) error {
+	n, err := s.q.CountActiveAPIKeys(ctx, db.CountActiveAPIKeysParams{UserID: userID, Now: now})
+	if err != nil {
+		return err
+	}
+	if n >= MaxAPIKeys {
+		return ErrAPIKeyLimit
+	}
+	taken, err := s.q.APIKeyNameTaken(ctx, db.APIKeyNameTakenParams{UserID: userID, Name: name})
+	if err != nil {
+		return err
+	}
+	if taken {
+		return ErrAPIKeyName
+	}
+	return nil
+}
+
 // CreateAPIKey stores a key for a user, created at now, with the audit
 // entry of ctx (whose api_key target gets the new ID). It fails with
 // ErrAPIKeyLimit when the user has MaxAPIKeys active keys and with

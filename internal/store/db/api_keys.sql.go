@@ -10,6 +10,22 @@ import (
 	"time"
 )
 
+const aPIKeyNameTaken = `-- name: APIKeyNameTaken :one
+SELECT EXISTS (SELECT 1 FROM api_keys WHERE user_id = $1 AND name = $2 AND revoked_at IS NULL)
+`
+
+type APIKeyNameTakenParams struct {
+	UserID int64
+	Name   string
+}
+
+func (q *Queries) APIKeyNameTaken(ctx context.Context, arg APIKeyNameTakenParams) (bool, error) {
+	row := q.db.QueryRow(ctx, aPIKeyNameTaken, arg.UserID, arg.Name)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const countAPIKeysByUser = `-- name: CountAPIKeysByUser :many
 SELECT user_id, count(*) AS n FROM api_keys
 WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $1::timestamptz)

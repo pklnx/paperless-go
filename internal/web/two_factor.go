@@ -185,9 +185,7 @@ func (s *Server) startTwoFactorLogin(w http.ResponseWriter, r *http.Request, u *
 	if !s.twoFactorReady(w, r) {
 		return
 	}
-	if old := sessionToken(r); old != "" {
-		_ = s.store.DeleteSession(r.Context(), auth.HashSessionToken(old))
-	}
+	s.deleteOldSessions(r)
 	now := s.now()
 	challenge, err := s.store.CreateTwoFactorChallenge(r.Context(), u.ID, u.TwoFactorVersion, now, now.Add(twoFactorChallengeTTL))
 	if err != nil {

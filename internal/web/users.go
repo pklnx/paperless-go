@@ -243,7 +243,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	err := s.store.DeleteUser(withAudit(r, auditUser(s.auditEntry(r, "user.remove"), u)), u.ID)
+	err := s.store.DeleteUser(withAudit(r, auditUser(s.auditEntry(r, "user.remove"), u)), u.ID, s.now())
 	var owns *store.OwnsRowsError
 	switch {
 	case errors.Is(err, store.ErrLastAdmin):

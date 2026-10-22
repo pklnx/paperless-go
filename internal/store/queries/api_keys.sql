@@ -25,6 +25,9 @@ WHERE id = @id AND (last_used_at IS NULL OR last_used_at < @touch_cutoff::timest
 SELECT count(*) FROM api_keys
 WHERE user_id = @user_id AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > @now::timestamptz);
 
+-- name: APIKeyNameTaken :one
+SELECT EXISTS (SELECT 1 FROM api_keys WHERE user_id = @user_id AND name = @name AND revoked_at IS NULL);
+
 -- name: InsertAPIKey :one
 INSERT INTO api_keys (user_id, key_hash, hint, name, scopes, created_at, expires_at)
 VALUES (@user_id, @key_hash, @hint, @name, @scopes, @created_at, @expires_at)

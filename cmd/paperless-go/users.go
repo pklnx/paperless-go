@@ -512,7 +512,7 @@ instead.`,
 				return err
 			}
 			defer a.close()
-			if err := a.store.DeleteUser(withCLIAudit(cmd, cliUserEntry(cmd, "user.remove", u)), u.ID); err != nil {
+			if err := a.store.DeleteUser(withCLIAudit(cmd, cliUserEntry(cmd, "user.remove", u)), u.ID, time.Now()); err != nil {
 				var owns *store.OwnsRowsError
 				if errors.As(err, &owns) {
 					if owns.Counts.Total() == 0 {

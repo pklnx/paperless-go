@@ -187,8 +187,13 @@ func TestAPIKeys(t *testing.T) {
 		t.Fatalf("revoked_by %d %v", revokedBy, err)
 	}
 	newKey(t, st, alice.ID, "after", []string{"read"}, nil, time.Now())
+	// The count goes by the server clock: at removeAt the "soon" key has
+	// expired.
+	soon := time.Now().Add(time.Hour)
+	newKey(t, st, alice.ID, "soon", []string{"read"}, &soon, time.Now())
+	removeAt := soon.Add(time.Hour)
 	e = &store.AuditEntry{Actor: store.ActorCLI, Action: "user.remove"}
-	if err := st.DeleteUser(store.WithAudit(ctx, e), alice.ID); err != nil {
+	if err := st.DeleteUser(store.WithAudit(ctx, e), alice.ID, removeAt); err != nil {
 		t.Fatal(err)
 	}
 	var left int
@@ -202,7 +207,7 @@ func TestAPIKeys(t *testing.T) {
 	if _, err := st.CreateUser(ctx, "carol", "h", true); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.DeleteUser(ctx, bob.ID); err != nil {
+	if err := st.DeleteUser(ctx, bob.ID, time.Now()); err != nil {
 		t.Fatalf("remove a revoker: %v", err)
 	}
 }

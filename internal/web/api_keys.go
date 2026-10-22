@@ -234,6 +234,13 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		t := now.Add(time.Duration(*in.ExpiresInDays) * 24 * time.Hour)
 		expires = &t
 	}
+	sess := currentSession(r)
+	// The limit and the name are checked before the second factor, so a
+	// request that fails on them does not use up a TOTP step or a recovery
+	// code. CreateAPIKey checks them again under the user's lock.
+	if !s.apiKeyCreateError(w, r, s.store.CheckNewAPIKey(r.Context(), sess.UserID, in.Name, now)) {
+		return
+	}
 	if _, ok := s.checkOwnLogin(w, r, "api_key.create", in.CurrentPassword, in.Code); !ok {
 		return
 	}
@@ -242,7 +249,6 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusInternalServerError, "internal error", err)
 		return
 	}
-	sess := currentSession(r)
 	e := s.auditEntry(r, "api_key.create")
 	e.SetTarget(store.TargetAPIKey, "", in.Name)
 	e.Detail("scopes", scopes)
@@ -252,19 +258,27 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	k, err := s.store.CreateAPIKey(withAudit(r, e), sess.UserID, store.NewAPIKey{
 		Hash: hash, Hint: hint, Name: in.Name, Scopes: scopes, ExpiresAt: expires,
 	}, now)
-	switch {
-	case errors.Is(err, store.ErrAPIKeyLimit):
-		s.fail(w, r, http.StatusConflict, fmt.Sprintf("you already have %d API keys; revoke one first", store.MaxAPIKeys), nil)
-		return
-	case errors.Is(err, store.ErrAPIKeyName):
-		s.fail(w, r, http.StatusConflict, "you already have an API key with this name", nil)
-		return
-	case err != nil:
-		s.failStore(w, r, err)
+	if !s.apiKeyCreateError(w, r, err) {
 		return
 	}
 	s.log.Info("API key created", "user", sess.UserName, "key", k.Name, "scopes", strings.Join(scopes, ","))
 	s.writeJSON(w, http.StatusCreated, newAPIKeyJSON{apiKeyJSON: s.apiKeyJSON(k, false), Key: key})
+}
+
+// apiKeyCreateError answers a failed key creation and reports whether err
+// is nil.
+func (s *Server) apiKeyCreateError(w http.ResponseWriter, r *http.Request, err error) bool {
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, store.ErrAPIKeyLimit):
+		s.fail(w, r, http.StatusConflict, fmt.Sprintf("you already have %d API keys; revoke one first", store.MaxAPIKeys), nil)
+	case errors.Is(err, store.ErrAPIKeyName):
+		s.fail(w, r, http.StatusConflict, "you already have an API key with this name", nil)
+	default:
+		s.failStore(w, r, err)
+	}
+	return false
 }
 
 // handleRevokeOwnAPIKey revokes one of the user's keys. It needs no
