@@ -338,48 +338,52 @@ func (w *mixWorker) metadata(ctx context.Context) {
 		return
 	}
 	switch r := w.rng.IntN(100); {
-	case r < 20:
+	case r < 10:
 		w.deletePair(ctx, v)
-	case r < 35:
+	case r < 20:
 		if t := w.pick(v.tags); t != "" {
 			w.deleteTag(ctx, "tag_delete", t)
 		}
-	case r < 45:
+	case r < 35:
 		w.deleteNamed(ctx, "correspondent", w.pick(v.corrs))
-	case r < 55:
+	case r < 50:
 		w.deleteNamed(ctx, "document_type", w.pick(v.types))
-	case r < 80:
+	case r < 75:
 		w.rename(ctx, v)
 	default:
 		w.move(ctx, v)
 	}
 }
 
-// replenish creates what is missing of review B's metadata; false when
-// nothing is missing.
+// replenish creates one missing piece of review B's metadata, chosen at
+// random among what is missing (a fixed order would starve correspondents
+// and types while tags are deleted); false when nothing is missing.
 func (w *mixWorker) replenish(ctx context.Context, v view) bool {
-	switch {
-	case len(v.roots) < wantRoots:
-		createTag(ctx, w.c, w.m, "tag_create", nil)
-		return true
-	case len(v.roots) > maxRoots:
+	if len(v.roots) > maxRoots {
 		w.deleteTag(ctx, "tag_delete", w.pick(v.roots))
 		return true
 	}
-	for _, root := range v.roots[:wantRoots] {
-		if len(v.children[root]) < wantChildren {
-			createTag(ctx, w.c, w.m, "tag_create", &root)
-			return true
+	var missing []func()
+	if len(v.roots) < wantRoots {
+		missing = append(missing, func() { createTag(ctx, w.c, w.m, "tag_create", nil) })
+	} else {
+		for _, root := range v.roots[:wantRoots] {
+			if len(v.children[root]) < wantChildren {
+				missing = append(missing, func() { createTag(ctx, w.c, w.m, "tag_create", &root) })
+				break
+			}
 		}
 	}
-	switch {
-	case len(v.corrs) < wantNamed:
-		createNamed(ctx, w.c, w.m, "correspondent_create", "correspondent")
-	case len(v.types) < wantNamed:
-		createNamed(ctx, w.c, w.m, "document_type_create", "document_type")
-	default:
+	if len(v.corrs) < wantNamed {
+		missing = append(missing, func() { createNamed(ctx, w.c, w.m, "correspondent_create", "correspondent") })
+	}
+	if len(v.types) < wantNamed {
+		missing = append(missing, func() { createNamed(ctx, w.c, w.m, "document_type_create", "document_type") })
+	}
+	if len(missing) == 0 {
 		return false
 	}
+	missing[w.rng.IntN(len(missing))]()
 	return true
 }
 

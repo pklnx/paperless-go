@@ -30,11 +30,14 @@ Review B's mix, per thread and step: 30 % bulk changes (half by match:
 `inbox`, `q=invoice`, a tag or everything; half by 20–500 random IDs; with
 `addTags`, `removeTags`, correspondent or type set or cleared, `addTags` +
 correspondent, or `favorite`), 35 % single PATCHes (`tagIds`,
-`correspondentId`, `documentTypeId`, set or null), 35 % metadata work
-(replenishing 6 top-level tags × 3 sub-tags, 5 correspondents and 5 types per
-user through the API; concurrent parent + child tag deletes; single tag,
-correspondent and type deletes; renames; tag moves, including some into the
-tag's own sub-tag, which answer `409 tag_cycle`). Every user's metadata is
+`correspondentId`, `documentTypeId`, set or null), 35 % metadata work. Half
+of the metadata steps replenish what is missing of 6 top-level tags × 3
+sub-tags, 5 correspondents and 5 types per user (one missing piece, chosen at
+random), or delete a top-level tag when there are more than 12; the rest are
+10 % concurrent parent + child tag deletes, 10 % single tag deletes, 15 %
+correspondent and 15 % type deletes, 25 % renames and 25 % tag moves (mostly
+a sub-tag to another parent, some into the tag's own sub-tag, which answer
+`409 tag_cycle`). Every user's metadata is
 created through the API before the load starts. Each thread has its own
 session cookie.
 
