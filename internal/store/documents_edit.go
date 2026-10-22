@@ -1,7 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"slices"
@@ -46,6 +49,11 @@ var (
 	// one a change expected: it was changed meanwhile. The error is a
 	// *DocumentChangedError.
 	ErrDocumentChanged = errors.New("store: the document was changed meanwhile")
+
+	// ErrMatchChanged means the matches of a bulk change by search are
+	// no longer the set its dry run counted. The error is a
+	// *MatchChangedError.
+	ErrMatchChanged = errors.New("store: the matches changed since they were counted")
 )
 
 // DocumentChangedError is returned by PatchDocument when the document's
@@ -62,6 +70,43 @@ func (e *DocumentChangedError) Error() string {
 
 // Is makes errors.Is(err, ErrDocumentChanged) true.
 func (e *DocumentChangedError) Is(target error) bool { return target == ErrDocumentChanged }
+
+// MatchChangedError is a bulk change by search whose matches differ from
+// the set its fingerprint names; nothing was changed. Count is the number
+// of documents the change would cover now (after the recheck under the
+// lock), for information: a new dry run gives the count to confirm.
+// errors.Is(err, ErrMatchChanged) holds.
+type MatchChangedError struct {
+	Count int
+}
+
+func (e *MatchChangedError) Error() string {
+	return fmt.Sprintf("store: the matches changed since they were counted, now %d", e.Count)
+}
+
+// Is makes errors.Is(err, ErrMatchChanged) true.
+func (e *MatchChangedError) Is(target error) bool { return target == ErrMatchChanged }
+
+// matchFingerprintPrefix is the version of matchFingerprint's format.
+const matchFingerprintPrefix = "v1."
+
+// matchFingerprint names a set of documents: "v1." and the unpadded
+// base64url SHA-256 of the IDs, sorted by their bytes and concatenated (16
+// bytes each). It does not depend on the order of ids. Clients pass it
+// back unchanged and never compute it; it grants nothing, it only narrows
+// a change the caller may make anyway, so it needs no key.
+func matchFingerprint(ids []pgtype.UUID) string {
+	sorted := make([][16]byte, len(ids))
+	for i, id := range ids {
+		sorted[i] = id.Bytes
+	}
+	slices.SortFunc(sorted, func(a, b [16]byte) int { return bytes.Compare(a[:], b[:]) })
+	h := sha256.New()
+	for _, id := range sorted {
+		h.Write(id[:])
+	}
+	return matchFingerprintPrefix + base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+}
 
 // TooManyError is a bulk change over more documents than Limit.
 // errors.Is(err, ErrTooMany) holds.
@@ -288,10 +333,17 @@ func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p Docume
 // so the audit records an admin's change of another user's documents
 // with their ownerId either way; outside the scope (a non-admin naming
 // another user) nothing matches.
+//
+// Fingerprint is required with Match in BulkUpdateDocuments and refused
+// otherwise: the BulkMatch.Fingerprint of the dry run whose count the
+// user confirmed. The change is applied only when its matches are exactly
+// that set (else a *MatchChangedError), so a document that started or
+// stopped matching since the count is never changed unseen.
 type BulkSelection struct {
-	IDs   []string
-	Match *search.Query
-	Owner *int64
+	IDs         []string
+	Match       *search.Query
+	Owner       *int64
+	Fingerprint string
 }
 
 // matchScope is the scope a match of sel is resolved and locked in: sc,
@@ -354,6 +406,10 @@ type BulkMatch struct {
 	// Owners is the number of owners among them; 0 when Count is above
 	// MaxBulkMatches (not counted).
 	Owners int
+	// Fingerprint names the matched set (matchFingerprint) for
+	// BulkSelection.Fingerprint; empty when Count is above
+	// MaxBulkMatches, since such a change is refused anyway.
+	Fingerprint string
 }
 
 // resolvedMatch holds a search's arguments, resolved once before the
@@ -409,12 +465,12 @@ func (s *Store) match(ctx context.Context, d db.DBTX, m resolvedMatch, only []pg
 // shows before it asks for confirmation. It uses the same resolution as
 // BulkUpdateDocuments.
 func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelection) (BulkMatch, error) {
-	if sel.Match == nil || sel.IDs != nil {
+	if sel.Match == nil || sel.IDs != nil || sel.Fingerprint != "" {
 		return BulkMatch{}, invalid("selection")
 	}
 	msc, ok := sel.matchScope(sc)
 	if !ok {
-		return BulkMatch{}, nil
+		return BulkMatch{Fingerprint: matchFingerprint(nil)}, nil
 	}
 	m, err := s.resolveMatch(ctx, msc, *sel.Match)
 	if err != nil {
@@ -427,10 +483,13 @@ func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelectio
 	out := BulkMatch{Count: total}
 	if total <= MaxBulkMatches {
 		owners := map[int64]bool{}
-		for _, r := range rows {
+		ids := make([]pgtype.UUID, len(rows))
+		for i, r := range rows {
 			owners[r.OwnerID] = true
+			ids[i] = r.ID
 		}
 		out.Owners = len(owners)
+		out.Fingerprint = matchFingerprint(ids)
 	}
 	return out, nil
 }
@@ -442,7 +501,9 @@ func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelectio
 // search again over the locked documents and keeps those that still
 // match, so a document changed between the match and the lock so that it
 // no longer matches is left alone (one that matches only now is not
-// added). It checks them, removes and adds the
+// added). By search, the documents left must then be exactly the set of
+// sel.Fingerprint, the dry run the user confirmed; otherwise nothing
+// changes (*MatchChangedError). It checks them, removes and adds the
 // tags (adding a tag a document has, or removing one it lacks, is no
 // error), sets the fields and advances modified_at of every one.
 //
@@ -457,15 +518,18 @@ func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelectio
 // removed; a *TooManyError (ErrTooMany) above MaxBulkIDs or
 // MaxBulkMatches; ErrNotFound when an ID is not in the scope;
 // ErrSeveralOwners when tags, a correspondent or a type are set on
-// documents of several owners; ErrOwnerMismatch for a tag to add, a
+// documents of several owners; a *MatchChangedError (ErrMatchChanged)
+// when the matches are not the set of sel.Fingerprint (checked after the
+// limit, so a set that grew past it is a *TooManyError);
+// ErrOwnerMismatch for a tag to add, a
 // correspondent or a type that is not the owner's (a tag to remove that
 // the documents do not have is no error). It takes the key shares of
 // the rows it links first (lockLinkTargets), so it and a metadata delete
 // lock in one order; a deadlock all the same is retried (see
 // retryDeadlock), then ErrRetry. A search that matches nothing changes
-// nothing and writes no audit entry.
+// nothing and writes no audit entry when its dry run matched nothing too.
 func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelection, c BulkChange, perDocument string) ([]string, error) {
-	if (sel.IDs == nil) == (sel.Match == nil) {
+	if (sel.IDs == nil) == (sel.Match == nil) || (sel.Match != nil) == (sel.Fingerprint == "") {
 		return nil, invalid("selection")
 	}
 	if len(c.Fields()) == 0 {
@@ -544,7 +608,7 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 					return &TooManyError{Count: total, Limit: MaxBulkMatches}
 				}
 				if total == 0 {
-					return errNothingMatched
+					return confirmMatch(sel.Fingerprint, nil)
 				}
 				want = make([]pgtype.UUID, len(rows))
 				for i, r := range rows {
@@ -568,6 +632,10 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 				// match only now were not part of the selection.
 				locked, err = s.stillMatching(ctx, tx, m, locked)
 				if err != nil {
+					return err
+				}
+				// Only exactly the set the user confirmed is changed.
+				if err := confirmMatch(sel.Fingerprint, locked); err != nil {
 					return err
 				}
 			} else if len(locked) != len(want) {
@@ -676,6 +744,25 @@ func beforeLock(ctx context.Context) {
 // errNothingMatched rolls back a bulk change by search without matches,
 // so no audit entry is written.
 var errNothingMatched = errors.New("store: nothing matched")
+
+// confirmMatch compares the documents a change by search would cover now
+// with the confirmed set's fingerprint: a *MatchChangedError when they
+// differ, errNothingMatched when both are empty, else nil. It runs inside
+// the transaction, so an error rolls everything back and no audit entry is
+// written; it is no deadlock, so retryDeadlock does not retry it.
+func confirmMatch(fingerprint string, now []db.LockDocumentsRow) error {
+	ids := make([]pgtype.UUID, len(now))
+	for i, l := range now {
+		ids[i] = l.ID
+	}
+	if matchFingerprint(ids) != fingerprint {
+		return &MatchChangedError{Count: len(now)}
+	}
+	if len(now) == 0 {
+		return errNothingMatched
+	}
+	return nil
+}
 
 // stillMatching returns the rows of locked that the search of m matches
 // now, in their order. The search runs over the locked IDs only: over the

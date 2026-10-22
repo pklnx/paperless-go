@@ -125,6 +125,10 @@ const en = {
     n === 1 ? "This changes 1 document: the match of this search." : `This changes ${n} documents: every match of this search, also those not loaded yet.`,
   bulkConfirm: (n: number) => (n === 1 ? "Change 1 document" : `Change ${n} documents`),
   bulkCounting: "Counting the matches…",
+  bulkMatchChanged: (n: number) =>
+    n === 1 ? "The matches changed since they were counted: now 1 document." : `The matches changed since they were counted: now ${n} documents.`,
+  bulkMatchChangedError: "The matches of the search changed since they were counted. Nothing was changed; count again.",
+  bulkOnlyClearSeveralOwners: "The selected documents belong to several users: this can only be removed, not set.",
   bulkNoMatches: "No document matches this search any more. Nothing was changed.",
   bulkUpdated: (n: number) => (n === 1 ? "1 document changed." : `${n} documents changed.`),
   bulkTooMany: (limit: number) => `Too many documents: at most ${limit} can be changed at once. Narrow the search first.`,
@@ -604,6 +608,10 @@ const de: Messages = {
     n === 1 ? "Das ändert 1 Dokument: den Treffer dieser Suche." : `Das ändert ${n} Dokumente: jeden Treffer dieser Suche, auch die noch nicht geladenen.`,
   bulkConfirm: (n) => (n === 1 ? "1 Dokument ändern" : `${n} Dokumente ändern`),
   bulkCounting: "Treffer werden gezählt…",
+  bulkMatchChanged: (n) =>
+    n === 1 ? "Die Treffer haben sich seit dem Zählen geändert: jetzt 1 Dokument." : `Die Treffer haben sich seit dem Zählen geändert: jetzt ${n} Dokumente.`,
+  bulkMatchChangedError: "Die Treffer der Suche haben sich seit dem Zählen geändert. Nichts wurde geändert; zähle neu.",
+  bulkOnlyClearSeveralOwners: "Die ausgewählten Dokumente gehören mehreren Benutzern: das lässt sich nur entfernen, nicht setzen.",
   bulkNoMatches: "Kein Dokument passt mehr zu dieser Suche. Nichts wurde geändert.",
   bulkUpdated: (n) => (n === 1 ? "1 Dokument geändert." : `${n} Dokumente geändert.`),
   bulkTooMany: (limit) => `Zu viele Dokumente: höchstens ${limit} lassen sich auf einmal ändern. Grenze die Suche erst ein.`,

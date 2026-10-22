@@ -261,20 +261,36 @@ describe("selection next to the detail link", () => {
 });
 
 describe("errors", () => {
-  it("explains several owners and keeps the selection", async () => {
+  it("explains several owners before sending: no tags, only clearing a correspondent or type, and keeps the selection", async () => {
     server.user = { id: 1, name: "root", admin: true };
     window.history.replaceState(null, "", "/?all=1");
     server.documents = () => page([doc("1", "Bobs", { ownerId: 2 }), doc("2", "Mine", { ownerId: 1 })]);
-    server.correspondents = [named("c1", "Amt")];
-    server.bulk = () => ({ status: 400, body: { error: "the documents belong to several users", code: "several_owners" } });
+    server.tags = [tag("t1", "Steuer", null, { ownerId: 1 }), tag("t2", "Steuer", null, { ownerId: 2 })];
+    server.correspondents = [named("c1", "Amt", 1, 1), named("c2", "Amt", 1, 2)];
+    server.types = [named("d1", "Rechnung", 1, 1)];
+    server.bulk = () => ({ body: { updated: 2 } });
     await start();
     fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Bobs") }));
     fireEvent.click(box("Mine"));
-    fireEvent.click(bar().getByRole("button", { name: t.bulkCorrespondent }));
-    const s = within(screen.getByRole("dialog", { name: t.bulkCorrespondentTitle }));
-    fireEvent.click(s.getByRole("radio", { name: "Amt" }));
-    fireEvent.click(s.getByRole("button", { name: t.apply }));
+    // Tags: the one-owner rule right away, no sheet, nothing sent.
+    fireEvent.click(bar().getByRole("button", { name: t.bulkTags }));
     expect((await bar().findByRole("alert")).textContent).toBe(t.bulkSeveralOwners);
+    expect(screen.queryByRole("dialog", { name: t.bulkTagsTitle })).toBeNull();
+    // Type: only clearing, and why; no owner's names.
+    fireEvent.click(bar().getByRole("button", { name: t.bulkType }));
+    let s = within(screen.getByRole("dialog", { name: t.bulkTypeTitle }));
+    expect(s.getAllByRole("radio").map((r) => r.parentElement?.textContent)).toEqual([t.bulkClearType]);
+    fireEvent.click(s.getByRole("button", { name: t.closeDialog }));
+    // Correspondent: only clearing, which goes through for both owners.
+    fireEvent.click(bar().getByRole("button", { name: t.bulkCorrespondent }));
+    s = within(screen.getByRole("dialog", { name: t.bulkCorrespondentTitle }));
+    expect(s.getByText(t.bulkOnlyClearSeveralOwners)).toBeTruthy();
+    expect(s.getAllByRole("radio").map((r) => r.parentElement?.textContent)).toEqual([t.bulkClearCorrespondent]);
+    expect(bulks()).toEqual([]);
+    fireEvent.click(s.getByRole("radio", { name: t.bulkClearCorrespondent }));
+    fireEvent.click(s.getByRole("button", { name: t.apply }));
+    expect((await bar().findByRole("status")).textContent).toBe(t.bulkUpdated(2));
+    expect(bulks()).toEqual([{ ids: ["1", "2"], correspondent: null }]);
     expect(box("Bobs").checked && box("Mine").checked).toBe(true);
   });
 
@@ -312,7 +328,7 @@ describe("errors", () => {
   it("counts and asks again before retrying a change of all matches", async () => {
     server.documents = (p) => (p.get("cursor") ? page([doc("3", "Doc 3")]) : page([doc("1", "Doc 1"), doc("2", "Doc 2")], "c1"));
     let fail = true;
-    server.bulk = (b) => (b.dryRun ? { body: { matched: 3, owners: 1, limit: 5000 } } : fail ? { status: 503, body: { error: "busy" } } : { body: { updated: 3 } });
+    server.bulk = (b) => (b.dryRun ? { body: { matched: 3, owners: 1, limit: 5000, fingerprint: "v1.fp" } } : fail ? { status: 503, body: { error: "busy" } } : { body: { updated: 3 } });
     await start();
     fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
     fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
@@ -328,9 +344,9 @@ describe("errors", () => {
     expect(bulks()).toEqual([
       { match, dryRun: true },
       { match, dryRun: true },
-      { match, favorite: true },
+      { match, fingerprint: "v1.fp", favorite: true },
       { match, dryRun: true },
-      { match, favorite: true },
+      { match, fingerprint: "v1.fp", favorite: true },
     ]);
   });
 
@@ -343,6 +359,7 @@ describe("errors", () => {
     expect(bulkErrorText(err(400, { code: "tag_add_and_remove" })).text).toBe(t.bulkTagAddAndRemove);
     expect(bulkErrorText(err(400, { code: "nothing_to_change" })).text).toBe(t.bulkNothingToChange);
     expect(bulkErrorText(err(400, { code: "empty_selection" })).text).toBe(t.bulkEmptySelection);
+    expect(bulkErrorText(err(409, { code: "match_changed", matched: 0 }))).toEqual({ text: t.bulkMatchChangedError, retry: true });
     expect(bulkErrorText(err(404, { error: "not found" }))).toEqual({ text: t.bulkNotFound, retry: false });
     expect(bulkErrorText(err(503, { error: "audit log unavailable" }))).toEqual({ text: t.serverBusy, retry: true });
     expect(bulkErrorText(err(500, { error: "boom" })).text).toBe(t.failed("boom"));
@@ -359,7 +376,7 @@ describe("all matches of a search", () => {
     window.history.replaceState(null, "", "/?tag=t1&q=Rechnung");
     server.documents = twoPages();
     let matched = 120;
-    server.bulk = (b) => (b.dryRun ? { body: { matched, owners: 1, limit: 5000 } } : { body: { updated: 121 } });
+    server.bulk = (b) => (b.dryRun ? { body: { matched, owners: 1, limit: 5000, fingerprint: `v1.${matched}` } } : { body: { updated: 121 } });
     await start();
     await screen.findByText("Doc 1");
     // Only once every loaded one is checked.
@@ -384,7 +401,8 @@ describe("all matches of a search", () => {
     fireEvent.click(bar().getByRole("button", { name: t.bulkRemoveFromInbox }));
     fireEvent.click(within(await screen.findByRole("dialog", { name: t.bulkConfirmTitle })).getByRole("button", { name: t.bulkConfirm(121) }));
     expect((await bar().findByRole("status")).textContent).toBe(t.bulkUpdated(121));
-    expect(bulks()).toEqual([{ match, dryRun: true }, { match, dryRun: true }, { match, dryRun: true }, { match, inbox: false }]);
+    // The change sends the fingerprint of the dry run whose count the dialog showed.
+    expect(bulks()).toEqual([{ match, dryRun: true }, { match, dryRun: true }, { match, dryRun: true }, { match, fingerprint: "v1.121", inbox: false }]);
     // The count is stale now: back to the checked rows.
     await waitFor(() => expect(screen.queryByText(t.allMatchesSelected(120))).toBeNull());
     expect(bar().getByText(t.selectedCount(2))).toBeTruthy();
@@ -398,7 +416,7 @@ describe("all matches of a search", () => {
     server.documents = (p) => (p.get("cursor") ? page([doc("3", "B3", { ownerId: 2 })]) : page([doc("1", "B1", { ownerId: 2 }), doc("2", "B2", { ownerId: 2 })], "c1"));
     server.tags = [tag("t1", "Root tag", null, { ownerId: 1 }), tag("t2", "Bob tag", null, { ownerId: 2 })];
     let owners = 1;
-    server.bulk = () => ({ body: { matched: 3, owners, limit: 5000 } });
+    server.bulk = () => ({ body: { matched: 3, owners, limit: 5000, fingerprint: "v1.fp" } });
     await start();
     fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
     fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
@@ -411,20 +429,146 @@ describe("all matches of a search", () => {
       return names;
     };
     expect(tagChoices()).toEqual(["Bob tag"]);
-    // Several owners: every name (the server refuses setting them).
+    // Several owners: no names at all, the one-owner rule instead, before anything is sent.
     owners = 2;
     fireEvent.click(screen.getByRole("button", { name: t.clearSelection }));
     fireEvent.click(screen.getByRole("checkbox", { name: t.selectAllLoaded }));
     fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
     await screen.findByText(t.allMatchesSelected(3));
-    expect(tagChoices()).toEqual(["Bob tag", "Root tag"]);
+    const sent = bulks().length;
+    fireEvent.click(bar().getByRole("button", { name: t.bulkTags }));
+    expect((await bar().findByRole("alert")).textContent).toBe(t.bulkSeveralOwners);
+    expect(screen.queryByRole("dialog", { name: t.bulkTagsTitle })).toBeNull();
+    expect(bulks()).toHaveLength(sent);
+  });
+
+  it("shows the one-owner rule instead of the confirmation when the fresh count finds several owners", async () => {
+    server.user = { id: 1, name: "root", admin: true };
+    window.history.replaceState(null, "", "/?all=1");
+    server.documents = (p) => (p.get("cursor") ? page([doc("3", "B3", { ownerId: 2 })]) : page([doc("1", "B1", { ownerId: 2 }), doc("2", "B2", { ownerId: 2 })], "c1"));
+    server.tags = [tag("t2", "Bob tag", null, { ownerId: 2 })];
+    let owners = 1;
+    server.bulk = () => ({ body: { matched: 3, owners, limit: 5000, fingerprint: "v1.fp" } });
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    await screen.findByText(t.allMatchesSelected(3));
+    fireEvent.click(bar().getByRole("button", { name: t.bulkTags }));
+    const sheet = within(screen.getByRole("dialog", { name: t.bulkTagsTitle }));
+    fireEvent.click(within(sheet.getAllByRole("group")[0]!).getByRole("checkbox", { name: "Bob tag" }));
+    // Another user's document joined the matches since they were selected.
+    owners = 2;
+    fireEvent.click(sheet.getByRole("button", { name: t.apply }));
+    expect((await bar().findByRole("alert")).textContent).toBe(t.bulkSeveralOwners);
+    expect(screen.queryByRole("dialog", { name: t.bulkConfirmTitle })).toBeNull();
+    expect(bulks().every((b) => b!.dryRun === true)).toBe(true);
+  });
+
+  it("counts and asks again after 409 match_changed, and never resends by itself", async () => {
+    server.documents = twoPages();
+    let matched = 230;
+    let changes = 0;
+    server.bulk = (b) => {
+      if (b.dryRun) return { body: { matched, owners: 1, limit: 5000, fingerprint: `v1.${matched}` } };
+      changes++;
+      return b.fingerprint === `v1.${matched}`
+        ? { body: { updated: matched } }
+        : { status: 409, body: { error: "the matches of the search changed since they were counted", code: "match_changed", matched } };
+    };
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    await screen.findByText(t.allMatchesSelected(230));
+    fireEvent.click(bar().getByRole("button", { name: t.bulkRemoveFromInbox }));
+    let dialog = within(await screen.findByRole("dialog", { name: t.bulkConfirmTitle }));
+    expect(dialog.queryByText(t.bulkMatchChanged(230))).toBeNull();
+    // One document is imported before the confirm.
+    matched = 231;
+    fireEvent.click(dialog.getByRole("button", { name: t.bulkConfirm(230) }));
+    // Counted again; the dialog says so, with the new count.
+    dialog = within(await screen.findByRole("dialog", { name: t.bulkConfirmTitle }));
+    expect(dialog.getByText(t.bulkMatchChanged(231))).toBeTruthy();
+    expect(dialog.getByRole("button", { name: t.bulkConfirm(231) })).toBeTruthy();
+    const match = { tz };
+    expect(bulks()).toEqual([
+      { match, dryRun: true },
+      { match, dryRun: true },
+      { match, fingerprint: "v1.230", inbox: false },
+      { match, dryRun: true },
+    ]);
+    expect(changes).toBe(1);
+    // Cancel sends nothing.
+    fireEvent.click(dialog.getByRole("button", { name: t.cancel }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.bulkConfirmTitle })).toBeNull());
+    expect(bulks()).toHaveLength(4);
+    expect(changes).toBe(1);
+    // Asked again, confirmed again: the new fingerprint.
+    fireEvent.click(bar().getByRole("button", { name: t.bulkRemoveFromInbox }));
+    dialog = within(await screen.findByRole("dialog", { name: t.bulkConfirmTitle }));
+    expect(dialog.queryByText(t.bulkMatchChanged(231))).toBeNull();
+    fireEvent.click(dialog.getByRole("button", { name: t.bulkConfirm(231) }));
+    expect((await bar().findByRole("status")).textContent).toBe(t.bulkUpdated(231));
+    expect(bulks().at(-1)).toEqual({ match, fingerprint: "v1.231", inbox: false });
+    expect(changes).toBe(2);
+  });
+
+  it("drops the bar's count when the checked rows changed meanwhile", async () => {
+    server.documents = twoPages();
+    let answer: ReturnType<typeof held> | null = null;
+    server.bulk = (b) => {
+      if (!b.dryRun) return { body: { updated: 1 } };
+      if (answer) return answer.promise;
+      return { body: { matched: 3, owners: 1, limit: 5000, fingerprint: "v1.fp" } };
+    };
+    let counted: Promise<BulkCount> | undefined;
+    const count = bulkApi.count;
+    vi.spyOn(bulkApi, "count").mockImplementation((m) => (counted = count(m)));
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    await screen.findByText(t.allMatchesSelected(3));
+    answer = held();
+    fireEvent.click(bar().getByRole("button", { name: t.bulkFavorite }));
+    expect(bar().getByText(t.bulkCounting)).toBeTruthy();
+    // The user checks one row instead: the bar is about that row now.
+    fireEvent.click(box("Doc 1"));
+    await act(async () => {
+      answer!.release({ body: { matched: 3, owners: 1, limit: 5000, fingerprint: "v1.fp" } });
+      await counted;
+    });
+    expect(screen.queryByRole("dialog", { name: t.bulkConfirmTitle })).toBeNull();
+    expect(bar().queryByText(t.bulkCounting)).toBeNull();
+    expect(bar().getByText(t.selectedCount(1))).toBeTruthy();
+    // Not busy: the actions work.
+    expect(bar().getByRole("button", { name: t.bulkFavorite }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("keeps a later choice when a held Select all matches count answers", async () => {
+    server.documents = twoPages();
+    const answer = held();
+    server.bulk = () => answer.promise;
+    let counted: Promise<BulkCount> | undefined;
+    const count = bulkApi.count;
+    vi.spyOn(bulkApi, "count").mockImplementation((m) => (counted = count(m)));
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    fireEvent.click(screen.getByRole("button", { name: t.clearSelection }));
+    fireEvent.click(box("Doc 2"));
+    await act(async () => {
+      answer.release({ body: { matched: 3, owners: 1, limit: 5000, fingerprint: "v1.fp" } });
+      await counted;
+    });
+    expect(screen.queryByText(t.allMatchesSelected(3))).toBeNull();
+    expect(bar().getByText(t.selectedCount(1))).toBeTruthy();
+    expect(box("Doc 2").checked && !box("Doc 1").checked).toBe(true);
   });
 
   it("sends no owner with Everyone's documents on, and none for a user", async () => {
     server.user = { id: 1, name: "root", admin: true };
     window.history.replaceState(null, "", "/?all=1&inbox=1");
     server.documents = twoPages();
-    server.bulk = () => ({ body: { matched: 3, owners: 2, limit: 5000 } });
+    server.bulk = () => ({ body: { matched: 3, owners: 2, limit: 5000, fingerprint: "v1.fp" } });
     await start();
     fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
     fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
@@ -444,7 +588,7 @@ describe("all matches of a search", () => {
 
     // The matches shrank to none between selecting and the action.
     let matched = 3;
-    server.bulk = () => ({ body: { matched, owners: 1, limit: 5000 } });
+    server.bulk = () => ({ body: { matched, owners: 1, limit: 5000, fingerprint: "v1.fp" } });
     fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
     await screen.findByText(t.allMatchesSelected(3));
     matched = 0;
@@ -458,7 +602,7 @@ describe("all matches of a search", () => {
     server.tags = [tag("t1", "Steuer"), tag("t2", "Arzt")];
     // Every list holds the same documents, so pruning alone would keep them checked.
     server.documents = twoPages();
-    server.bulk = () => ({ body: { matched: 3, owners: 1, limit: 5000 } });
+    server.bulk = () => ({ body: { matched: 3, owners: 1, limit: 5000, fingerprint: "v1.fp" } });
     await start();
     fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 1") }));
     expect(bar().getByText(t.selectedCount(1))).toBeTruthy();
@@ -501,7 +645,7 @@ describe("all matches of a search", () => {
     await screen.findByText("Doc 1");
     // The list's own handler of the count runs before this await resumes.
     await act(async () => {
-      answer.release({ body: { matched: 3, owners: 1, limit: 5000 } });
+      answer.release({ body: { matched: 3, owners: 1, limit: 5000, fingerprint: "v1.fp" } });
       await counted;
     });
     expect(screen.queryByText(t.allMatchesSelected(3))).toBeNull();

@@ -39,7 +39,8 @@ describe("metadata page", () => {
     render(<App />);
     fireEvent.click(within(await screen.findByTestId("sidebar")).getByRole("button", { name: t.manageMetadata }));
     expect(window.location.search).toBe("?view=metadata");
-    await page().findByText("Steuer");
+    // The view switch renders asynchronously: wait for the panel, not just the text in it.
+    await within(await screen.findByRole("tabpanel")).findByText("Steuer");
     expect(tagNames()).toEqual(["<b>Arzt</b>", "Steuer", "2024"]);
     expect(document.querySelector("b")).toBeNull();
     const steuer = screen.getByTestId("tag-row-t1");
@@ -220,6 +221,19 @@ describe("metadata page", () => {
     cleanup();
     await open("?view=metadata&all=1");
     expect(requests.filter((r) => r.path === "/api/tags").at(-1)!.url).toBe("/api/tags");
+  });
+
+  it("names the owner of another user's rows with Everyone's documents on, not the admin's own", async () => {
+    server.user = { id: 1, name: "root", admin: true };
+    server.tags = [tag("t1", "Steuer", null, { ownerId: 1, ownerName: "root" }), tag("t2", "Steuer", null, { ownerId: 2, ownerName: "bob" })];
+    server.correspondents = [{ ...named("c1", "Amt", 1, 1), ownerName: "root" }, { ...named("c2", "Amt", 1, 2), ownerName: "bob" }];
+    await open("?view=metadata&all=1");
+    expect(within(screen.getByTestId("tag-row-t2")).getByText(t.ownedBy("bob"))).toBeTruthy();
+    expect(within(screen.getByTestId("tag-row-t1")).queryByText(t.ownedBy("root"))).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: t.correspondents }));
+    const rows = within(page().getByRole("list", { name: t.correspondents })).getAllByRole("listitem");
+    expect(rows.map((li) => li.textContent?.includes(t.ownedBy("bob")))).toEqual(expect.arrayContaining([true, false]));
+    expect(page().queryByText(t.ownedBy("root"))).toBeNull();
   });
 
   it("names each refusal", () => {

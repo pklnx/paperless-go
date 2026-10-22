@@ -143,7 +143,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
               <DocumentList state={state} update={update} query={query} user={user} metadata={metadata.data} everyone={everyone} reload={imported} onMaxUploadSize={onMaxUploadSize} onChanged={onChanged} />
             </div>
           )}
-          {view === "metadata" && <MetadataPage metadata={metadata} onChanged={onChanged} open={select} />}
+          {view === "metadata" && <MetadataPage metadata={metadata} userName={user.name} onChanged={onChanged} open={select} />}
           {view === "profile" && <ProfilePage user={user} />}
           {view === "log" && <LogPage admin={user.admin} />}
           {view === "users" && <UsersPage />}

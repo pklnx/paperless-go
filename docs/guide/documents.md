@@ -107,13 +107,18 @@ stay checked for the next change.
 When every loaded document is checked and the search has more, "Select all
 matches of this search" covers every match, also those not loaded yet (at
 most 5 000). Before such a change the bar counts the matches again and
-asks; the change then applies to the search, as the server finds it at
-that moment.
+asks with that number. The change then applies to exactly the documents
+that were counted: if a document was added, changed or removed in the
+meantime so that the matches are no longer the same, nothing is changed,
+and the bar counts again and asks again ("The matches changed since they
+were counted: now … documents.").
 
 Tags, correspondents and types belong to one user. An admin who checked
 documents of several users can move them in or out of the inbox, mark
 them as favourites and remove a correspondent or type, but setting tags,
-a correspondent or a type needs documents of a single user.
+a correspondent or a type needs documents of a single user. The bar says
+so before anything is sent: "Tags…" explains the rule, and
+"Correspondent…" and "Type…" offer only removing.
 
 Documents cannot be deleted yet: that comes with the trash.
 
@@ -136,7 +141,7 @@ the list filtered by it.
   of the two first.
 
 An admin sees their own rows here, and everyone's with "Everyone's
-documents" on; an admin may rename, recolour, move and delete other users'
+documents" on, where each row of another user names the owner; an admin may rename, recolour, move and delete other users'
 rows, and each such change is in the log.
 
 ## Admins

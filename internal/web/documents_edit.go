@@ -35,6 +35,7 @@ const (
 	codeTooMany         = "too_many_documents"
 	codeSeveralOwners   = "several_owners"
 	codeTagAddRemove    = "tag_add_and_remove"
+	codeMatchChanged    = "match_changed"
 	codeDocChanged      = "document_changed"
 )
 
@@ -51,6 +52,15 @@ type documentError struct {
 	ModifiedAt *time.Time `json:"modifiedAt,omitempty"`
 }
 
+// matchChangedJSON is the 409 of a change by search whose matches are no
+// longer the confirmed set. Matched (the number the change would cover
+// now, informational) is sent also when it is 0.
+type matchChangedJSON struct {
+	Error   string `json:"error"`
+	Code    string `json:"code"`
+	Matched int    `json:"matched"`
+}
+
 // refuseDocument answers 400 with code and msg.
 func (s *Server) refuseDocument(w http.ResponseWriter, code, msg string) {
 	s.writeJSON(w, http.StatusBadRequest, documentError{Error: msg, Code: code})
@@ -60,12 +70,17 @@ func (s *Server) refuseDocument(w http.ResponseWriter, code, msg string) {
 func (s *Server) failDocument(w http.ResponseWriter, r *http.Request, err error) {
 	var taken *store.ASNTakenError
 	var tooMany *store.TooManyError
+	var matchChanged *store.MatchChangedError
 	var ve *store.ValidationError
-	var changed *store.DocumentChangedError
+	var docChanged *store.DocumentChangedError
 	switch {
-	case errors.As(err, &changed):
+	case errors.As(err, &matchChanged):
+		s.writeJSON(w, http.StatusConflict, matchChangedJSON{
+			Error: "the matches of the search changed since they were counted", Code: codeMatchChanged, Matched: matchChanged.Count,
+		})
+	case errors.As(err, &docChanged):
 		s.writeJSON(w, http.StatusConflict, documentError{
-			Error: "the document was changed meanwhile", Code: codeDocChanged, ModifiedAt: &changed.ModifiedAt,
+			Error: "the document was changed meanwhile", Code: codeDocChanged, ModifiedAt: &docChanged.ModifiedAt,
 		})
 	case errors.As(err, &taken):
 		s.writeJSON(w, http.StatusConflict, documentError{
@@ -301,6 +316,9 @@ type bulkJSON struct {
 	// DryRun (only with match) changes nothing and answers what the
 	// search covers.
 	DryRun bool `json:"dryRun"`
+	// Fingerprint is required with match without dryRun and refused
+	// otherwise: the dry run's fingerprint, passed back unchanged.
+	Fingerprint string `json:"fingerprint"`
 
 	AddTags       []string         `json:"addTags"`
 	RemoveTags    []string         `json:"removeTags"`
@@ -320,10 +338,15 @@ type bulkJSON struct {
 // inbox, favorite. Tags, or a correspondent or type to set, need
 // documents of a single owner (400 several_owners).
 //
-// With dryRun and match it answers {matched, owners, limit} and changes
-// nothing: the count the UI confirms before sending the change. Otherwise
-// {updated}: the number of changed documents (0 for a search without
-// matches). A change writes document.bulk_update (count, fields,
+// With dryRun and match it answers {matched, owners, limit, fingerprint}
+// and changes nothing: the count the UI confirms before sending the
+// change (fingerprint is left out above the limit). A change by match must
+// send that fingerprint (else 400 invalid_selection, as is a fingerprint
+// with ids or dryRun); it is applied only when the matches are still
+// exactly the counted set, else 409 match_changed with matched (the
+// number it would cover now) and nothing changes: the client counts again
+// and asks again. Otherwise {updated}: the number of changed documents (0
+// for a search that matched nothing at its dry run either). A change writes document.bulk_update (count, fields,
 // selection, ids, the search for match, bulkRun) and one document.update
 // per document (fields, bulkRun, and ownerId for another user's
 // document), in the same transaction.
@@ -341,6 +364,10 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.DryRun && in.Match == nil {
 		s.refuseDocument(w, codeInvalidSelect, "dryRun needs match")
+		return
+	}
+	if in.Fingerprint != "" && (in.Match == nil || in.DryRun) {
+		s.refuseDocument(w, codeInvalidSelect, "fingerprint goes only with a change by search")
 		return
 	}
 	sel := store.BulkSelection{IDs: in.IDs}
@@ -363,6 +390,11 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 			sel.Owner = &osc.UserID
 		}
 		sel.Match = &q
+		if !in.DryRun && in.Fingerprint == "" {
+			s.refuseDocument(w, codeInvalidSelect, "a change by search needs the fingerprint of its dry run")
+			return
+		}
+		sel.Fingerprint = in.Fingerprint
 	}
 	if in.DryRun {
 		m, err := s.store.CountBulkMatches(r.Context(), sc, sel)
@@ -370,7 +402,7 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 			s.failDocument(w, r, err)
 			return
 		}
-		s.writeJSON(w, http.StatusOK, map[string]int{"matched": m.Count, "owners": m.Owners, "limit": store.MaxBulkMatches})
+		s.writeJSON(w, http.StatusOK, bulkDryRunJSON{Matched: m.Count, Owners: m.Owners, Limit: store.MaxBulkMatches, Fingerprint: m.Fingerprint})
 		return
 	}
 	if in.IDs != nil {
@@ -423,6 +455,14 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]int{"updated": len(changed)})
+}
+
+// bulkDryRunJSON is the answer of a dry run.
+type bulkDryRunJSON struct {
+	Matched     int    `json:"matched"`
+	Owners      int    `json:"owners"`
+	Limit       int    `json:"limit"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // newBulkRun is a random ID that ties a bulk change's summary entry to its

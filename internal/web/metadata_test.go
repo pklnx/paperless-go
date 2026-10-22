@@ -313,6 +313,35 @@ func TestMetadataOwners(t *testing.T) {
 	}
 }
 
+// An admin's metadata lists carry each row's owner name, so the metadata
+// page can tell everyone's rows apart; a user's lists carry none (#106).
+func TestMetadataOwnerNames(t *testing.T) {
+	f := newAuthFixture(t)
+	f.addUser("alice", metaPassword, false)
+	f.addUser("root", metaPassword, true)
+	a := f.as()
+	a.loginOK("alice", metaPassword)
+	r := f.as()
+	r.loginOK("root", metaPassword)
+	for _, kind := range []string{"tags", "correspondents", "document-types"} {
+		a.expect("POST", "/api/"+kind, map[string]any{"name": "Alice's"}, 201)
+		r.expect("POST", "/api/"+kind, map[string]any{"name": "Root's"}, 201)
+	}
+	for _, c := range []struct{ path, key string }{
+		{"/api/tags", "tags"}, {"/api/correspondents", "correspondents"}, {"/api/document-types", "documentTypes"},
+	} {
+		rows := metaRows(t, r.expect("GET", c.path, nil, 200), c.key)
+		if rows["Alice's"]["ownerName"] != "alice" || rows["Root's"]["ownerName"] != "root" {
+			t.Errorf("admin's %s: %v", c.key, rows)
+		}
+		for _, row := range metaRows(t, a.expect("GET", c.path, nil, 200), c.key) {
+			if _, ok := row["ownerName"]; ok {
+				t.Errorf("alice's %s carry owner names: %v", c.key, row)
+			}
+		}
+	}
+}
+
 func TestMetadataCounts(t *testing.T) {
 	f := newAuthFixture(t)
 	alice := f.addUser("alice", metaPassword, false)

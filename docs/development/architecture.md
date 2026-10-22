@@ -837,13 +837,34 @@ another user's document answers `404` and an admin sees all.
   an admin's selection across owners answers `400` `several_owners`;
   inbox, favourite and clearing work across owners. Nothing to change is
   `400` `nothing_to_change`. The answer is `{updated}`, `0` for a search
-  without matches (which writes no entry).
+  whose dry run matched nothing either (which writes no entry).
 
   **Dry run.** `{"match": {...}, "dryRun": true}` changes nothing and
-  answers `{matched, owners, limit}`: the number of matches (also above the
-  limit), their owners (`0` above the limit) and the limit, so the UI
-  shows the count and asks before it sends the change. The list itself
+  answers `{matched, owners, limit, fingerprint}`: the number of matches
+  (also above the limit), their owners (`0` above the limit), the limit,
+  and the fingerprint of the matched set (left out above the limit, where
+  the change is refused anyway; for no matches, the empty set's), so the
+  UI shows the count and asks before it sends the change. The list itself
   has no total.
+
+  **The confirmed set (#106).** A change by `match` must send the dry
+  run's `fingerprint` (else `400` `invalid_selection`; a `fingerprint`
+  with `ids` or with `dryRun` is refused the same way). It is applied
+  only to exactly the documents the user confirmed: when the matches after
+  the recheck under the lock (below) are not that set (one more, one less,
+  or the same count with another document), nothing changes, no entry is
+  written, and the answer is `409` `{"code": "match_changed", "matched":
+  n}`. `n` is the number the change would cover now (also `0`), for
+  information only: the client counts again with a dry run (which also
+  gives `owners` and `limit`) and asks again; the UI never resends by
+  itself. The fingerprint is opaque: `v1.` and the unpadded base64url
+  (`RawURLEncoding`) SHA-256 of the matched IDs, sorted by their 16 bytes
+  and concatenated (`store.matchFingerprint`); clients pass it back
+  unchanged, never compute it, and compare nothing. It grants nothing (it
+  only narrows a change the caller may make anyway), so it carries no key.
+  It needs no client-sent ID list, so the server still resolves the
+  search itself (maintainer decision 6 of #7). The limit is checked first:
+  a set that grew past 5 000 is `too_many_documents`, not `409`.
 
   **Locking.** One transaction resolves the selection, locks the
   documents in id order (`LockDocuments`, `ORDER BY id FOR NO KEY
@@ -859,9 +880,15 @@ another user's document answers `404` and an admin sees all.
   `MatchDocumentIDs`, outside the filter block), so it returns at most
   those and the limit cannot cut any off (#99,
   `TestBulkUpdateByMatchRecheckKeepsLockedMatches`). The selection is
-  fixed at the first match, which the user confirmed in the dry run and
-  the limit was checked on: documents that start matching between the
-  match and the lock are neither added nor a reason to refuse. Before its
+  fixed at the first match, which the limit was checked on: documents
+  that start matching between the match and the lock are neither added
+  nor a reason to refuse. The locked documents that still match are then
+  compared with the confirmed fingerprint (`confirmMatch`); a document
+  that left the match in that window makes them differ, so the change is
+  `409` instead of changing the rest (`TestBulkUpdateByMatchRecheckedAfterLock`;
+  without the recheck the locked set would still fit the fingerprint and
+  the document would be changed). `ErrMatchChanged` is no deadlock, so it
+  is not retried; an attempt retried after a deadlock compares again. Before its
   documents the bulk change takes the key shares of the rows it links,
   so it and a metadata delete lock in one order (see Lock order under
   Search index); a deadlock all the same (a writer outside that order) is
@@ -894,7 +921,10 @@ answers `404` and an admin may change everyone's (the row keeps its owner).
   list (`List*WithCounts`, the subtree by a recursive CTE). `owner=me`
   limits an admin to their own rows; `owner=<user ID>` (admins only; a
   non-admin may name only themselves, else `403`) to one user's, for the
-  pickers of another user's document.
+  pickers of another user's document. For admins each row also has
+  `ownerName` (one `ListUsers` per list, as for documents), so the
+  metadata page can name the owner of another user's row; nothing for
+  anybody else.
 - **`POST`** creates a row owned by the caller: `name`, for tags also
   `parentId` and `color`. An admin may pass `ownerId` to create it for
   another user (inline creation on that user's document); anybody else
