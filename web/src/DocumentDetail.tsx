@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type TouchEvent } from "react";
 import { ApiError, documentsApi, metadataApi, type DocumentDetail as Doc, type DocumentSummary, type Metadata, type MetadataKind, type User } from "./api";
 import { documentName, ProcessingStatus } from "./DocumentParts";
-import { formFrom, isDirty, patchFrom, type DocumentForm, type InvalidField } from "./documentForm";
+import { formFrom, isDirty, patchFrom, rebaseForm, type DocumentForm, type InvalidField } from "./documentForm";
 import { ArrowIcon, CloseIcon, InboxIcon, StarIcon, iconButton } from "./icons";
 import { lang, t } from "./i18n";
 import type { PickerOption } from "./Picker";
@@ -79,14 +79,23 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   const dirtyNow = () => docRef.current !== null && formRef.current !== null && isDirty(docRef.current, formRef.current);
   const dirty = doc !== null && form !== null && isDirty(doc, form);
 
+  // Which opening of a document is shown: it changes when another document
+  // opens (the detail stays mounted for ?doc=B) and on unmount. An answer
+  // to a save (or to its reload after a conflict) applies only while the
+  // opening it was started from is still shown; a late one never lands on
+  // another document's form, nor on the same document opened again.
+  const visit = useRef(0);
+
   useEffect(() => {
     const ctl = new AbortController();
+    const mine = ++visit.current;
     setDoc(null);
     setForm(null);
     setLoadError("");
     setErrors({});
     setGeneral("");
     setSaved(false);
+    setSaving(false);
     documentsApi.get(id, ctl.signal).then(
       (d) => {
         setDoc(d);
@@ -97,7 +106,11 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
         setLoadError(err instanceof ApiError && err.status === 404 ? t.documentNotFound : t.failed(err instanceof Error ? err.message : String(err)));
       },
     );
-    return () => ctl.abort();
+    return () => {
+      ctl.abort();
+      // Unmount or another document: answers started now are late.
+      if (visit.current === mine) visit.current++;
+    };
   }, [id]);
 
   const owner = doc?.ownerId;
@@ -119,7 +132,8 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   useEffect(
     () =>
       setNavigationGuard((next) => {
-        if (next.doc === id && next.view === "") return true;
+        // null: leaving the app (logging out).
+        if (next && next.doc === id && next.view === "") return true;
         return !dirtyNow() || window.confirm(t.unsavedChanges);
       }),
     [id],
@@ -137,8 +151,12 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   const index = docs.findIndex((d) => d.id === id);
   const prev = index > 0 ? docs[index - 1] : undefined;
   const next = index >= 0 ? docs[index + 1] : undefined;
-  const nav = useRef({ prev, next, close, open });
-  nav.current = { prev, next, close, open };
+  // While a save is in flight there is no previous or next (buttons, arrow
+  // keys, swipe): Done may still navigate when it answers. Escape, close,
+  // Back and the sidebar still go through the guard; a late answer is
+  // dropped then (visit).
+  const nav = useRef({ prev, next, close, open, saving });
+  nav.current = { prev, next, close, open, saving };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -149,10 +167,10 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
       if (e.key === "Escape") {
         e.preventDefault();
         n.close();
-      } else if (!inField(e.target) && e.key === "ArrowLeft" && n.prev) {
+      } else if (!inField(e.target) && e.key === "ArrowLeft" && n.prev && !n.saving) {
         e.preventDefault();
         n.open(n.prev.id);
-      } else if (!inField(e.target) && e.key === "ArrowRight" && n.next) {
+      } else if (!inField(e.target) && e.key === "ArrowRight" && n.next && !n.saving) {
         e.preventDefault();
         n.open(n.next.id);
       }
@@ -183,6 +201,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     const dy = p.clientY - s.y;
     if (Math.abs(dx) < 70 || Math.abs(dy) > 50) return;
     const n = nav.current;
+    if (n.saving) return;
     if (dx < 0 && n.next) n.open(n.next.id);
     if (dx > 0 && n.prev) n.open(n.prev.id);
   };
@@ -226,6 +245,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     if (code === "invalid_title") return { field: "title", text: t.invalidTitle };
     if (code === "invalid_notes") return { field: "notes", text: t.invalidNotes };
     if (code === "owner_mismatch") return { text: t.ownerMismatch };
+    if (code === "document_changed") return { text: t.documentChanged };
     if (err.status === 404) return { text: t.documentNotFound };
     if (err.status === 503) return { text: t.tryAgainLater };
     return { text: t.failed(err.message) };
@@ -254,22 +274,61 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     setSaving(true);
     setErrors({});
     setGeneral("");
-    documentsApi.patch(id, patch).then(
+    const mine = visit.current;
+    const current = () => visit.current === mine;
+    // The precondition: modifiedAt exactly as the server answered it.
+    documentsApi.patch(id, { ...patch, expectedModifiedAt: doc.modifiedAt }).then(
       (d) => {
+        // The save happened: the list shows it even when it came late.
+        onSaved(d);
+        if (!current()) return;
         setSaving(false);
         docRef.current = d;
         formRef.current = formFrom(d);
         setDoc(d);
         setForm(formRef.current);
-        onSaved(d);
         if (done) after();
         else setSaved(true);
       },
       (err: unknown) => {
+        if (!current()) return;
+        if (err instanceof ApiError && err.body.code === "document_changed") {
+          rebase(doc, form);
+          return;
+        }
         setSaving(false);
         const e = errorOf(err);
         if (e.field) setErrors({ [e.field]: e.text });
         else setGeneral(typeof e.text === "string" ? e.text : "");
+      },
+    );
+  };
+
+  // The document changed meanwhile (409 document_changed): load it again
+  // and keep the user's edits on top of it (rebaseForm). The reloaded
+  // document becomes the base, so the next save sends only the user's
+  // fields with its modifiedAt as the precondition. Nothing is saved by
+  // itself, and Done does not navigate. The form stays disabled until the
+  // reload answers; a late answer is dropped (visit).
+  const rebase = (old: Doc, edited: DocumentForm) => {
+    const mine = visit.current;
+    documentsApi.get(id).then(
+      (fresh) => {
+        if (visit.current !== mine) return;
+        setSaving(false);
+        const rebased = rebaseForm(old, edited, fresh);
+        docRef.current = fresh;
+        formRef.current = rebased;
+        setDoc(fresh);
+        setForm(rebased);
+        setGeneral(t.documentChanged);
+      },
+      (err: unknown) => {
+        if (visit.current !== mine) return;
+        setSaving(false);
+        // The form keeps its base: the next save is refused again and
+        // tries the reload once more.
+        setGeneral(t.failed(err instanceof Error ? err.message : String(err)));
       },
     );
   };
@@ -298,7 +357,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   }, [metaData]);
 
   const name = doc ? documentName({ title: form?.title ?? doc.title, originalFileName: doc.originalFileName }) : "";
-  const foreignOwner = doc && user.admin && doc.ownerName && doc.ownerName !== user.name ? doc.ownerName : "";
+  const foreignOwner = doc && user.admin && doc.ownerName && doc.ownerId !== user.id ? doc.ownerName : "";
   const fieldError = (f: ErrorField) =>
     errors[f] ? (
       <p id={`${headingId}-${f}-error`} role="alert" className="text-sm text-danger">
@@ -325,12 +384,12 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
           <h2 id={headingId} ref={heading} tabIndex={-1} className="min-w-0 flex-1 truncate px-1 font-semibold outline-none">
             {doc ? name : loadError ? t.document : t.loading}
           </h2>
-          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!prev} aria-label={t.previousDocument} title={t.previousDocument} onClick={() => prev && open(prev.id)}>
+          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!prev || saving} aria-label={t.previousDocument} title={t.previousDocument} onClick={() => prev && !saving && open(prev.id)}>
             <span className="-rotate-90">
               <ArrowIcon up />
             </span>
           </button>
-          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!next} aria-label={t.nextDocument} title={t.nextDocument} onClick={() => next && open(next.id)}>
+          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!next || saving} aria-label={t.nextDocument} title={t.nextDocument} onClick={() => next && !saving && open(next.id)}>
             <span className="rotate-90">
               <ArrowIcon up />
             </span>

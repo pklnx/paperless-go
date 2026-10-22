@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { DocumentDetail, NamedRow, Tag } from "./api";
+import { documentsApi, type DocumentDetail, type NamedRow, type Tag } from "./api";
 import { App } from "./App";
 import { stubXHR } from "./fakeXHR";
 import { t } from "./i18n";
@@ -84,12 +84,38 @@ interface Sent {
 
 let docs: Map<string, DocumentDetail>;
 let order: string[];
-let user: { name: string; admin: boolean };
+let user: { id: number; name: string; admin: boolean };
 let tags: Tag[];
 let correspondents: NamedRow[];
 let requests: Sent[];
 /** The answer to the next PATCH instead of a success. */
 let patchAnswer: { status: number; body: unknown } | null;
+/** While set, a PATCH waits for it before it answers (a slow server). */
+let patchHold: Promise<void> | null;
+/** Each saved change gets a new modifiedAt with microseconds, as the server's. */
+let stamp: number;
+
+/** Holds back the PATCH answers until the returned function is called. */
+function holdPatches(): () => void {
+  let release: () => void = () => {};
+  patchHold = new Promise<void>((r) => (release = r));
+  return () => {
+    patchHold = null;
+    release();
+  };
+}
+
+/** The promises of the detail's PATCH calls, to wait until one has been handled. */
+function watchPatches(): Promise<unknown>[] {
+  const calls: Promise<unknown>[] = [];
+  const real = documentsApi.patch;
+  vi.spyOn(documentsApi, "patch").mockImplementation((id, body) => {
+    const p = real(id, body);
+    calls.push(p.catch(() => {}));
+    return p;
+  });
+  return calls;
+}
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
@@ -103,13 +129,15 @@ beforeEach(() => {
   pdf.loads = [];
   pdf.renders = [];
   pdf.numPages = 3;
-  user = { name: "alice", admin: false };
+  user = { id: 1, name: "alice", admin: false };
   docs = new Map();
   order = [];
   tags = [];
   correspondents = [];
   requests = [];
   patchAnswer = null;
+  patchHold = null;
+  stamp = 0;
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
     const body: unknown = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
@@ -137,8 +165,16 @@ beforeEach(() => {
       const d = docs.get(decodeURIComponent(m[1]!));
       if (!d) return json(404, { error: "not found" });
       if (method === "PATCH") {
+        if (patchHold) await patchHold;
         if (patchAnswer) return json(patchAnswer.status, patchAnswer.body);
-        const next = { ...d, ...(body as Partial<DocumentDetail>) };
+        const { expectedModifiedAt, ...fields } = body as Partial<DocumentDetail> & { expectedModifiedAt?: string };
+        const now = docs.get(d.id)!;
+        // The server's precondition: the string compared as sent.
+        if (expectedModifiedAt !== undefined && expectedModifiedAt !== now.modifiedAt) {
+          return json(409, { error: "changed", code: "document_changed", modifiedAt: now.modifiedAt });
+        }
+        stamp++;
+        const next = { ...now, ...fields, modifiedAt: `2026-10-22T08:00:${String(stamp).padStart(2, "0")}.123456Z` };
         docs.set(d.id, next);
         return json(200, next);
       }
@@ -262,7 +298,7 @@ describe("editing", () => {
     expect(sent.url).toBe("/api/documents/d1");
     const old = new Date("2026-03-15T09:30:00Z");
     const want = new Date(2026, 3, 2, old.getHours(), old.getMinutes(), old.getSeconds()).toISOString();
-    expect(sent.body).toEqual({ title: "Rechnung März", archiveSerialNumber: null, documentDate: want });
+    expect(sent.body).toEqual({ title: "Rechnung März", archiveSerialNumber: null, documentDate: want, expectedModifiedAt: "2026-10-21T10:00:00Z" });
     expect(await detail().findByText(t.saved)).toBeTruthy();
     expect(save.disabled).toBe(true);
   });
@@ -317,7 +353,7 @@ describe("editing", () => {
     expect(post.body).toEqual({ name: "Arzt" });
     fireEvent.click(detail().getByRole("button", { name: t.save }));
     await waitFor(() => expect(patches()).toHaveLength(1));
-    expect(patches()[0]!.body).toEqual({ tagIds: ["t1", "new-Arzt"] });
+    expect(patches()[0]!.body).toEqual({ tagIds: ["t1", "new-Arzt"], expectedModifiedAt: "2026-10-21T10:00:00Z" });
   });
 
   it("chooses an existing correspondent with the keyboard", async () => {
@@ -335,11 +371,11 @@ describe("editing", () => {
     fireEvent.keyDown(box, { key: "Escape" });
     expect(screen.getByTestId("document-detail")).toBeTruthy();
     fireEvent.click(detail().getByRole("button", { name: t.save }));
-    await waitFor(() => expect(patches()[0]?.body).toEqual({ correspondentId: "c1" }));
+    await waitFor(() => expect(patches()[0]?.body).toEqual({ correspondentId: "c1", expectedModifiedAt: "2026-10-21T10:00:00Z" }));
   });
 
   it("loads the owner's metadata for an admin and creates rows for the owner", async () => {
-    user = { name: "root", admin: true };
+    user = { id: 9, name: "root", admin: true };
     tags = [tag("bt", "Bobs", { ownerId: 2 })];
     serve(doc("d1", "Bobs Brief", { ownerId: 2, ownerName: "bob" }));
     await openAt("/?doc=d1");
@@ -366,7 +402,7 @@ describe("Done", () => {
     fireEvent.change(titleField(), { target: { value: "A2" } });
     fireEvent.click(detail().getByRole("button", { name: t.done }));
     await waitFor(() => expect(docParam()).toBe("d2"));
-    expect(patches()[0]!.body).toEqual({ title: "A2", isInbox: false });
+    expect(patches()[0]!.body).toEqual({ title: "A2", isInbox: false, expectedModifiedAt: "2026-10-21T10:00:00Z" });
     await waitFor(() => expect(titleField().value).toBe("B"));
     // The inbox list no longer has it; no question about unsaved changes.
     expect(screen.queryByRole("link", { name: "A2" })).toBeNull();
@@ -380,7 +416,7 @@ describe("Done", () => {
     await waitFor(() => expect(titleField().value).toBe("A"));
     fireEvent.click(detail().getByRole("button", { name: t.done }));
     await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
-    expect(patches()[0]!.body).toEqual({ isInbox: false });
+    expect(patches()[0]!.body).toEqual({ isInbox: false, expectedModifiedAt: "2026-10-21T10:00:00Z" });
   });
 });
 
@@ -452,5 +488,218 @@ describe("navigation", () => {
     fireEvent.click(detail().getByRole("button", { name: t.nextDocument }));
     expect(docParam()).toBe("d2");
     expect(window.confirm).not.toHaveBeenCalled();
+  });
+});
+
+describe("a save that answers late (#105)", () => {
+  // A (d1) is open, reached from B (d2), so Back goes to B. A's save is
+  // held back; the user goes Back to B and confirms leaving; then A's
+  // answer comes.
+  async function saveAThenBackToB(button: string) {
+    serve(doc("d1", "A"), doc("d2", "B"));
+    const calls = watchPatches();
+    await openAt("/?doc=d2");
+    fireEvent.click(detail().getByRole("button", { name: t.previousDocument }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    fireEvent.change(titleField(), { target: { value: "A2" } });
+    const release = holdPatches();
+    fireEvent.click(detail().getByRole("button", { name: button }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    vi.mocked(window.confirm).mockReturnValue(true);
+    act(() => window.history.back());
+    await waitFor(() => expect(docParam()).toBe("d2"));
+    await waitFor(() => expect(titleField().value).toBe("B"));
+    return { calls, release };
+  }
+
+  it("Save: the answer for A never lands in B's form", async () => {
+    const { calls, release } = await saveAThenBackToB(t.save);
+    await act(async () => {
+      release();
+      await calls[0];
+    });
+    expect(titleField().value).toBe("B");
+    expect(docParam()).toBe("d2");
+    // The save did happen: the list row shows it.
+    expect(await screen.findByRole("link", { name: "A2" })).toBeTruthy();
+    expect(detail().queryByText(t.saved)).toBeNull();
+  });
+
+  it("Done: the late answer neither fills B's form nor navigates", async () => {
+    const { calls, release } = await saveAThenBackToB(t.done);
+    await act(async () => {
+      release();
+      await calls[0];
+    });
+    expect(docParam()).toBe("d2");
+    expect(titleField().value).toBe("B");
+    expect(screen.getByTestId("document-detail")).toBeTruthy();
+  });
+
+  it("a late conflict answer for A neither rebases into B's form nor reloads A", async () => {
+    const { calls, release } = await saveAThenBackToB(t.save);
+    patchAnswer = { status: 409, body: { error: "changed", code: "document_changed", modifiedAt: "2026-10-22T09:00:00.000001Z" } };
+    const gets = () => requests.filter((r) => r.method === "GET" && r.url === "/api/documents/d1").length;
+    const before = gets();
+    await act(async () => {
+      release();
+      await calls[0];
+    });
+    expect(gets()).toBe(before);
+    expect(titleField().value).toBe("B");
+    expect(detail().queryByText(t.documentChanged)).toBeNull();
+  });
+
+  it("A, then B, then A again: the late answer of the first visit does not overwrite the new form", async () => {
+    serve(doc("d1", "A"), doc("d2", "B"));
+    const calls = watchPatches();
+    await openAt("/?doc=d2");
+    fireEvent.click(detail().getByRole("button", { name: t.previousDocument }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    fireEvent.change(titleField(), { target: { value: "A2" } });
+    const release = holdPatches();
+    fireEvent.click(detail().getByRole("button", { name: t.done }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    vi.mocked(window.confirm).mockReturnValue(true);
+    act(() => window.history.back());
+    await waitFor(() => expect(docParam()).toBe("d2"));
+    await waitFor(() => expect(titleField().value).toBe("B"));
+    act(() => window.history.forward());
+    await waitFor(() => expect(docParam()).toBe("d1"));
+    // A is open again (the held save has not changed it yet); the user edits anew.
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    fireEvent.change(titleField(), { target: { value: "A-new" } });
+    await act(async () => {
+      release();
+      await calls[0];
+    });
+    expect(titleField().value).toBe("A-new");
+    expect(docParam()).toBe("d1");
+    expect(detail().queryByText(t.saved)).toBeNull();
+    // The list row shows the save that did happen.
+    expect(await screen.findByRole("link", { name: "A2" })).toBeTruthy();
+  });
+
+  it("no previous or next while saving: buttons disabled, arrow keys do nothing", async () => {
+    serve(doc("d1", "A"), doc("d2", "B"), doc("d3", "C"));
+    const calls = watchPatches();
+    await openAt("/?doc=d2");
+    fireEvent.change(titleField(), { target: { value: "B2" } });
+    const release = holdPatches();
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect((detail().getByRole("button", { name: t.nextDocument }) as HTMLButtonElement).disabled).toBe(true);
+    expect((detail().getByRole("button", { name: t.previousDocument }) as HTMLButtonElement).disabled).toBe(true);
+    // Leaving would be allowed: only the save in flight keeps the keys and
+    // the swipe from navigating.
+    vi.mocked(window.confirm).mockReturnValue(true);
+    fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    fireEvent.keyDown(document.body, { key: "ArrowLeft" });
+    const section = screen.getByTestId("document-detail");
+    fireEvent.touchStart(section, { touches: [{ clientX: 300, clientY: 400 }] });
+    fireEvent.touchEnd(section, { changedTouches: [{ clientX: 100, clientY: 410 }] });
+    expect(docParam()).toBe("d2");
+    await act(async () => {
+      release();
+      await calls[0];
+    });
+    expect(await detail().findByText(t.saved)).toBeTruthy();
+    expect((detail().getByRole("button", { name: t.nextDocument }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    expect(docParam()).toBe("d3");
+  });
+});
+
+describe("changed elsewhere meanwhile (#105)", () => {
+  it("sends modifiedAt exactly as the server answered it, microseconds included", async () => {
+    serve(doc("d1", "A", { modifiedAt: "2026-10-21T10:00:00.123456Z" }));
+    await openAt("/?doc=d1");
+    fireEvent.change(titleField(), { target: { value: "A2" } });
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    expect(await detail().findByText(t.saved)).toBeTruthy();
+    expect(patches()[0]!.body).toEqual({ title: "A2", expectedModifiedAt: "2026-10-21T10:00:00.123456Z" });
+    // The answer's modifiedAt is the next precondition.
+    fireEvent.change(titleField(), { target: { value: "A3" } });
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(2));
+    expect(patches()[1]!.body).toEqual({ title: "A3", expectedModifiedAt: "2026-10-22T08:00:01.123456Z" });
+  });
+
+  it("on a conflict loads the document again, keeps the user's edits on top, and saves against the new state", async () => {
+    tags = [tag("t1", "Eins"), tag("t2", "Zwei"), tag("t3", "Drei")];
+    serve(doc("d1", "A", { tagIds: ["t1", "t3"], notes: "alt" }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.tags });
+    await waitFor(() => expect((box as HTMLInputElement).disabled).toBe(false));
+    // The user: a new title, and tag t3 removed.
+    fireEvent.change(titleField(), { target: { value: "A2" } });
+    fireEvent.click(detail().getByRole("button", { name: t.removeChoice("Drei") }));
+    // Meanwhile another change (a bulk change, another tab) adds t2 and
+    // rewrites the notes.
+    docs.set("d1", { ...docs.get("d1")!, tagIds: ["t1", "t2", "t3"], notes: "neu", modifiedAt: "2026-10-21T11:00:00.654321Z" });
+    const getsBefore = requests.filter((r) => r.method === "GET" && r.url === "/api/documents/d1").length;
+
+    // Done: refused; no navigation, nothing saved by itself.
+    fireEvent.click(detail().getByRole("button", { name: t.done }));
+    expect(await detail().findByText(t.documentChanged)).toBeTruthy();
+    expect(docParam()).toBe("d1");
+    expect(patches()).toHaveLength(1);
+    expect(requests.filter((r) => r.method === "GET" && r.url === "/api/documents/d1").length).toBe(getsBefore + 1);
+    // The form: the user's title, the other change's notes, and t2 kept
+    // with t3 still removed.
+    await waitFor(() => expect((detail().getByLabelText(t.fieldNotes) as HTMLTextAreaElement).value).toBe("neu"));
+    expect(titleField().value).toBe("A2");
+    expect(detail().getByRole("button", { name: t.removeChoice("Zwei") })).toBeTruthy();
+    expect(detail().getByRole("button", { name: t.removeChoice("Eins") })).toBeTruthy();
+    expect(detail().queryByRole("button", { name: t.removeChoice("Drei") })).toBeNull();
+    expect((detail().getByRole("button", { name: t.save }) as HTMLButtonElement).disabled).toBe(false);
+
+    // Saved again: only the user's fields, against the reloaded state.
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    expect(await detail().findByText(t.saved)).toBeTruthy();
+    expect(patches()[1]!.body).toEqual({ title: "A2", tagIds: ["t1", "t2"], expectedModifiedAt: "2026-10-21T11:00:00.654321Z" });
+    const stored = docs.get("d1")!;
+    expect(stored.notes).toBe("neu");
+    expect(stored.tagIds).toEqual(["t1", "t2"]);
+    expect(detail().queryByText(t.documentChanged)).toBeNull();
+  });
+});
+
+describe("logging out (#105)", () => {
+  const logouts = () => requests.filter((r) => r.method === "DELETE" && r.url === "/api/session");
+
+  it("asks about unsaved changes; refused, the session and the edits stay", async () => {
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    fireEvent.change(titleField(), { target: { value: "changed" } });
+    fireEvent.click(screen.getByRole("button", { name: t.logOut }));
+    expect(window.confirm).toHaveBeenCalledWith(t.unsavedChanges);
+    expect(logouts()).toHaveLength(0);
+    expect(titleField().value).toBe("changed");
+
+    vi.mocked(window.confirm).mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: t.logOut }));
+    await waitFor(() => expect(logouts()).toHaveLength(1));
+    expect(patches()).toHaveLength(0);
+  });
+
+  it("does not ask without changes", async () => {
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    fireEvent.click(screen.getByRole("button", { name: t.logOut }));
+    await waitFor(() => expect(logouts()).toHaveLength(1));
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+});
+
+describe("the owner note (#105)", () => {
+  it("compares owners by ID: the admin's own document with a stale name has none, another user of the same name has one", async () => {
+    user = { id: 9, name: "root", admin: true };
+    serve(doc("d1", "Mine", { ownerId: 9, ownerName: "root-old" }), doc("d2", "Theirs", { ownerId: 2, ownerName: "root" }));
+    await openAt("/?doc=d1");
+    expect(detail().queryByText(t.ownedBy("root-old"))).toBeNull();
+    fireEvent.click(detail().getByRole("button", { name: t.nextDocument }));
+    await waitFor(() => expect(titleField().value).toBe("Theirs"));
+    expect(detail().getByText(t.ownedBy("root"))).toBeTruthy();
   });
 });

@@ -42,7 +42,7 @@ const named = (id: string, name: string, documentCount = 1): NamedRow => ({ id, 
 type Page = { status?: number; body: unknown };
 
 interface Server {
-  user: { name: string; admin: boolean };
+  user: { id: number; name: string; admin: boolean };
   tags: Tag[];
   correspondents: NamedRow[];
   types: NamedRow[];
@@ -68,7 +68,7 @@ beforeEach(() => {
   requests = [];
   lists = [];
   server = {
-    user: { name: "alice", admin: false },
+    user: { id: 1, name: "alice", admin: false },
     tags: [],
     correspondents: [],
     types: [],
@@ -284,8 +284,10 @@ describe("phone drawer", () => {
 
 describe("admin switch", () => {
   it("lists an admin's own documents by default and everyone's when switched on", async () => {
-    server.user = { name: "root", admin: true };
-    server.documents = () => page([doc("1", "Mine", { ownerId: 1, ownerName: "root" }), doc("2", "Bobs", { ownerId: 2, ownerName: "bob" })]);
+    server.user = { id: 1, name: "root", admin: true };
+    // "Old": the admin's own document under a stale name (owners compare by ID).
+    server.documents = () =>
+      page([doc("1", "Mine", { ownerId: 1, ownerName: "root" }), doc("2", "Bobs", { ownerId: 2, ownerName: "bob" }), doc("3", "Old", { ownerId: 1, ownerName: "root-old" })]);
     await start();
     await screen.findByText("Mine");
     const owned = (path: string) => requests.filter((r) => r.startsWith(`GET ${path}`));
@@ -307,6 +309,7 @@ describe("admin switch", () => {
     // Other users' rows name the owner; the admin's own do not.
     expect(await screen.findByText(t.ownedBy("bob"))).toBeTruthy();
     expect(screen.queryByText(t.ownedBy("root"))).toBeNull();
+    expect(screen.queryByText(t.ownedBy("root-old"))).toBeNull();
     expect(sidebar().getByRole("button", { name: t.users })).toBeTruthy();
   });
 

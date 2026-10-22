@@ -324,10 +324,11 @@ func (s *Store) SetDocumentTags(ctx context.Context, sc Scope, id string, tagIDs
 	}
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		q := s.q.WithTx(tx)
-		owner, err := q.LockDocument(ctx, db.LockDocumentParams{ID: u, Owner: sc.owner()})
+		locked, err := q.LockDocument(ctx, db.LockDocumentParams{ID: u, Owner: sc.owner()})
 		if err != nil {
 			return err
 		}
+		owner := locked.OwnerID
 		if err := q.ClearDocumentTags(ctx, u); err != nil {
 			return err
 		}

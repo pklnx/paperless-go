@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { act, cleanup, renderHook } from "@testing-library/react";
-import { activeFilter, documentQuery, filterPatch, formatState, parseState, setNavigationGuard, useViewState, type ViewState } from "./urlState";
+import { activeFilter, confirmLeave, documentQuery, filterPatch, formatState, parseState, setNavigationGuard, useViewState, type ViewState } from "./urlState";
 
 const empty = parseState("");
 
@@ -80,7 +80,7 @@ describe("useViewState", () => {
     window.history.replaceState(null, "", "/?doc=d1");
     const { result } = renderHook(() => useViewState());
     let allow = false;
-    const asked: ViewState[] = [];
+    const asked: (ViewState | null)[] = [];
     const remove = setNavigationGuard((next) => {
       asked.push(next);
       return allow;
@@ -111,5 +111,25 @@ describe("useViewState", () => {
     act(() => result.current[1]({ doc: "" }));
     expect(asked).toHaveLength(n);
     expect(window.location.search).toBe("");
+  });
+
+  it("asks the guard with null on leaving the app (logout); without a guard leaving is fine", () => {
+    expect(confirmLeave()).toBe(true);
+    const asked: (ViewState | null)[] = [];
+    let allow = false;
+    const remove = setNavigationGuard((next) => {
+      asked.push(next);
+      return allow;
+    });
+    try {
+      expect(confirmLeave()).toBe(false);
+      expect(asked).toEqual([null]);
+      allow = true;
+      expect(confirmLeave()).toBe(true);
+    } finally {
+      remove();
+    }
+    expect(confirmLeave()).toBe(true);
+    expect(asked).toHaveLength(2);
   });
 });

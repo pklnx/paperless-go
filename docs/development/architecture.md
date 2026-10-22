@@ -773,12 +773,19 @@ another user's document answers `404` and an admin sees all.
   `isInbox`, `archiveSerialNumber`, `correspondentId`, `documentTypeId`
   (`null` clears these three) and `tagIds` (replaces the tags). `null` for
   any other field answers `400` `invalid_field`, an empty body `400`
-  `nothing_to_change`. One transaction takes the key shares of the rows
+  `nothing_to_change`. The optional `expectedModifiedAt` is a precondition,
+  no field to change (not in `fields`, alone it is `nothing_to_change`):
+  the document's `modifiedAt` exactly as `GET` or the last `PATCH`
+  answered it (RFC 3339 with microseconds; the UI keeps the string and
+  never passes it through a `Date`, which has milliseconds only). One
+  transaction takes the key shares of the rows
   it links (Lock order, under Search index), locks the row (`LockDocument`,
   `FOR NO KEY UPDATE`: no key column changes, so a foreign-key check of a
-  row referencing the document, such as a new job, does not wait),
-  updates the given
-  columns (the search triggers follow), replaces the tags, touches
+  row referencing the document, such as a new job, does not wait; it also
+  returns `modified_at`), checks the precondition after the lock (`404`
+  first, then `409` `document_changed` with the current `modifiedAt`:
+  nothing changes, no audit entry, no retry), updates the given
+  columns (the search triggers follow), replaces the tags, advances
   `modified_at` and writes `document.update` (target the document, no
   target name; `fields`, the names of the fields sent; `ownerId` for an
   admin's change of another user's document). Processing writes only its
@@ -787,8 +794,30 @@ another user's document answers `404` and an admin sees all.
   `400` `owner_mismatch` (a tag, correspondent or type that is not the
   document owner's, also for an admin), `invalid_title`, `invalid_notes`,
   `invalid_asn`, `404` outside the scope, `409` `asn_taken` with
-  `documentId` of the document that has the number, `503` without the
-  audit log or after 3 deadlocks (`Retry-After: 1`).
+  `documentId` of the document that has the number, `409`
+  `document_changed` with `modifiedAt`, `503` without the
+  audit log or after 3 deadlocks (`Retry-After: 1`). Without
+  `expectedModifiedAt` a change goes through as before (API clients that
+  set one field need not read first); the UI always sends it, and on
+  `document_changed` loads the document again and keeps the user's edits
+  on top (`rebaseForm`: the user's changed fields, tags as added/removed),
+  then asks to save again; it never saves by itself (#105).
+- **`modified_at` advances strictly on every document write** (#105). A
+  write of a field `PATCH` sends or of `document_tags` must advance
+  `modified_at`, with `modified_at = GREATEST(now(), modified_at +
+  interval '1 microsecond')`: `now()` is the transaction's start, so two
+  writes in one transaction, in the same microsecond or after the clock
+  stepped back would otherwise get the same value, and an equal value
+  must mean "unchanged since read". `UpdateDocument`, `TouchDocument`
+  (`SetDocumentTags`), `PatchDocument` and `BulkUpdateDocuments` use it;
+  processing (`SetDocumentProcessed`) writes no such field and leaves
+  `modified_at` alone, so OCR finishing causes no false conflict. A new
+  writer (classification, an import into existing documents) must use the
+  same form; `TestDocumentUpdatesAdvanceModifiedAt` checks every `UPDATE
+  documents` in `internal/store/queries` with `SetDocumentProcessed` as
+  the only exception. Foreign-key actions (a deleted correspondent, type
+  or tag) do not advance it: `PATCH` sends only changed fields, and a
+  stale deleted tag ends in `owner_mismatch`.
 - **`POST /api/documents/bulk`** (write) changes several documents, all
   or nothing (`store.BulkUpdateDocuments`). The selection is exactly one
   of:
@@ -846,7 +875,7 @@ another user's document answers `404` and an admin sees all.
   in between is left alone; `TestBulkUpdateByMatchRecheckedAfterLock`
   holds the bulk change between match and lock), removes and
   adds the tags (one `DELETE`, one `INSERT … ON CONFLICT DO NOTHING`),
-  updates the columns and touches `modified_at` of every document. The
+  updates the columns and advances `modified_at` of every document. The
   recheck runs over the locked IDs only (`only_ids` in
   `MatchDocumentIDs`, outside the filter block), so it returns at most
   those and the limit cannot cut any off (#99,
@@ -1144,10 +1173,15 @@ cookie and drawn into canvases.
   `web/vite.config.ts` to `/assets/pdfjs-<version>/` (`/assets/` is cached as
   immutable, so the version is in the path) and served by `pnpm dev` too.
 - **CSP unchanged.** Workers fall back to `script-src 'self'`. pdf.js 6 has
-  no eval (`isEvalSupported` is gone); `pdfViewer.test.ts` checks the
-  shipped files for `eval(` and `new Function(` (the legacy build's core-js
-  has only its `Function("return this")` fallback, reached without
-  `globalThis`). WebAssembly is off (`useWasm: false`), so `'wasm-unsafe-eval'`
+  no eval (`isEvalSupported` is gone). `pnpm check:dist`
+  (`web/scripts/check-dist.mjs`, a step of CI's `web` job after the build)
+  scans every `.js`/`.mjs` of the built `dist/assets` for `eval(` (also
+  `(0, eval)(`) and `new Function(`, so a new dependency or a Vite
+  transform is caught too; a missing build, main chunk, worker or fallback
+  decoder fails it. `pdfViewer.test.ts` runs the same rules
+  (`web/scripts/noEval.mjs`) over pdf.js's package files as a fast local
+  check. The legacy build's core-js has only its `Function("return this")`
+  fallback, reached without `globalThis`, which is allowed. WebAssembly is off (`useWasm: false`), so `'wasm-unsafe-eval'`
   is not needed: JPEG 2000, JBIG2 and CCITT images use the decoders'
   JavaScript versions, and ICC colour profiles fall back to their alternate
   colour space. `TestContentSecurityPolicy` (`internal/web/ui`) pins the

@@ -15,7 +15,7 @@ import { Sidebar, type Loaded } from "./Sidebar";
 import { useCollapsedTags } from "./tagTree";
 import { UploadQueue } from "./uploads";
 import { UsersPage } from "./UsersPage";
-import { documentQuery, filterPatch, useViewState, type Filter } from "./urlState";
+import { confirmLeave, documentQuery, filterPatch, useViewState, type Filter } from "./urlState";
 
 /** The app: the login gate, then the logged-in shell. */
 export function App() {
@@ -83,6 +83,11 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
     closeMenu();
   };
   const setEveryone = (on: boolean) => update({ all: on ? "1" : "" });
+  // Logging out leaves the app: the open document's unsaved changes are
+  // asked about first, and a refusal keeps the session and the edits.
+  const leave = () => {
+    if (confirmLeave()) logout();
+  };
   const onMaxUploadSize = useCallback(
     (n: number) => {
       queue.maxSize = n;
@@ -97,7 +102,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
       select={select}
       show={show}
       user={user}
-      logout={logout}
+      logout={leave}
       counts={counts}
       metadata={metadata}
       collapsed={collapsed}
@@ -138,7 +143,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
               <DocumentList state={state} update={update} query={query} user={user} metadata={metadata.data} everyone={everyone} reload={imported} onMaxUploadSize={onMaxUploadSize} onChanged={onChanged} />
             </div>
           )}
-          {view === "metadata" && <MetadataPage metadata={metadata} userName={user.name} onChanged={onChanged} open={select} />}
+          {view === "metadata" && <MetadataPage metadata={metadata} userId={user.id} onChanged={onChanged} open={select} />}
           {view === "profile" && <ProfilePage user={user} />}
           {view === "log" && <LogPage admin={user.admin} />}
           {view === "users" && <UsersPage />}

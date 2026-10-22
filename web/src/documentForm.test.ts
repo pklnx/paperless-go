@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DocumentDetail } from "./api";
-import { formFrom, isDirty, localDay, parseASN, patchFrom, withDay } from "./documentForm";
+import { formFrom, isDirty, localDay, parseASN, patchFrom, rebaseForm, withDay } from "./documentForm";
 
 const stored: DocumentDetail = {
   id: "d1",
@@ -70,5 +70,43 @@ describe("patchFrom", () => {
     expect(patchFrom(stored, { ...f, asn: "x" })).toEqual({ invalid: "asn" });
     expect(patchFrom(stored, { ...f, date: "" })).toEqual({ invalid: "date" });
     expect(isDirty(stored, { ...f, asn: "x" })).toBe(true);
+  });
+});
+
+describe("rebaseForm (#105)", () => {
+  // Another change while the form was open: a tag t3 added, the notes and
+  // the correspondent rewritten, the title kept.
+  const changed: DocumentDetail = { ...stored, modifiedAt: "2026-10-21T11:00:00.000001Z", tagIds: ["t1", "t2", "t3"], notes: "other", correspondentId: "c2" };
+
+  it("keeps the user's changed fields and takes the new value of every other one", () => {
+    const form = { ...formFrom(stored), title: "Mine", isFavorite: true };
+    const out = rebaseForm(stored, form, changed);
+    expect(out).toEqual({ ...formFrom(changed), title: "Mine", isFavorite: true });
+    // Saved against the new state, only the user's fields go.
+    expect(patchFrom(changed, out)).toEqual({ patch: { title: "Mine", isFavorite: true } });
+  });
+
+  it("wins for a field both changed, the user's value", () => {
+    const out = rebaseForm(stored, { ...formFrom(stored), notes: "user's" }, changed);
+    expect(out.notes).toBe("user's");
+    expect(out.correspondentId).toBe("c2");
+  });
+
+  it("merges tags as a diff: added ones added, removed ones removed, the other change's kept", () => {
+    const form = { ...formFrom(stored), tagIds: ["t2", "t4"] }; // t1 removed, t4 added
+    const out = rebaseForm(stored, form, changed);
+    expect(out.tagIds).toEqual(["t2", "t3", "t4"]);
+    // A tag the other change removed stays removed when the user left it alone.
+    const gone: DocumentDetail = { ...stored, tagIds: ["t1"] };
+    expect(rebaseForm(stored, { ...formFrom(stored), tagIds: ["t1", "t2", "t5"] }, gone).tagIds).toEqual(["t1", "t5"]);
+  });
+
+  it("keeps an invalid value the user typed, so it is still shown", () => {
+    const out = rebaseForm(stored, { ...formFrom(stored), asn: "x" }, { ...changed, archiveSerialNumber: 9 });
+    expect(out.asn).toBe("x");
+  });
+
+  it("without edits it is the new state", () => {
+    expect(rebaseForm(stored, formFrom(stored), changed)).toEqual(formFrom(changed));
   });
 });

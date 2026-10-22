@@ -99,7 +99,7 @@ describe("metadata page", () => {
   });
 
   it("offers as parents only the same owner's tags, never the tag itself or its sub-tags", async () => {
-    server.user = { name: "root", admin: true };
+    server.user = { id: 1, name: "root", admin: true };
     server.tags = [tag("t1", "Steuer"), tag("t2", "2024", "t1"), tag("t3", "Q1", "t2"), tag("t4", "Arzt"), tag("t5", "Bobs", null, { ownerId: 2 })];
     await open("?view=metadata&all=1");
     fireEvent.click(page().getByRole("button", { name: t.editEntry("2024") }));
@@ -215,7 +215,7 @@ describe("metadata page", () => {
   });
 
   it("uses the admin's own names unless Everyone's documents is on", async () => {
-    server.user = { name: "root", admin: true };
+    server.user = { id: 1, name: "root", admin: true };
     await open();
     expect(requests.filter((r) => r.path === "/api/tags").at(-1)!.url).toBe("/api/tags?owner=me");
     cleanup();
@@ -224,12 +224,19 @@ describe("metadata page", () => {
   });
 
   it("names the owner of another user's rows with Everyone's documents on, not the admin's own", async () => {
-    server.user = { name: "root", admin: true };
-    server.tags = [tag("t1", "Steuer", null, { ownerId: 1, ownerName: "root" }), tag("t2", "Steuer", null, { ownerId: 2, ownerName: "bob" })];
+    server.user = { id: 1, name: "root", admin: true };
+    // Owners compare by ID: the admin's own tag under a stale name has no
+    // note, another user who is also called "root" has one.
+    server.tags = [
+      tag("t1", "Steuer", null, { ownerId: 1, ownerName: "root-old" }),
+      tag("t2", "Steuer", null, { ownerId: 2, ownerName: "bob" }),
+      tag("t3", "Steuer", null, { ownerId: 3, ownerName: "root" }),
+    ];
     server.correspondents = [{ ...named("c1", "Amt", 1, 1), ownerName: "root" }, { ...named("c2", "Amt", 1, 2), ownerName: "bob" }];
     await open("?view=metadata&all=1");
     expect(within(screen.getByTestId("tag-row-t2")).getByText(t.ownedBy("bob"))).toBeTruthy();
-    expect(within(screen.getByTestId("tag-row-t1")).queryByText(t.ownedBy("root"))).toBeNull();
+    expect(within(screen.getByTestId("tag-row-t1")).queryByText(t.ownedBy("root-old"))).toBeNull();
+    expect(within(screen.getByTestId("tag-row-t3")).getByText(t.ownedBy("root"))).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: t.correspondents }));
     const rows = within(page().getByRole("list", { name: t.correspondents })).getAllByRole("listitem");
     expect(rows.map((li) => li.textContent?.includes(t.ownedBy("bob")))).toEqual(expect.arrayContaining([true, false]));

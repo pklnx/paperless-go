@@ -50,15 +50,16 @@ SET title = sqlc.arg(title),
     is_favorite = sqlc.arg(is_favorite), is_inbox = sqlc.arg(is_inbox),
     archive_serial_number = sqlc.narg(archive_serial_number),
     correspondent_id = sqlc.narg(correspondent_id), document_type_id = sqlc.narg(document_type_id),
-    modified_at = now()
+    modified_at = GREATEST(now(), modified_at + interval '1 microsecond')
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner));
 
--- LockDocument locks the document row for a change of its tags and returns
--- its owner. FOR NO KEY UPDATE: no key column changes, so the foreign-key
--- checks of rows referencing the document (document_tags, jobs; FOR KEY
--- SHARE) need not wait for the change.
+-- LockDocument locks the document row for a change and returns its owner
+-- and modified_at (PatchDocument's precondition). FOR NO KEY UPDATE: no
+-- key column changes, so the foreign-key checks of rows referencing the
+-- document (document_tags, jobs; FOR KEY SHARE) need not wait for the
+-- change.
 -- name: LockDocument :one
-SELECT owner_id FROM documents
+SELECT owner_id, modified_at FROM documents
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
 FOR NO KEY UPDATE;
 
@@ -72,7 +73,7 @@ FROM unnest(sqlc.arg(tag_ids)::uuid[]) AS t
 ON CONFLICT DO NOTHING;
 
 -- name: TouchDocument :exec
-UPDATE documents SET modified_at = now() WHERE id = $1;
+UPDATE documents SET modified_at = GREATEST(now(), modified_at + interval '1 microsecond') WHERE id = $1;
 
 -- name: DeleteDocument :execrows
 DELETE FROM documents
@@ -81,6 +82,10 @@ WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc
 -- name: PatchDocument :execrows
 -- Sets only the given columns: a NULL narg, or a false set_* flag, keeps
 -- the stored value. The caller has locked the row (LockDocument).
+-- Every write of a PATCH-able field or of document_tags advances
+-- modified_at strictly (GREATEST: now() is the transaction's start, so two
+-- writes in one transaction, or in the same microsecond, would otherwise
+-- get the same value); equal modified_at means unchanged since read.
 UPDATE documents
 SET title = COALESCE(sqlc.narg(title)::text, title),
     document_date = COALESCE(sqlc.narg(document_date)::timestamptz, document_date),
@@ -93,7 +98,7 @@ SET title = COALESCE(sqlc.narg(title)::text, title),
                             ELSE correspondent_id END,
     document_type_id = CASE WHEN sqlc.arg(set_document_type)::boolean THEN sqlc.narg(document_type_id)::uuid
                             ELSE document_type_id END,
-    modified_at = now()
+    modified_at = GREATEST(now(), modified_at + interval '1 microsecond')
 WHERE id = sqlc.arg(id);
 
 -- name: DocumentByASN :one
@@ -144,7 +149,7 @@ ON CONFLICT DO NOTHING;
 
 -- name: BulkUpdateDocuments :exec
 -- Sets the given columns of the locked documents as PatchDocument does,
--- and touches modified_at of every one of them.
+-- and advances modified_at of every one of them.
 UPDATE documents
 SET is_favorite = COALESCE(sqlc.narg(is_favorite)::boolean, is_favorite),
     is_inbox = COALESCE(sqlc.narg(is_inbox)::boolean, is_inbox),
@@ -152,5 +157,5 @@ SET is_favorite = COALESCE(sqlc.narg(is_favorite)::boolean, is_favorite),
                             ELSE correspondent_id END,
     document_type_id = CASE WHEN sqlc.arg(set_document_type)::boolean THEN sqlc.narg(document_type_id)::uuid
                             ELSE document_type_id END,
-    modified_at = now()
+    modified_at = GREATEST(now(), modified_at + interval '1 microsecond')
 WHERE id = ANY (sqlc.arg(ids)::uuid[]);

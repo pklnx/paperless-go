@@ -39,7 +39,8 @@ export const pdfjsAssets = __PDFJS_ASSETS__;
  * - No XFA forms. The viewer draws no annotation layer and runs no PDF
  *   scripts (pdf.js runs them only in its viewer app, not in the library).
  * pdf.js 6 has no eval of its own (isEvalSupported is gone; the test
- * pdfjs.test.ts checks the shipped files), and the CSP forbids it anyway.
+ * pdfViewer.test.ts checks the shipped files, and
+ * check:dist (scripts/check-dist.mjs) the built ones), and the CSP forbids it anyway.
  * The file is fetched with the session cookie (same origin).
  */
 export function pdfjsOptions(url: string) {

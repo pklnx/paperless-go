@@ -71,7 +71,7 @@ SET is_favorite = COALESCE($1::boolean, is_favorite),
                             ELSE correspondent_id END,
     document_type_id = CASE WHEN $5::boolean THEN $6::uuid
                             ELSE document_type_id END,
-    modified_at = now()
+    modified_at = GREATEST(now(), modified_at + interval '1 microsecond')
 WHERE id = ANY ($7::uuid[])
 `
 
@@ -86,7 +86,7 @@ type BulkUpdateDocumentsParams struct {
 }
 
 // Sets the given columns of the locked documents as PatchDocument does,
-// and touches modified_at of every one of them.
+// and advances modified_at of every one of them.
 func (q *Queries) BulkUpdateDocuments(ctx context.Context, arg BulkUpdateDocumentsParams) error {
 	_, err := q.db.Exec(ctx, bulkUpdateDocuments,
 		arg.IsFavorite,
@@ -457,7 +457,7 @@ func (q *Queries) ListDocuments(ctx context.Context, owner *int64) ([]ListDocume
 }
 
 const lockDocument = `-- name: LockDocument :one
-SELECT owner_id FROM documents
+SELECT owner_id, modified_at FROM documents
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
 FOR NO KEY UPDATE
 `
@@ -467,15 +467,21 @@ type LockDocumentParams struct {
 	Owner *int64
 }
 
-// LockDocument locks the document row for a change of its tags and returns
-// its owner. FOR NO KEY UPDATE: no key column changes, so the foreign-key
-// checks of rows referencing the document (document_tags, jobs; FOR KEY
-// SHARE) need not wait for the change.
-func (q *Queries) LockDocument(ctx context.Context, arg LockDocumentParams) (int64, error) {
+type LockDocumentRow struct {
+	OwnerID    int64
+	ModifiedAt time.Time
+}
+
+// LockDocument locks the document row for a change and returns its owner
+// and modified_at (PatchDocument's precondition). FOR NO KEY UPDATE: no
+// key column changes, so the foreign-key checks of rows referencing the
+// document (document_tags, jobs; FOR KEY SHARE) need not wait for the
+// change.
+func (q *Queries) LockDocument(ctx context.Context, arg LockDocumentParams) (LockDocumentRow, error) {
 	row := q.db.QueryRow(ctx, lockDocument, arg.ID, arg.Owner)
-	var owner_id int64
-	err := row.Scan(&owner_id)
-	return owner_id, err
+	var i LockDocumentRow
+	err := row.Scan(&i.OwnerID, &i.ModifiedAt)
+	return i, err
 }
 
 const lockDocuments = `-- name: LockDocuments :many
@@ -532,7 +538,7 @@ SET title = COALESCE($1::text, title),
                             ELSE correspondent_id END,
     document_type_id = CASE WHEN $10::boolean THEN $11::uuid
                             ELSE document_type_id END,
-    modified_at = now()
+    modified_at = GREATEST(now(), modified_at + interval '1 microsecond')
 WHERE id = $12
 `
 
@@ -553,6 +559,10 @@ type PatchDocumentParams struct {
 
 // Sets only the given columns: a NULL narg, or a false set_* flag, keeps
 // the stored value. The caller has locked the row (LockDocument).
+// Every write of a PATCH-able field or of document_tags advances
+// modified_at strictly (GREATEST: now() is the transaction's start, so two
+// writes in one transaction, or in the same microsecond, would otherwise
+// get the same value); equal modified_at means unchanged since read.
 func (q *Queries) PatchDocument(ctx context.Context, arg PatchDocumentParams) (int64, error) {
 	result, err := q.db.Exec(ctx, patchDocument,
 		arg.Title,
@@ -575,7 +585,7 @@ func (q *Queries) PatchDocument(ctx context.Context, arg PatchDocumentParams) (i
 }
 
 const touchDocument = `-- name: TouchDocument :exec
-UPDATE documents SET modified_at = now() WHERE id = $1
+UPDATE documents SET modified_at = GREATEST(now(), modified_at + interval '1 microsecond') WHERE id = $1
 `
 
 func (q *Queries) TouchDocument(ctx context.Context, id pgtype.UUID) error {
@@ -590,7 +600,7 @@ SET title = $1,
     is_favorite = $4, is_inbox = $5,
     archive_serial_number = $6,
     correspondent_id = $7, document_type_id = $8,
-    modified_at = now()
+    modified_at = GREATEST(now(), modified_at + interval '1 microsecond')
 WHERE id = $9 AND ($10::bigint IS NULL OR owner_id = $10)
 `
 

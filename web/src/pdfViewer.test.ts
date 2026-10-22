@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pdfjsAssets, pdfjsOptions } from "./pdfViewer";
 import { previewSource } from "./DocumentPreview";
+import { findEval } from "../scripts/noEval.mjs";
 import pdfjsPackage from "pdfjs-dist/package.json";
 // The pdf.js files the build ships (pdfjsLoader.ts and vite.config.ts).
 import pdfjsLibrary from "pdfjs-dist/legacy/build/pdf.mjs?raw";
@@ -45,14 +46,11 @@ describe("pdf.js options", () => {
   });
 
   it("ships pdf.js without eval: the CSP has no 'unsafe-eval'", () => {
+    // A fast check of the package's sources; CI also scans the built
+    // output (pnpm check:dist) with the same rules.
     for (const [name, src] of Object.entries({ pdfjsLibrary, pdfjsWorker, jpxFallback, jbig2Fallback })) {
       expect(src.length, name).toBeGreaterThan(1000);
-      expect(/(^|[^\w$.])eval\s*\(/.test(src), `${name}: eval(`).toBe(false);
-      expect(/new\s+Function\s*\(/.test(src), `${name}: new Function(`).toBe(false);
-      // core-js's polyfills in the legacy build fall back to Function("return
-      // this") only without globalThis, which every browser of the CSP has.
-      const calls = src.match(/(^|[^\w$.])Function\s*\([^)]*\)/g) ?? [];
-      expect(calls.map((c) => c.replace(/^[^F]*/, "").replace(/'/g, '"')), name).toEqual(calls.map(() => 'Function("return this")'));
+      expect(findEval(name, src)).toEqual([]);
     }
   });
 });

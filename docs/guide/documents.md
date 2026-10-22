@@ -64,8 +64,14 @@ exist yet can be created right there ("Create …").
   opens the next document. Elsewhere it closes the document.
 - An archive serial number that another document has is refused; the
   message links to that document.
-- Leaving a document with unsaved changes (another document, Back, closing
-  the tab) asks first.
+- If the document was changed elsewhere while you edited it (a change of
+  several documents, another tab or another user), saving is refused: the
+  document is loaded again, your changes are kept on top of the new state
+  (tags you added or removed, on top of the new tags), and you check them
+  and save again. Nothing is saved by itself.
+- While a save is running, previous and next wait for it.
+- Leaving a document with unsaved changes (another document, Back, logging
+  out, closing the tab) asks first.
 
 Below the form are the file's name, type, size, pages and date added, the
 downloads of the original and the archive PDF, and Retry when processing
