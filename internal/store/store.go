@@ -55,17 +55,50 @@ func (s *Store) Close() { s.pool.Close() }
 // Ping checks that the database answers.
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
-// Migrate applies all pending schema migrations.
+// Migrate applies all pending schema migrations and rebuilds the
+// collation-dependent indexes if the database locale changed (see
+// collation.go).
 func (s *Store) Migrate(ctx context.Context) ([]string, error) {
-	var applied []string
-	err := s.withMigrations(func(p *goose.Provider) error {
+	r, err := s.MigrateAndRebuild(ctx)
+	return r.Applied, err
+}
+
+// MigrateReport is what MigrateAndRebuild did.
+type MigrateReport struct {
+	Applied  []string // migrations applied
+	Rebuilt  []string // indexes rebuilt after a change of the database locale
+	Warnings []string // for the operator; nothing failed
+}
+
+// MigrateAndRebuild is Migrate with a report. It refuses PostgreSQL older
+// than MinServerVersion before anything else. The collation-dependent
+// indexes are rebuilt before the migrations run, so these work on indexes
+// in order, and the fingerprint is stored after them, once its table
+// exists.
+func (s *Store) MigrateAndRebuild(ctx context.Context) (MigrateReport, error) {
+	var r MigrateReport
+	if err := s.CheckServerVersion(ctx); err != nil {
+		return r, err
+	}
+	builtFor, rebuilt, warnings, err := s.ensureCollation(ctx, "")
+	r.Rebuilt, r.Warnings = rebuilt, warnings
+	if err != nil {
+		return r, err
+	}
+	err = s.withMigrations(func(p *goose.Provider) error {
 		results, err := p.Up(ctx)
-		for _, r := range results {
-			applied = append(applied, r.Source.Path)
+		for _, res := range results {
+			r.Applied = append(r.Applied, res.Source.Path)
 		}
 		return err
 	})
-	return applied, err
+	if err != nil {
+		return r, err
+	}
+	// Its warnings repeat the first call's.
+	_, rebuilt, _, err = s.ensureCollation(ctx, builtFor)
+	r.Rebuilt = append(r.Rebuilt, rebuilt...)
+	return r, err
 }
 
 // MigrateDown rolls back the most recently applied migration. This usually

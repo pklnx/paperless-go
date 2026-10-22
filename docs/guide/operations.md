@@ -121,6 +121,100 @@ index, and the extension too if the paperless-go database user owns it
 (it created it) and nothing else uses it; one an administrator created
 stays.
 
+**PostgreSQL image: Debian instead of Alpine; PostgreSQL 17 or newer.**
+Compose now runs `postgres:18` instead of `postgres:18-alpine`: on Alpine's
+C library (musl) broad full-text searches ranked about four times slower
+(2.3 s instead of 0.6 s on 30 000 documents). paperless-go now needs
+PostgreSQL 17 or newer: `migrate`, `serve` and `process` refuse an older
+server with `PostgreSQL 17 or newer is required, found …`. Compose runs 18;
+with your own server, upgrade it first.
+
+The data volume stays; no dump is needed. But the database sorts text with
+the C library's locale (`en_US.utf8`), and glibc sorts differently from
+musl, so the indexes on names (users, tags, correspondents, document types,
+passkeys, API keys) and a few other text columns are out of order on the
+new image: lookups miss rows and unique names can be added twice.
+PostgreSQL does not warn about it. `./pgo migrate` rebuilds those indexes
+(seconds; the search index is not affected), and the web server and
+`process` refuse to start until it has. When Compose recreates the
+database container with the new image, it restarts a running web server too,
+which then refuses to serve until `./pgo migrate` has run. Stop the web server first,
+so nothing is written in between:
+
+```sh
+docker compose stop web
+./pgo migrate              # starts postgres:18, prints "rebuilt index ..." per index
+docker compose up -d web
+```
+
+With a clone, run `git pull` and then these three lines; `docker compose up
+-d` alone does not rebuild anything.
+
+If something wrote to the database on the new image before the rebuild,
+two rows may now have the same name. `./pgo migrate` then still rebuilds
+the other indexes and stops with `these keys are duplicated`, listing
+every duplicated key of each affected index, for example
+`(name)=(alice)`. Rename one row of each with
+`docker compose exec postgres psql -U paperless -d paperless` (renaming is
+safer than deleting: deleting a user or tag in psql also deletes what
+depends on it, without an audit log entry) and run `./pgo migrate` again.
+If it stops because a table stayed locked, something still uses the
+database: stop the web server and `process` and run it again.
+
+The same rebuild runs once after every later change of the C library
+(a new `postgres:18` image on a database with the libc locale) and after
+every PostgreSQL major upgrade; migrate does it, and the web server waits
+for it.
+
+On your own PostgreSQL server, the first `./pgo migrate` of this version
+rebuilds the same indexes once, as it does not know which C library built
+them. If the database belongs to another role than paperless-go's user,
+migrate cannot record the new collation version after a C library update
+and prints `warning: … have an administrator run: ALTER DATABASE …
+REFRESH COLLATION VERSION;`. The indexes are correct by then; run that
+statement as the owner so PostgreSQL stops warning about a mismatch.
+
+Lists sorted by name (tags, correspondents, users) now follow glibc's
+order, which ignores case and accents (`apfel`, `Ärzte`, `Zebra`) instead
+of musl's byte order (`Zebra`, `apfel`, `Ärzte`). A new installation uses
+PostgreSQL's own locale instead (`POSTGRES_INITDB_ARGS` in
+`docker-compose.yml`): code point order, the same as before, and no image
+or C library can change it. To move an existing database to it, recreate
+the database volume from a backup. Stop the web server first, so the
+backup holds every change:
+
+```sh
+docker compose stop web
+./pgo backup ./backups
+docker compose rm -sf postgres
+docker volume rm paperless-go_pgdata   # the database; ./backups has it
+docker compose up -d --wait postgres   # a new, empty database with the new locale
+docker compose exec -T postgres pg_restore --clean --if-exists --single-transaction --exit-on-error \
+  -U paperless -d paperless < backups/paperless-YYYYMMDDTHHMMSSZ.dump
+./pgo migrate
+docker compose up -d web
+```
+
+If `pg_restore` fails, nothing was restored; the error names the cause.
+
+To go back to an older version on the Alpine image, first roll back this
+version's migration with this version, as the older one refuses a newer
+schema: run `./pgo migrate down --yes` until it reports `rolled back
+00013_index_collation.sql` (`./pgo migrate status` lists the applied
+migrations). Then extract the older bundle (or check out the older
+commit), which brings back `postgres:18-alpine`, and rebuild the indexes
+by hand, as the older version does not do it:
+
+```sh
+docker compose stop web
+docker compose up -d --wait postgres
+docker compose exec -T postgres psql -U paperless -d paperless -c 'REINDEX DATABASE paperless'
+docker compose up -d web
+```
+
+Restoring a backup made before the upgrade works too and needs no
+`REINDEX`.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build

@@ -20,7 +20,7 @@ Compose, set them in `.env`; `docker-compose.yml` passes them on.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PAPERLESS_GO_DATABASE_URL` | (required) | PostgreSQL URL. Compose sets it. |
+| `PAPERLESS_GO_DATABASE_URL` | (required) | PostgreSQL URL; PostgreSQL 17 or newer (older servers are refused). Compose sets it. |
 | `PAPERLESS_GO_DATA_DIR` | `./data` (`/data` in the image) | Directory of the document files. |
 | `PAPERLESS_GO_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `PAPERLESS_GO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Host names accepted in the `Host` header, comma-separated, without port. See [DNS rebinding](./security#dns-rebinding). |

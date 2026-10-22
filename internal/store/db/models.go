@@ -118,6 +118,12 @@ type DocumentType struct {
 	ModifiedAt time.Time
 }
 
+type IndexCollation struct {
+	Singleton   bool
+	Fingerprint string
+	BuiltAt     time.Time
+}
+
 type Installation struct {
 	ID        pgtype.UUID
 	Singleton bool

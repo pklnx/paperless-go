@@ -89,3 +89,31 @@ func TestCheckSchemaRefusesNewerDatabase(t *testing.T) {
 		t.Errorf("checkSchema with a newer database: %v", err)
 	}
 }
+
+// Text indexes built under another locale (after a change of the
+// PostgreSQL image): the commands refuse to start until migrate has
+// rebuilt them, and migrate says what it rebuilt.
+func TestCheckSchemaRefusesStaleIndexCollation(t *testing.T) {
+	st, url := storetest.NewWithURL(t)
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	if _, err := conn.Exec(ctx, "UPDATE index_collation SET fingerprint = 'provider=c collate=en_US.utf8 ctype=en_US.utf8 locale= version= server=18'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSchema(ctx, st); err == nil || !strings.Contains(err.Error(), "locale") ||
+		!strings.Contains(err.Error(), "migrate") {
+		t.Fatalf("checkSchema with stale text indexes: %v", err)
+	}
+	out, err := run(t, url, "migrate")
+	if err != nil || !strings.Contains(out, `rebuilt index "public"."users_name_key"`) ||
+		!strings.Contains(out, "database schema is up to date") {
+		t.Fatalf("migrate: %q, %v", out, err)
+	}
+	if err := checkSchema(ctx, st); err != nil {
+		t.Errorf("checkSchema after migrate: %v", err)
+	}
+}

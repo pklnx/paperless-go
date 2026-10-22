@@ -26,6 +26,13 @@ it refuses to start when `tesseract --list-langs` lacks one. Without them, set
 the tools or `process` runs. The tests with the real tools run in the image:
 `docker build --target toolstest -t paperless-go:toolstest . && docker run --rm paperless-go:toolstest`.
 
+Database tests need PostgreSQL 17 or newer: `docker compose up -d postgres`
+gives the same `postgres:18` as Compose and CI, and on an older server every
+database test fails in migrate (`PostgreSQL 17 or newer is required`). Any
+`postgres:18` container works too, with the locale of new installations:
+`docker run -d -p 127.0.0.1:5433:5432 -e POSTGRES_USER=paperless -e POSTGRES_PASSWORD=paperless -e POSTGRES_INITDB_ARGS='--locale-provider=builtin --locale=C.UTF-8' postgres:18`;
+without `POSTGRES_INITDB_ARGS` it has the libc locale of existing ones.
+
 Database tests create a throwaway database per test
 (`internal/store/storetest`) and are skipped without `TEST_DATABASE_URL`; the
 user in it needs `CREATEDB`. CI runs them all.

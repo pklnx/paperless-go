@@ -121,6 +121,30 @@ not interpret it: unknown keys and values are kept, while whitespace and key
 order are normalized by PostgreSQL. Lists are ordered as in the app: by
 `sort_index`, then `created_at`, then `id`.
 
+**Locale and text indexes.** Unique names (`users.name`, `lower(name)` of
+tags, correspondents and document types, passkey and API key names) and a
+few other text columns have B-tree indexes, sorted by the database's
+collation. The Compose database is created with PostgreSQL's builtin
+provider and `C.UTF-8` (code point order, PostgreSQL's own case mapping),
+so no image or C library can change it. Databases created earlier, or on
+your own server, use the C library's locale (`en_US.utf8`): a new libc
+sorts differently and leaves those indexes out of order, so lookups miss
+rows and unique indexes let duplicates in. musl (the former Alpine image)
+reports no collation version, so PostgreSQL gives no warning when such a
+database moves to glibc. `Store.Migrate` (`internal/store/collation.go`)
+keeps a fingerprint of the locale (provider, collate, ctype, provider
+version, PostgreSQL major) in `index_collation` and, when it changed or is
+unknown under a libc or ICU locale, rebuilds every index with a collatable
+key whose collation is not `C`/`POSIX` (`REINDEX INDEX`, one at a time
+with a 30 s `lock_timeout`, before the migrations run; a failed unique
+index is reported with all its duplicated keys after the others are
+rebuilt), stores the fingerprint and refreshes `datcollversion` (only a
+warning when the user does not own the database). PostgreSQL 17 or newer
+is required (`pg_database.datlocale`); `migrate`, `serve` and `process`
+check `server_version_num` first. `serve` and
+`process` refuse to start while it is stale. The GIN search index needs no
+rebuild: lexemes compare bytewise.
+
 ## Search index
 
 Full-text search (#6) runs in PostgreSQL. Part 1 (`00011_search.sql`) adds
@@ -148,7 +172,7 @@ and `Straße`/`Strasse` match each other. `Gebuehren` matches them only
 from PostgreSQL 18 on, whose German stemmer (Snowball 3) also folds `ae oe
 ue`; the Compose image runs 18. `unaccent`
 is a trusted extension (PostgreSQL 13+): the database owner creates it
-without superuser rights, and it ships with `postgres:18-alpine`. It and
+without superuser rights, and it ships with `postgres:18`. It and
 `paperless_simple` live in `public` and are always referenced
 schema-qualified, so nothing depends on the caller's `search_path`.
 
@@ -541,8 +565,9 @@ A queue in PostgreSQL turns stored documents into searchable ones
 
 ## Web server
 
-`serve` refuses to start while migrations are pending or the data directory
-is not writable. Every request passes `protect` (`internal/web/middleware.go`):
+`serve` refuses to start while migrations are pending, the text indexes
+were built under another locale (see [Data model](#data-model)) or the data
+directory is not writable. Every request passes `protect` (`internal/web/middleware.go`):
 the `Host` must be allowed (DNS rebinding), and state-changing requests need
 a same-origin `Origin` (or `Sec-Fetch-Site: same-origin`) and the body kind
 of their route in the route table (CSRF; requests with an API key are

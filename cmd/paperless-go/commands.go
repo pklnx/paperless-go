@@ -46,10 +46,17 @@ func newMigrateCmd() *cobra.Command {
 			return err
 		}
 		defer a.close()
-		applied, err := a.store.Migrate(cmd.Context())
+		r, err := a.store.MigrateAndRebuild(cmd.Context())
+		for _, ix := range r.Rebuilt {
+			fmt.Fprintln(cmd.OutOrStdout(), "rebuilt index", ix, "(the database locale changed)")
+		}
+		for _, w := range r.Warnings {
+			fmt.Fprintln(cmd.ErrOrStderr(), "warning:", w)
+		}
 		if err != nil {
 			return err
 		}
+		applied := r.Applied
 		if len(applied) == 0 {
 			fmt.Fprintln(cmd.OutOrStdout(), "database schema is up to date")
 		}
@@ -278,9 +285,14 @@ func warnWithoutUsers(ctx context.Context, st *store.Store, log *slog.Logger) {
 }
 
 // checkSchema refuses to serve a database with pending migrations, where the
-// handlers would fail on missing tables, and one migrated by a newer
-// version, whose schema this binary does not know.
+// handlers would fail on missing tables, one migrated by a newer version,
+// whose schema this binary does not know, and one whose text indexes were
+// built under another locale. It first refuses PostgreSQL older than
+// store.MinServerVersion.
 func checkSchema(ctx context.Context, st *store.Store) error {
+	if err := st.CheckServerVersion(ctx); err != nil {
+		return err
+	}
 	database, known, err := st.SchemaVersions(ctx)
 	if err != nil {
 		return err
@@ -297,6 +309,15 @@ func checkSchema(ctx context.Context, st *store.Store) error {
 		if !s.Applied {
 			return fmt.Errorf("the database schema is not up to date (%s is pending): run %s migrate", s.Path, commandName())
 		}
+	}
+	// Text indexes built under another locale (another PostgreSQL image)
+	// miss rows and let duplicate names in until migrate rebuilds them.
+	rebuild, err := st.CollationNeedsRebuild(ctx)
+	if err != nil {
+		return err
+	}
+	if rebuild {
+		return fmt.Errorf("the database locale changed since its text indexes were built: run %s migrate to rebuild them", commandName())
 	}
 	return nil
 }
