@@ -314,6 +314,15 @@ export interface DocumentSummary {
   originalMime: string;
   originalSize: number;
   hasArchive: boolean;
+  isFavorite?: boolean;
+  isInbox?: boolean;
+  correspondentId?: string | null;
+  documentTypeId?: string | null;
+  tagIds?: string[];
+  /** The owner's user ID (part 2 of #7). */
+  ownerId?: number;
+  /** The owner's name, for admins only (part 2 of #7). */
+  ownerName?: string;
   /** The processing status; missing only when the server could not read it after an upload. */
   processing?: Processing;
   /** The thumbnail's URL (with its version), or null until processing made one. */
@@ -348,9 +357,59 @@ export interface DocumentPage {
   maxUploadSize: number;
 }
 
-/** The query string of a search: the query, the page size, the browser's time zone (for date: and added:) and the cursor. */
-export function searchQuery(q: string, limit: number, cursor = "", timeZone = browserTimeZone()): string {
-  const p = new URLSearchParams({ q, limit: String(limit) });
+/** The list's order: "" is the server's default (relevance with free text, else newest added). */
+export type DocumentSort = "" | "relevance" | "added" | "date";
+
+/**
+ * What the document list shows. q is only what the user typed into the
+ * search field; the sidebar's filters are parameters of their own, so the
+ * server can tell browsing from searching (only a typed query writes a
+ * document.search entry).
+ */
+export interface DocumentQuery {
+  q: string;
+  inbox: boolean;
+  favorite: boolean;
+  tag: string;
+  correspondent: string;
+  type: string;
+  sort: DocumentSort;
+  ascending: boolean;
+  /** Only the caller's own documents: an admin without "Everyone's documents". */
+  ownOnly: boolean;
+}
+
+export const emptyDocumentQuery: DocumentQuery = {
+  q: "",
+  inbox: false,
+  favorite: false,
+  tag: "",
+  correspondent: "",
+  type: "",
+  sort: "",
+  ascending: false,
+  ownOnly: false,
+};
+
+/**
+ * The query string of GET /api/documents for a list, a page size, the
+ * browser's time zone (for date: and added: in q) and the cursor.
+ */
+export function documentListQuery(dq: DocumentQuery, limit: number, cursor = "", timeZone = browserTimeZone()): string {
+  const p = new URLSearchParams();
+  if (dq.q) p.set("q", dq.q);
+  p.set("limit", String(limit));
+  if (dq.inbox) p.set("inbox", "true");
+  if (dq.tag) p.set("tag", dq.tag);
+  if (dq.correspondent) p.set("correspondent", dq.correspondent);
+  if (dq.type) p.set("type", dq.type);
+  // favorite and owner come with part 2 of #7 (the document editing API);
+  // the server must know them before this UI is deployed.
+  if (dq.favorite) p.set("favorite", "true");
+  if (dq.ownOnly) p.set("owner", "me");
+  if (dq.sort) p.set("sort", dq.sort);
+  // Relevance has one direction only.
+  if (dq.ascending && dq.sort !== "relevance") p.set("order", "asc");
   if (timeZone) p.set("tz", timeZone);
   if (cursor) p.set("cursor", cursor);
   return p.toString();
@@ -365,14 +424,65 @@ export function browserTimeZone(): string {
   }
 }
 
+/** The sidebar's counts. */
+export interface DocumentCounts {
+  inbox: number;
+  favorites: number;
+  total: number;
+}
+
+/** owner=me for an admin's own rows; nothing for everything in the caller's scope. */
+const ownerQuery = (ownOnly: boolean) => (ownOnly ? "?owner=me" : "");
+
 export const documentsApi = {
-  /** The caller's newest documents (an admin's: everyone's), at most limit (the server caps it at 100), and the upload limit in bytes. */
-  list: (limit: number, signal?: AbortSignal) => getJSON<DocumentPage>(`/api/documents?limit=${limit}`, signal),
-  /** One page of a search (docs/guide/search.md), best match first; cursor continues after the previous page. */
-  search: (q: string, limit: number, cursor = "", signal?: AbortSignal) => getJSON<DocumentPage>(`/api/documents?${searchQuery(q, limit, cursor)}`, signal),
+  /** One page of the list (docs/guide/search.md for q); cursor continues after the previous page. */
+  list: (dq: DocumentQuery, limit: number, cursor = "", signal?: AbortSignal) =>
+    getJSON<DocumentPage>(`/api/documents?${documentListQuery(dq, limit, cursor)}`, signal),
+  /** The counts of the sidebar: all, inbox and favourites. */
+  counts: (ownOnly: boolean, signal?: AbortSignal) => getJSON<DocumentCounts>(`/api/documents/counts${ownerQuery(ownOnly)}`, signal),
   /** The download URL of a document's original file or archive PDF. */
   fileURL: (id: string, kind: "original" | "archive" = "original") => `/api/documents/${encodeURIComponent(id)}/file?kind=${kind}`,
   /** Queues a document for processing again (Retry); answers the document with its new status. */
   reprocess: async (id: string): Promise<DocumentSummary> =>
     (await send<DocumentSummary>("POST", `/api/documents/${encodeURIComponent(id)}/reprocess`, {}))!,
+};
+
+/** A tag as GET /api/tags lists it. color is "#RRGGBB" or "". */
+export interface Tag {
+  id: string;
+  name: string;
+  ownerId: number;
+  parentId: string | null;
+  color: string;
+  documentCount?: number;
+  /** The distinct documents of the tag and its sub-tags: what the list shows for the tag. */
+  subtreeCount?: number;
+}
+
+/** A correspondent or document type. */
+export interface NamedRow {
+  id: string;
+  name: string;
+  ownerId: number;
+  documentCount?: number;
+}
+
+/** The sidebar's metadata. */
+export interface Metadata {
+  tags: Tag[];
+  correspondents: NamedRow[];
+  documentTypes: NamedRow[];
+}
+
+export const metadataApi = {
+  /** Tags, correspondents and document types with their counts, in one go. */
+  load: async (ownOnly: boolean, signal?: AbortSignal): Promise<Metadata> => {
+    const o = ownerQuery(ownOnly);
+    const [tags, correspondents, types] = await Promise.all([
+      getJSON<{ tags: Tag[] }>(`/api/tags${o}`, signal),
+      getJSON<{ correspondents: NamedRow[] }>(`/api/correspondents${o}`, signal),
+      getJSON<{ documentTypes: NamedRow[] }>(`/api/document-types${o}`, signal),
+    ]);
+    return { tags: tags.tags, correspondents: correspondents.correspondents, documentTypes: types.documentTypes };
+  },
 };

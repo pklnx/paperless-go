@@ -37,7 +37,7 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 | `internal/store/storetest` | A throwaway, migrated database per test. |
 | `internal/web` | HTTP server: the route table with each route's access, login and sessions, user management, the Host and same-origin checks, `/healthz`. |
 | `internal/web/ui` | Embeds the built web UI (`web/` → `internal/web/ui/dist`) and serves it with a strict CSP. |
-| `web` | React UI (TypeScript, Vite, Tailwind CSS). |
+| `web` | React UI (TypeScript, Vite, Tailwind CSS). The view (sidebar filter, search, sort, page, an admin's "Everyone's documents") lives in the URL query (`urlState.ts`), so back, reload and bookmarks work and `GET /` serves every view. The sidebar's filters go to `GET /api/documents` as parameters (`tag`, `correspondent`, `type`, `inbox`, `favorite`), never as `q`, so only a typed search is a search for the audit log. |
 | `docs` | This site (VitePress). |
 
 ## Data model
