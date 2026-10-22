@@ -222,6 +222,19 @@ describe("metadata page", () => {
     expect(requests.filter((r) => r.path === "/api/tags").at(-1)!.url).toBe("/api/tags");
   });
 
+  it("names the owner of another user's rows with Everyone's documents on, not the admin's own", async () => {
+    server.user = { name: "root", admin: true };
+    server.tags = [tag("t1", "Steuer", null, { ownerId: 1, ownerName: "root" }), tag("t2", "Steuer", null, { ownerId: 2, ownerName: "bob" })];
+    server.correspondents = [{ ...named("c1", "Amt", 1, 1), ownerName: "root" }, { ...named("c2", "Amt", 1, 2), ownerName: "bob" }];
+    await open("?view=metadata&all=1");
+    expect(within(screen.getByTestId("tag-row-t2")).getByText(t.ownedBy("bob"))).toBeTruthy();
+    expect(within(screen.getByTestId("tag-row-t1")).queryByText(t.ownedBy("root"))).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: t.correspondents }));
+    const rows = within(page().getByRole("list", { name: t.correspondents })).getAllByRole("listitem");
+    expect(rows.map((li) => li.textContent?.includes(t.ownedBy("bob")))).toEqual(expect.arrayContaining([true, false]));
+    expect(page().queryByText(t.ownedBy("root"))).toBeNull();
+  });
+
   it("names each refusal", () => {
     const err = (status: number, body: Record<string, unknown>) => new ApiError(status, String(body.error ?? ""), body);
     expect(metadataErrorText(err(409, { code: "name_taken" }))).toBe(t.nameTaken);

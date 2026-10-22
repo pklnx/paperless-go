@@ -241,9 +241,29 @@ func TestProcessingKeepsEdits(t *testing.T) {
 	}
 }
 
+// bulk runs a bulk change as the UI does: by search, a dry run first
+// whose fingerprint the change sends (unless sel has one).
 func bulk(t *testing.T, st *store.Store, sc store.Scope, sel store.BulkSelection, c store.BulkChange) ([]string, error) {
 	t.Helper()
+	if sel.Match != nil && sel.Fingerprint == "" {
+		sel = confirmed(t, st, sc, sel)
+	}
 	return st.BulkUpdateDocuments(context.Background(), sc, sel, c, "document.update")
+}
+
+// confirmed is sel with the fingerprint of its dry run, the set a user
+// confirmed.
+func confirmed(t *testing.T, st *store.Store, sc store.Scope, sel store.BulkSelection) store.BulkSelection {
+	t.Helper()
+	m, err := st.CountBulkMatches(context.Background(), sc, sel)
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if m.Fingerprint == "" {
+		t.Fatalf("dry run without fingerprint: %+v", m)
+	}
+	sel.Fingerprint = m.Fingerprint
+	return sel
 }
 
 func TestBulkUpdateByIDs(t *testing.T) {
@@ -436,19 +456,22 @@ func TestBulkUpdateByMatch(t *testing.T) {
 	// The limit: one match too many refuses the whole change.
 	conn := connect(t, dbURL)
 	insertDocs(t, conn, bob.UserID, store.MaxBulkMatches, "Massenbrief")
-	if m, err := st.CountBulkMatches(ctx, bob, store.BulkSelection{Match: parse("massenbrief")}); err != nil || m.Count != store.MaxBulkMatches || m.Owners != 1 {
-		t.Errorf("dry run at the limit: %+v, %v", m, err)
+	atLimit, err := st.CountBulkMatches(ctx, bob, store.BulkSelection{Match: parse("massenbrief")})
+	if err != nil || atLimit.Count != store.MaxBulkMatches || atLimit.Owners != 1 || atLimit.Fingerprint == "" {
+		t.Errorf("dry run at the limit: %+v, %v", atLimit, err)
 	}
 	if got, err := bulk(t, st, bob, store.BulkSelection{Match: parse("massenbrief")}, store.BulkChange{IsInbox: ptr(false)}); err != nil || len(got) != store.MaxBulkMatches {
 		t.Errorf("at the limit: %d, %v", len(got), err)
 	}
 	insertDocs(t, conn, bob.UserID, 1, "Massenbrief extra")
-	_, err := bulk(t, st, bob, store.BulkSelection{Match: parse("massenbrief")}, store.BulkChange{IsInbox: ptr(true)})
+	// Above the limit with the (now stale) fingerprint of the dry run at
+	// the limit: the limit is checked first.
+	_, err = bulk(t, st, bob, store.BulkSelection{Match: parse("massenbrief"), Fingerprint: atLimit.Fingerprint}, store.BulkChange{IsInbox: ptr(true)})
 	var tooMany *store.TooManyError
 	if !errors.As(err, &tooMany) || tooMany.Count != store.MaxBulkMatches+1 || tooMany.Limit != store.MaxBulkMatches {
 		t.Errorf("over the limit: %v", err)
 	}
-	if m, err := st.CountBulkMatches(ctx, bob, store.BulkSelection{Match: parse("massenbrief")}); err != nil || m.Count != store.MaxBulkMatches+1 || m.Owners != 0 {
+	if m, err := st.CountBulkMatches(ctx, bob, store.BulkSelection{Match: parse("massenbrief")}); err != nil || m.Count != store.MaxBulkMatches+1 || m.Owners != 0 || m.Fingerprint != "" {
 		t.Errorf("dry run over the limit: %+v, %v", m, err)
 	}
 	var inbox int
@@ -988,7 +1011,10 @@ func TestBulkUpdateByMatchRecheckKeepsLockedMatches(t *testing.T) {
 			       encode(sha256(('new-' || g)::bytea), 'hex'), 1, 'application/pdf', true
 			FROM generate_series(1, 5001) AS g`, alice.UserID)
 	})
-	changed, err := st.BulkUpdateDocuments(held, alice, store.BulkSelection{Match: inbox}, store.BulkChange{IsFavorite: ptr(true)}, "document.update")
+	// The dry run's fingerprint names the 20; the change covers exactly
+	// those.
+	sel := confirmed(t, st, alice, store.BulkSelection{Match: inbox})
+	changed, err := st.BulkUpdateDocuments(held, alice, sel, store.BulkChange{IsFavorite: ptr(true)}, "document.update")
 	if insertErr != nil {
 		t.Fatal(insertErr)
 	}
@@ -1092,7 +1118,11 @@ func TestBulkUpdateAuditOwnerID(t *testing.T) {
 		e.Detail("fields", []string{"favorite"})
 		e.Detail("bulkRun", fmt.Sprint("run-", run))
 		ctx := store.WithAudit(context.Background(), e)
-		if _, err := st.BulkUpdateDocuments(ctx, admin, c.sel, store.BulkChange{IsFavorite: ptr(run%2 == 1)}, "document.update"); err != nil {
+		sel := c.sel
+		if sel.Match != nil {
+			sel = confirmed(t, st, admin, sel)
+		}
+		if _, err := st.BulkUpdateDocuments(ctx, admin, sel, store.BulkChange{IsFavorite: ptr(run%2 == 1)}, "document.update"); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		var targets []string
@@ -1115,7 +1145,12 @@ func TestBulkUpdateAuditOwnerID(t *testing.T) {
 	if got, err := bulk(t, st, alice, store.BulkSelection{Match: parse("rechnung"), Owner: &root.ID}, store.BulkChange{IsInbox: ptr(false)}); err != nil || len(got) != 0 {
 		t.Errorf("alice with owner=root: %v, %v", got, err)
 	}
-	if m, err := st.CountBulkMatches(context.Background(), alice, store.BulkSelection{Match: parse("rechnung"), Owner: &root.ID}); err != nil || m.Count != 0 {
+	empty, err := st.CountBulkMatches(context.Background(), alice, store.BulkSelection{Match: parse("nichtda")})
+	if err != nil || empty.Count != 0 || empty.Fingerprint == "" {
+		t.Fatalf("alice's dry run without matches: %+v, %v", empty, err)
+	}
+	// Outside the scope the dry run names the empty set too.
+	if m, err := st.CountBulkMatches(context.Background(), alice, store.BulkSelection{Match: parse("rechnung"), Owner: &root.ID}); err != nil || m.Count != 0 || m.Fingerprint != empty.Fingerprint {
 		t.Errorf("alice's dry run with owner=root: %+v, %v", m, err)
 	}
 	if m, err := st.CountBulkMatches(context.Background(), admin, store.BulkSelection{Match: parse("rechnung"), Owner: &alice.UserID}); err != nil || m.Count != 2 || m.Owners != 1 {
@@ -1147,8 +1182,11 @@ func TestBulkUpdateRepeatedTags(t *testing.T) {
 }
 
 // A document that a concurrent change takes out of the match after the
-// match ran but before the bulk change locked it is left alone: the bulk
-// change runs the search again with the documents locked.
+// match ran but before the bulk change locked it is not changed: the bulk
+// change runs the search again with the documents locked, and the set
+// left is no longer the confirmed one, so nothing changes (409). Without
+// the recheck the locked set would still match the fingerprint and the
+// document would be changed although it no longer matches (#99).
 func TestBulkUpdateByMatchRecheckedAfterLock(t *testing.T) {
 	st, dbURL := storetest.NewWithURL(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1158,6 +1196,7 @@ func TestBulkUpdateByMatchRecheckedAfterLock(t *testing.T) {
 	moved := mustDoc(t, st, alice, newDoc("moved"))
 	stays := mustDoc(t, st, alice, newDoc("stays"))
 	inbox := &search.Query{Filters: []search.Filter{{Field: search.FieldIs, Values: []string{search.IsInbox}}}}
+	sel := confirmed(t, st, alice, store.BulkSelection{Match: inbox})
 	before := len(auditRows(t, conn))
 
 	var attempts atomic.Int32
@@ -1177,7 +1216,7 @@ func TestBulkUpdateByMatchRecheckedAfterLock(t *testing.T) {
 			}
 		})
 		var err error
-		changed, err = st.BulkUpdateDocuments(held, alice, store.BulkSelection{Match: inbox}, store.BulkChange{IsFavorite: ptr(true)}, "document.update")
+		changed, err = st.BulkUpdateDocuments(held, alice, sel, store.BulkChange{IsFavorite: ptr(true)}, "document.update")
 		done <- err
 	}()
 	select {
@@ -1190,28 +1229,134 @@ func TestBulkUpdateByMatchRecheckedAfterLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(release)
-	if err := <-done; err != nil {
-		t.Fatalf("bulk change: %v", err)
-	}
-	if !slices.Equal(changed, []string{stays.ID}) {
-		t.Errorf("changed %v, want only %s", changed, stays.ID)
+	var mc *store.MatchChangedError
+	if err := <-done; !errors.As(err, &mc) || !errors.Is(err, store.ErrMatchChanged) || mc.Count != 1 || changed != nil {
+		t.Fatalf("bulk change: %v, changed %v; want ErrMatchChanged with count 1", err, changed)
 	}
 	if g := getDoc(t, st, moved.ID); g.IsFavorite {
 		t.Errorf("the document no longer matching was changed: %+v", g)
 	}
-	if g := getDoc(t, st, stays.ID); !g.IsFavorite {
-		t.Errorf("the matching document was not changed: %+v", g)
+	if g := getDoc(t, st, stays.ID); g.IsFavorite {
+		t.Errorf("the refused change changed the matching document: %+v", g)
 	}
-	var targets []string
 	for _, r := range auditRows(t, conn)[before:] {
-		if r.Action == "document.update" {
-			targets = append(targets, *r.TargetID)
-		} else if r.Action == "document.bulk_update" && fmt.Sprint(r.Details["count"]) != "1" {
-			t.Errorf("summary: %+v", r.Details)
+		if r.Action == "document.bulk_update" || r.Actor == store.ActorCLI {
+			t.Errorf("the refused change wrote an audit entry: %+v", r)
 		}
 	}
-	if !slices.Equal(targets, []string{stays.ID}) {
-		t.Errorf("per-document entries for %v, want only %s", targets, stays.ID)
+}
+
+// A bulk change by search changes only exactly the set its dry run
+// counted (the fingerprint): one more match since the count, one less, or
+// the same count with another document refuse the whole change with
+// ErrMatchChanged, and nothing changes or is logged (#106).
+func TestBulkUpdateByMatchConfirmedSet(t *testing.T) {
+	st, dbURL := storetest.NewWithURL(t)
+	ctx := context.Background()
+	conn := connect(t, dbURL)
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	insertDocs(t, conn, alice.UserID, 230, "Rechnung")
+	inbox := store.BulkSelection{Match: &search.Query{Filters: []search.Filter{{Field: search.FieldIs, Values: []string{search.IsInbox}}}}}
+	unchanged := func(name string, before int) {
+		t.Helper()
+		var favs int
+		if err := conn.QueryRow(ctx, `SELECT count(*) FROM documents WHERE is_favorite`).Scan(&favs); err != nil || favs != 0 {
+			t.Errorf("%s: %d documents changed, %v", name, favs, err)
+		}
+		if n := len(auditRows(t, conn)); n != before {
+			t.Errorf("%s: %d audit entries written", name, n-before)
+		}
+	}
+	wantChanged := func(name string, err error, count int) {
+		t.Helper()
+		var mc *store.MatchChangedError
+		if !errors.As(err, &mc) || !errors.Is(err, store.ErrMatchChanged) || mc.Count != count {
+			t.Errorf("%s: %v, want ErrMatchChanged with count %d", name, err, count)
+		}
+	}
+	fav := store.BulkChange{IsFavorite: ptr(true)}
+	// logged is bulk with an audit entry, so a refused change could write one.
+	logged := func(t *testing.T, st *store.Store, sc store.Scope, sel store.BulkSelection, c store.BulkChange) ([]string, error) {
+		t.Helper()
+		if sel.Fingerprint == "" {
+			sel = confirmed(t, st, sc, sel)
+		}
+		e := &store.AuditEntry{Actor: store.ActorCLI, Action: "document.bulk_update"}
+		return st.BulkUpdateDocuments(store.WithAudit(ctx, e), sc, sel, c, "document.update")
+	}
+
+	// The reported case: 230 confirmed, one imported before the confirm.
+	sel := confirmed(t, st, alice, inbox)
+	extra := mustDoc(t, st, alice, newDoc("Neu"))
+	before := len(auditRows(t, conn))
+	_, err := logged(t, st, alice, sel, fav)
+	wantChanged("one more", err, 231)
+	unchanged("one more", before)
+
+	// Same count, another set: one leaves the inbox (231 → 230), and the
+	// fingerprint of the first 230 still does not fit.
+	var first string
+	if err := conn.QueryRow(ctx, `SELECT id::text FROM documents WHERE title = 'Rechnung' ORDER BY id LIMIT 1`).Scan(&first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `UPDATE documents SET is_inbox = false WHERE id = $1`, first); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := st.CountBulkMatches(ctx, alice, inbox); err != nil || m.Count != 230 || m.Fingerprint == sel.Fingerprint {
+		t.Fatalf("dry run of the other set: %+v, %v", m, err)
+	}
+	before = len(auditRows(t, conn))
+	_, err = logged(t, st, alice, sel, fav)
+	wantChanged("same count, other set", err, 230)
+	unchanged("same count, other set", before)
+
+	// One left the match since the count.
+	sel = confirmed(t, st, alice, inbox)
+	if _, err := conn.Exec(ctx, `UPDATE documents SET is_inbox = false WHERE id = $1`, extra.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = logged(t, st, alice, sel, fav)
+	wantChanged("one less", err, 229)
+	unchanged("one less", before)
+
+	// Nothing matches any more: 409 with 0, not an empty success.
+	gone := confirmed(t, st, alice, inbox)
+	if _, err := conn.Exec(ctx, `UPDATE documents SET is_inbox = false`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = logged(t, st, alice, gone, fav)
+	wantChanged("now empty", err, 0)
+	unchanged("now empty", before)
+
+	// An empty confirmation that is still empty changes nothing, no entry.
+	if got, err := logged(t, st, alice, inbox, fav); err != nil || len(got) != 0 {
+		t.Errorf("still empty: %v, %v", got, err)
+	}
+	unchanged("still empty", before)
+
+	// Missing or misplaced fingerprints are refused.
+	var ve *store.ValidationError
+	if _, err := st.BulkUpdateDocuments(ctx, alice, inbox, fav, "document.update"); !errors.As(err, &ve) || ve.Field != "selection" {
+		t.Errorf("match without fingerprint: %v", err)
+	}
+	if _, err := st.BulkUpdateDocuments(ctx, alice, store.BulkSelection{IDs: []string{extra.ID}, Fingerprint: gone.Fingerprint}, fav, "document.update"); !errors.As(err, &ve) || ve.Field != "selection" {
+		t.Errorf("ids with fingerprint: %v", err)
+	}
+	if _, err := st.CountBulkMatches(ctx, alice, gone); !errors.As(err, &ve) || ve.Field != "selection" {
+		t.Errorf("dry run with fingerprint: %v", err)
+	}
+
+	// The unchanged set goes through, with its entries.
+	if _, err := conn.Exec(ctx, `UPDATE documents SET is_inbox = true WHERE title = 'Rechnung'`); err != nil {
+		t.Fatal(err)
+	}
+	sel = confirmed(t, st, alice, inbox)
+	got, err := logged(t, st, alice, sel, fav)
+	if err != nil || len(got) != 230 {
+		t.Fatalf("unchanged set: %d, %v", len(got), err)
+	}
+	if n := len(auditRows(t, conn)) - before; n != 231 {
+		t.Errorf("%d audit entries, want the summary and 230", n)
 	}
 }
 

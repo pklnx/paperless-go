@@ -495,6 +495,8 @@ export interface Tag {
   documentCount?: number;
   /** The distinct documents of the tag and its sub-tags: what the list shows for the tag. */
   subtreeCount?: number;
+  /** The owner's name, in an admin's lists only. */
+  ownerName?: string;
 }
 
 /** A correspondent or document type. */
@@ -503,6 +505,8 @@ export interface NamedRow {
   name: string;
   ownerId: number;
   documentCount?: number;
+  /** The owner's name, in an admin's lists only. */
+  ownerName?: string;
 }
 
 /** The sidebar's metadata. */
@@ -567,8 +571,14 @@ export function bulkMatch(dq: DocumentQuery, timeZone = browserTimeZone()): Bulk
   return m;
 }
 
-/** Which documents a bulk change covers: these IDs (at most 500), or every match of a search. */
-export type BulkSelection = { ids: string[] } | { match: BulkMatch };
+/**
+ * Which documents a bulk change covers: these IDs (at most 500), or every
+ * match of a search. A change by search sends the fingerprint of the dry
+ * run whose count the user confirmed (opaque, passed back unchanged); the
+ * server changes nothing and answers 409 match_changed when the matches
+ * are no longer exactly that set.
+ */
+export type BulkSelection = { ids: string[] } | { match: BulkMatch; fingerprint: string };
 
 /** What a bulk change does; null clears the correspondent or type. */
 export interface BulkChange {
@@ -580,11 +590,16 @@ export interface BulkChange {
   favorite?: boolean;
 }
 
-/** The dry run of a match: how many documents and owners it covers, and the server's limit. owners is 0 above the limit. */
+/**
+ * The dry run of a match: how many documents and owners it covers, the
+ * server's limit, and the fingerprint of the matched set for the change.
+ * owners is 0 and fingerprint missing above the limit.
+ */
 export interface BulkCount {
   matched: number;
   owners: number;
   limit: number;
+  fingerprint?: string;
 }
 
 const bulkPath = "/api/documents/bulk";

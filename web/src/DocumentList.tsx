@@ -206,7 +206,11 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   const [matchSel, setMatchSel] = useState<{ key: string; matched: number; owners: number } | null>(null);
   const allMatches = matchSel !== null && matchSel.key === key ? matchSel.matched : null;
   const [selectError, setSelectError] = useState("");
+  // Bumped by every choice of the selection, so a late "Select all
+  // matches" count does not override a later choice in the same list.
+  const selectionGen = useRef(0);
   const clearSelection = () => {
+    selectionGen.current++;
     setSelected(new Set());
     anchor.current = null;
     setCapped(false);
@@ -221,6 +225,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   const orderKey = order.join(",");
   useEffect(() => setSelected((s) => pruneSelection(s, order)), [orderKey]);
   const pick = (id: string, shift: boolean) => {
+    selectionGen.current++;
     setMatchSel(null);
     setSelectError("");
     const r = clickSelect(order, selected, anchor.current, id, shift);
@@ -230,6 +235,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   };
   const allLoaded = order.length > 0 && (selected.size === Math.min(order.length, maxSelection));
   const toggleAll = () => {
+    selectionGen.current++;
     setMatchSel(null);
     setSelectError("");
     if (allLoaded) {
@@ -243,16 +249,18 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   const countMatches = () => {
     setSelectError("");
     const k = key;
+    const gen = ++selectionGen.current;
     bulkApi.count(bulkMatch(query)).then(
       (c) => {
-        // Counted for a list that is no longer shown: not this list's selection.
-        if (keyRef.current !== k) return;
+        // Counted for a list that is no longer shown, or the selection was
+        // chosen anew since: not this selection.
+        if (keyRef.current !== k || selectionGen.current !== gen) return;
         if (c.matched > c.limit) setSelectError(`${t.bulkMatchCount(c.matched)} ${t.bulkTooMany(c.limit)}`);
         else if (c.matched === 0) setSelectError(t.bulkNoMatches);
         else setMatchSel({ key: k, matched: c.matched, owners: c.owners });
       },
       (err: unknown) => {
-        if (keyRef.current === k) setSelectError(bulkErrorText(err).text);
+        if (keyRef.current === k && selectionGen.current === gen) setSelectError(bulkErrorText(err).text);
       },
     );
   };
@@ -264,6 +272,8 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   // match of it.
   const selectedOwner =
     allMatches !== null ? (matchSel?.owners === 1 ? (loaded?.[0]?.ownerId ?? null) : null) : owners.size === 1 ? ([...owners][0] ?? null) : null;
+  // How many owners the selection has: the dry run's count for all matches.
+  const selectedOwners = allMatches !== null ? (matchSel?.owners ?? 0) : owners.size;
   const selecting = target !== null;
 
   const filter = activeFilter(state);
@@ -352,6 +362,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
           target={target}
           metadata={metadata}
           ownerId={selectedOwner}
+          owners={selectedOwners}
           onDone={() => {
             // The count of all matches is stale after a change: back to the checked rows.
             setMatchSel(null);
