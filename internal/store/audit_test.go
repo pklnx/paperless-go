@@ -342,7 +342,7 @@ func TestAuditUserRemoval(t *testing.T) {
 	}
 	remove := &store.AuditEntry{Actor: store.ActorCLI, Action: "user.remove"}
 	remove.SetTarget(store.TargetUser, fmt.Sprint(u.ID), u.Name)
-	if err := st.DeleteUser(store.WithAudit(ctx, remove), u.ID); err != nil {
+	if err := st.DeleteUser(store.WithAudit(ctx, remove), u.ID, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	rows := auditRows(t, connect(t, url))

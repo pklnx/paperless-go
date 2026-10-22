@@ -51,7 +51,7 @@ app and the server through the app's archive folder format:
 
 | App (SwiftData) | Server table |
 |---|---|
-| — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`, `webauthn_handle` in `00008_passkeys.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges`, `passkeys`, `webauthn_ceremonies` |
+| — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`, `webauthn_handle` in `00008_passkeys.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges`, `passkeys`, `webauthn_ceremonies`, `api_keys` (`00009_api_keys.sql`) |
 | — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; see [Audit log](#audit-log)) |
 | `Document`: id (UUID), title, documentDate, createdAt, modifiedAt, notes, isFavorite, isInbox, archiveSerialNumber, pageCount, fileSize, extractedText, source, originalFileName, textSource, contentHash | `documents`, with the UUID as primary key; the original file (`original_sha256`, size, MIME type) and the archive PDF (`archive_sha256`, size) |
 | `Tag`: name, colorHex, symbol, parent, matchText, matchMode | `tags`, `document_tags` (nested through `parent_id`) |
@@ -361,7 +361,8 @@ A queue in PostgreSQL turns stored documents into searchable ones
 is not writable. Every request passes `protect` (`internal/web/middleware.go`):
 the `Host` must be allowed (DNS rebinding), and state-changing requests need
 a same-origin `Origin` (or `Sec-Fetch-Site: same-origin`) and the body kind
-of their route in the route table (CSRF): `bodyJSON`, the zero value, takes
+of their route in the route table (CSRF; requests with an API key are
+exempt, see [Login](#login)): `bodyJSON`, the zero value, takes
 `application/json` only; `bodyFile`, only on `POST /api/documents`, takes a
 raw file with a type from `uploadContentTypes` and never a form or text.
 Then `authenticate` checks the login (see [Login](#login)). Unknown
@@ -408,11 +409,14 @@ and `internal/store`, `cmd/paperless-go/users.go`).
 
 - **Route table.** `internal/web/routes.go` lists every route with its
   `access`: `accessPublic` (`GET /healthz`, `GET /{$}`, `GET /assets/`),
-  `accessLogin` (`/api/session`: read, log in, log out, and `/api/session/2fa`) or `accessSession`.
+  `accessLogin` (`/api/session`: read, log in, log out, and `/api/session/2fa`),
+  `accessSession`, `accessRead` or `accessWrite` (a session, or an API key
+  with that scope: the document routes; the upload is `accessWrite`).
   The zero value is `accessSession`, so a route that forgets it gets the
   strictest rule, and so does every path without a route (the JSON `404`
   under `/api/` comes only after the login). `authenticate` enforces the
-  table; a test walks it and expects `401` without a session.
+  table; one test walks it and expects `401` without a session, another
+  calls every route with a `read`, a `write` and a both-scopes key.
 - **Sessions.** The cookie `paperless_go_session` (`__Host-` prefixed over
   HTTPS) holds a random token; `sessions` stores its SHA-256 with the user,
   creation, last use and absolute expiry. Sessions end after 7 days unused
@@ -423,8 +427,8 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   user) restricts the session to `PUT /api/profile/password`; everything
   else answers `403` with `passwordChangeRequired`.
 - **Scope.** `requestScope` (`internal/web/auth.go`) is the one place that
-  turns the request's principal into a `store.Scope`: the session's user,
-  with `All` for admins. Handlers that touch documents or metadata take
+  turns the request's principal into a `store.Scope`: the session's or API
+  key's user, with `All` for admins. Handlers that touch documents or metadata take
   their scope from it.
 - **Removing users.** Auth tables reference `users` with `ON DELETE
   CASCADE`, owned data with `ON DELETE RESTRICT`. `DeleteUser` counts the
@@ -434,7 +438,30 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   before) gives the same error. The last unlocked admin stays.
 - **Client address.** The login limits count per user name and per client
   address (IPv6 per `/64`; logs and the audit log keep the full address);
-  `X-Forwarded-For` counts only from `PAPERLESS_GO_TRUSTED_PROXIES`.
+  `X-Forwarded-For` counts only from `PAPERLESS_GO_TRUSTED_PROXIES`, and
+  `X-Forwarded-Proto` (`secureRequest`: the `__Host-` cookie with
+  `Secure`) only from those or loopback.
+- **API keys** (`internal/auth/apikey.go`, `internal/store/api_keys.go`,
+  `internal/web/api_keys.go`, migration `00009_api_keys.sql`). A key is
+  `pl_` and 32 random bytes in lower-case base32; `api_keys` stores its
+  SHA-256 (unique index; the lookup compares hashes), the last 4
+  characters, name (unique among a user's keys that are not revoked),
+  scopes (`read`, `write`), creation, expiry, last use (written at most once
+  a minute) and revocation, all on the server clock. `authenticate` treats
+  every request with `Authorization: Bearer pl_…` as a key request and
+  never reads its cookie; `protect` skips the Origin and content type checks
+  for it. `authenticateKey` checks the key (invalid: `401`, 30 per client and
+  minute, then `429`), the per-key rate (600 a minute), the owner's gates
+  (must change password, 2FA required), and the route's scope
+  (`requiredScope`; `403` for every other access). The key's user becomes
+  the request's session, so `requestScope` and the audit entry (actor
+  `api_key`, `api_key_id`, `api_key_name`) follow. Creating a key
+  (`POST /api/profile/api-keys`) checks password and second factor like a
+  passkey registration and writes `api_key.create` in the insert's
+  transaction; revoking (`DELETE /api/profile/api-keys/{id}`, admins
+  `DELETE /api/api-keys/{id}`, `user revoke-api-keys`, a password reset)
+  writes `api_key.revoke`. `serve` deletes keys revoked or expired 30 days
+  ago hourly.
 - **Two-factor login** (`internal/auth/totp.go`, `internal/store/two_factor.go`,
   `internal/web/two_factor.go`). Admins always need it,
   `PAPERLESS_GO_REQUIRE_2FA` extends it to everyone. A user who needs it but
@@ -512,7 +539,10 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   `profile.2fa_disable`, `profile.recovery_codes` (with the `factor` that
   confirmed it), `profile.passkey_add` (also with the confirming `factor`
   when 2FA is on), `profile.passkey_remove` (with the passkey's `name`),
-  `user.passkeys_removed` (`count`; web and CLI), `audit.export` (CLI,
+  `user.passkeys_removed` (`count`; web and CLI), `api_key.create` (target
+  the key, `scopes`, `expiresAt`), `api_key.revoke` (target the key and
+  `owner`, or for all of a user's keys the user and `apiKeysRevoked`;
+  `reason` `user`, `admin` or `cli`), `audit.export` (CLI,
   written before the export starts), `document.create` (upload, with
   `via: upload`; the target is the new document).
   A two-factor login records `method: 2fa` and its `factor` (`totp`,

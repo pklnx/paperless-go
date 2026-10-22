@@ -51,6 +51,10 @@ type Server struct {
 	webauthn      *webauthn.WebAuthn
 	publicOrigin  string
 	passkeyBegins *auth.Rate
+	// apiKeyRate counts requests per API key, badKeyRate invalid keys per
+	// client.
+	apiKeyRate *auth.Rate
+	badKeyRate *auth.Rate
 	// blobs holds the document files and importer imports uploads into
 	// it; without blobs the document routes answer 503.
 	blobs    *blobstore.Store
@@ -128,10 +132,14 @@ func New(st *store.Store, log *slog.Logger, opts Options) *Server {
 	}
 	passkeyBegins := auth.NewRate(passkeyBeginLimit, passkeyBeginWindow)
 	passkeyBegins.SetClock(now)
+	apiKeyRate := auth.NewRate(apiKeyLimit, apiKeyWindow)
+	apiKeyRate.SetClock(now)
+	badKeyRate := auth.NewRate(badAPIKeyLimit, apiKeyWindow)
+	badKeyRate.SetClock(now)
 	s := &Server{
 		store: st, db: pinger, log: log, allowedHosts: hosts, hasher: hasher, now: now, limiter: limiter,
 		trustedProxies: opts.TrustedProxies, sealer: opts.Sealer, secretKey: opts.SecretKey, require2FA: opts.Require2FA,
-		webauthn: wa, publicOrigin: origin, passkeyBegins: passkeyBegins,
+		webauthn: wa, publicOrigin: origin, passkeyBegins: passkeyBegins, apiKeyRate: apiKeyRate, badKeyRate: badKeyRate,
 	}
 	if opts.Blobs != nil && st != nil {
 		maxSize := opts.MaxUploadSize
@@ -214,7 +222,8 @@ const auditMonthsAhead = 3
 
 // housekeeping runs at start and then every hour until ctx ends: it creates
 // the audit log partitions ahead and deletes expired sessions, 2FA login
-// challenges and passkey ceremonies.
+// challenges and passkey ceremonies, and API keys revoked or expired 30
+// days ago.
 func (s *Server) housekeeping(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
@@ -223,6 +232,7 @@ func (s *Server) housekeeping(ctx context.Context) {
 		s.deleteExpiredSessions(ctx)
 		s.deleteExpiredTwoFactorChallenges(ctx)
 		s.deleteExpiredWebAuthnCeremonies(ctx)
+		s.deleteOldAPIKeys(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -269,6 +279,16 @@ func (s *Server) deleteExpiredWebAuthnCeremonies(ctx context.Context) {
 		s.log.Warn("delete expired passkey ceremonies", "err", err)
 	case n > 0:
 		s.log.Debug("deleted expired passkey ceremonies", "count", n)
+	}
+}
+
+func (s *Server) deleteOldAPIKeys(ctx context.Context) {
+	n, err := s.store.DeleteOldAPIKeys(ctx, s.now())
+	switch {
+	case err != nil && ctx.Err() == nil:
+		s.log.Warn("delete old API keys", "err", err)
+	case n > 0:
+		s.log.Debug("deleted API keys revoked or expired 30 days ago", "count", n)
 	}
 }
 

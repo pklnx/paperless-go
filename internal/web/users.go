@@ -23,6 +23,8 @@ type adminUserJSON struct {
 	MustChangePassword bool   `json:"mustChangePassword"`
 	TwoFactorEnabled   bool   `json:"twoFactorEnabled"`
 	Passkeys           int64  `json:"passkeys"`
+	// APIKeys counts the user's keys that are neither revoked nor expired.
+	APIKeys int64 `json:"apiKeys"`
 	// Owned counts the rows the user owns; any of them keeps the user from
 	// being removed.
 	Owned       ownedJSON  `json:"owned"`
@@ -68,12 +70,17 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		s.failStore(w, r, err)
 		return
 	}
+	apiKeys, err := s.store.APIKeyCounts(r.Context(), s.now())
+	if err != nil {
+		s.failStore(w, r, err)
+		return
+	}
 	out := make([]adminUserJSON, 0, len(users))
 	for _, u := range users {
 		o := owned[u.ID]
 		out = append(out, adminUserJSON{
 			Name: u.Name, Admin: u.IsAdmin, Locked: u.LockedAt != nil, MustChangePassword: u.MustChangePassword, TwoFactorEnabled: u.TwoFactorEnabled,
-			Passkeys:  passkeys[u.ID],
+			Passkeys: passkeys[u.ID], APIKeys: apiKeys[u.ID],
 			Owned:     ownedJSON{Documents: o.Documents, Tags: o.Tags, Correspondents: o.Correspondents, DocumentTypes: o.DocumentTypes, SavedViews: o.SavedViews},
 			CreatedAt: u.CreatedAt, LastLoginAt: u.LastLoginAt, Self: u.ID == userID(r),
 		})
@@ -156,10 +163,12 @@ func (s *Server) pathUser(w http.ResponseWriter, r *http.Request) (*store.User, 
 }
 
 // passwordResetInput is the optional body of a password reset. Passkeys
-// are removed unless removePasskeys is false: after a compromise a new
-// password alone would not lock the attacker out.
+// are removed and API keys revoked unless removePasskeys or revokeApiKeys
+// is false: after a compromise a new password alone would not lock the
+// attacker out.
 type passwordResetInput struct {
 	RemovePasskeys *bool `json:"removePasskeys"`
+	RevokeAPIKeys  *bool `json:"revokeApiKeys"`
 }
 
 func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request) {
@@ -175,16 +184,20 @@ func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	removePasskeys := in.RemovePasskeys == nil || *in.RemovePasskeys
+	revokeKeys := in.RevokeAPIKeys == nil || *in.RevokeAPIKeys
 	pw, hash, ok := s.generatePassword(w, r)
 	if !ok {
 		return
 	}
-	opts := store.PasswordReset{MustChange: true, DropPasskeys: removePasskeys}
-	if err := s.store.ResetUserPassword(withAudit(r, auditUser(s.auditEntry(r, "user.password_reset"), u)), u.ID, hash, opts); err != nil {
+	by := userID(r)
+	opts := store.PasswordReset{MustChange: true, DropPasskeys: removePasskeys, RevokeAPIKeys: revokeKeys, By: &by, Now: s.now()}
+	e := auditUser(s.auditEntry(r, "user.password_reset"), u)
+	if err := s.store.ResetUserPassword(withAudit(r, e), u.ID, hash, opts); err != nil {
 		s.failStore(w, r, err)
 		return
 	}
-	s.log.Info("password reset", "user", u.Name, "passkeysRemoved", removePasskeys, "by", currentSession(r).UserName)
+	s.log.Info("password reset", "user", u.Name, "passkeysRemoved", removePasskeys, "apiKeysRevoked", e.Details["apiKeysRevoked"],
+		"by", currentSession(r).UserName)
 	s.writeJSON(w, http.StatusOK, generatedPasswordJSON{Name: u.Name, Password: pw})
 }
 
@@ -230,7 +243,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	err := s.store.DeleteUser(withAudit(r, auditUser(s.auditEntry(r, "user.remove"), u)), u.ID)
+	err := s.store.DeleteUser(withAudit(r, auditUser(s.auditEntry(r, "user.remove"), u)), u.ID, s.now())
 	var owns *store.OwnsRowsError
 	switch {
 	case errors.Is(err, store.ErrLastAdmin):

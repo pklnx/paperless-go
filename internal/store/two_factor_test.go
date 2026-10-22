@@ -68,7 +68,7 @@ func TestDeleteUserWithTwoFactor(t *testing.T) {
 	if err := st.CreateSession(ctx, sessionID(1), kim.ID, now, now.Add(time.Hour), ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.DeleteUser(ctx, kim.ID); err != nil {
+	if err := st.DeleteUser(ctx, kim.ID, time.Now()); err != nil {
 		t.Fatalf("remove a user with 2FA: %v", err)
 	}
 }

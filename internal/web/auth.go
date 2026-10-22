@@ -26,6 +26,9 @@ const touchInterval = time.Minute
 
 type sessionKey struct{}
 
+// sessionTokenKey holds the token of the session in sessionKey.
+type sessionTokenKey struct{}
+
 // profilePasswordPath is the one endpoint a user with a generated password
 // may use (besides the session endpoints).
 const profilePasswordPath = "/api/profile/password" //nolint:gosec // a URL path, not a credential
@@ -59,7 +62,8 @@ func userID(r *http.Request) int64 {
 }
 
 // requestScope is what the request's principal may see and change in the
-// store: a session's user, and every owner's rows for an admin. Without a
+// store: a session's or API key's user, and every owner's rows for an
+// admin (an admin's key does no more than the admin's session). Without a
 // principal it is the empty scope, which matches no owner and cannot
 // create rows. Every handler that reads or writes documents or metadata
 // takes its scope from here.
@@ -72,22 +76,74 @@ func requestScope(r *http.Request) store.Scope {
 }
 
 // secureRequest reports whether the browser reached the server over HTTPS,
-// directly or through a reverse proxy or `tailscale serve`.
-func secureRequest(r *http.Request) bool {
-	return r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+// directly or through a reverse proxy or `tailscale serve`. X-Forwarded-Proto
+// counts only from a trusted proxy (PAPERLESS_GO_TRUSTED_PROXIES) or from
+// loopback, where `tailscale serve` and a proxy on the same host connect
+// from: anybody else could set it.
+func (s *Server) secureRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if r.Header.Get("X-Forwarded-Proto") != "https" {
+		return false
+	}
+	peer := peerAddr(r)
+	return peer.IsLoopback() || s.trustedProxy(peer)
 }
 
-// sessionToken returns the token from the request's session cookie.
-func sessionToken(r *http.Request) string {
+// sessionTokens returns the tokens of all of the request's session
+// cookies, the __Host- one first. A browser can hold both: a __Host- cookie
+// from a time the server saw HTTPS and a plain one from after, for example
+// when X-Forwarded-Proto stopped counting because the proxy is not trusted.
+//
+// Each token costs a database lookup, so at most maxSessionCookies distinct
+// tokens per name are returned, however many cookies a request carries.
+func sessionTokens(r *http.Request) []string {
+	var tokens []string
+	seen := make(map[string]bool)
 	for _, name := range []string{secureCookieName, cookieName} {
-		if c, err := r.Cookie(name); err == nil && c.Value != "" {
-			return c.Value
+		n := 0
+		for _, c := range r.Cookies() {
+			if c.Name != name || c.Value == "" || seen[c.Value] {
+				continue
+			}
+			if n == maxSessionCookies {
+				break
+			}
+			seen[c.Value] = true
+			tokens = append(tokens, c.Value)
+			n++
 		}
+	}
+	return tokens
+}
+
+// maxSessionCookies is how many cookies of one session cookie name count.
+// A browser sends one per name and path; more are junk or an attack.
+const maxSessionCookies = 2
+
+// sessionToken returns the token of the request's valid session, as found
+// by authenticate, and without one the first session cookie's token.
+func sessionToken(r *http.Request) string {
+	if token, ok := r.Context().Value(sessionTokenKey{}).(string); ok {
+		return token
+	}
+	if tokens := sessionTokens(r); len(tokens) > 0 {
+		return tokens[0]
 	}
 	return ""
 }
 
-func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, maxAge time.Duration) {
+// deleteOldSessions ends the sessions of all of the request's session
+// cookies before a login, so a token planted before the login is never
+// promoted to a valid session.
+func (s *Server) deleteOldSessions(r *http.Request) {
+	for _, token := range sessionTokens(r) {
+		_ = s.store.DeleteSession(r.Context(), auth.HashSessionToken(token))
+	}
+}
+
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, maxAge time.Duration) {
 	c := &http.Cookie{
 		Name:     cookieName,
 		Value:    token,
@@ -96,15 +152,25 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, maxA
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 	}
-	if secureRequest(r) {
+	if maxAge < 0 {
+		c.MaxAge = -1 // expire now; a sub-second duration would round to no Max-Age
+	}
+	if s.secureRequest(r) {
 		c.Name, c.Secure = secureCookieName, true
 	}
 	http.SetCookie(w, c)
+	if !c.Secure {
+		// Drop a __Host- cookie from a time the server saw HTTPS, so it
+		// does not outlive its session next to the plain one. A browser
+		// that is on HTTPS (behind a proxy that no longer counts) removes
+		// it; one on plain HTTP ignores a Secure cookie, which does no harm.
+		http.SetCookie(w, &http.Cookie{Name: secureCookieName, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	}
 }
 
-func clearSessionCookies(w http.ResponseWriter, r *http.Request) {
-	setSessionCookie(w, r, "", -1)
-	if secureRequest(r) {
+func (s *Server) clearSessionCookies(w http.ResponseWriter, r *http.Request) {
+	s.setSessionCookie(w, r, "", -1)
+	if s.secureRequest(r) {
 		// Also drop a cookie set before HTTPS was in front of the server.
 		http.SetCookie(w, &http.Cookie{Name: cookieName, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	}
@@ -112,42 +178,63 @@ func clearSessionCookies(w http.ResponseWriter, r *http.Request) {
 
 // session looks up the request's session; nil means none or not valid.
 func (s *Server) session(r *http.Request) (*store.Session, error) {
-	token := sessionToken(r)
-	if token == "" {
-		return nil, nil
-	}
-	hash := auth.HashSessionToken(token)
-	now := s.now()
-	sess, err := s.store.GetSession(r.Context(), hash, now, now.Add(-auth.IdleTimeout))
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if now.Sub(sess.LastSeenAt) > touchInterval {
-		if err := s.store.TouchSession(r.Context(), hash, now); err != nil {
-			s.log.Warn("update session", "err", err)
-		}
-	}
-	return sess, nil
+	sess, _, err := s.sessionWithToken(r)
+	return sess, err
 }
 
-// authenticate lets a request through only with a valid session, except
-// to routes whose access in the route table is public or login. A path
-// without a route, or with a method no route takes, counts as
+// sessionWithToken looks up the request's session and returns it with its
+// token. Of several session cookies the first valid one counts, not the
+// first present one: a stale cookie next to a valid one does not log the
+// user out.
+func (s *Server) sessionWithToken(r *http.Request) (*store.Session, string, error) {
+	now := s.now()
+	for _, token := range sessionTokens(r) {
+		hash := auth.HashSessionToken(token)
+		sess, err := s.store.GetSession(r.Context(), hash, now, now.Add(-auth.IdleTimeout))
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		if now.Sub(sess.LastSeenAt) > touchInterval {
+			if err := s.store.TouchSession(r.Context(), hash, now); err != nil {
+				s.log.Warn("update session", "err", err)
+			}
+		}
+		return sess, token, nil
+	}
+	return nil, "", nil
+}
+
+// authenticate lets a request through only with a valid session or API
+// key, except to routes whose access in the route table is public, and to
+// login routes for requests without a key. A key works only on routes
+// with accessRead or accessWrite and the matching scope (requiredScope).
+// A path without a route, or with a method no route takes, counts as
 // session-only, so it answers 401 without a login. New endpoints are
 // protected by default (accessSession is the zero value). /healthz and the
 // UI code (/, /assets/) are public; they contain no data.
 func (s *Server) authenticate(mux *http.ServeMux, accessOf map[string]access) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, pattern := mux.Handler(r)
-		switch accessOf[pattern] {
-		case accessPublic, accessLogin:
+		a := accessOf[pattern]
+		if a == accessPublic {
 			mux.ServeHTTP(w, r)
 			return
 		}
-		sess, err := s.session(r)
+		// A key request never falls back to the session cookie.
+		if key, ok := bearerKey(r); ok {
+			if r = s.authenticateKey(w, r, key, a); r != nil {
+				mux.ServeHTTP(w, r)
+			}
+			return
+		}
+		if a == accessLogin {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		sess, token, err := s.sessionWithToken(r)
 		if err != nil {
 			s.fail(w, r, http.StatusInternalServerError, "internal error", err)
 			return
@@ -168,7 +255,8 @@ func (s *Server) authenticate(mux *http.ServeMux, accessOf map[string]access) ht
 			s.writeJSON(w, http.StatusForbidden, twoFactorSetupJSON{Error: "set up two-factor authentication first", TwoFactorSetupRequired: true})
 			return
 		}
-		mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, sess)))
+		ctx := context.WithValue(r.Context(), sessionKey{}, sess)
+		mux.ServeHTTP(w, r.WithContext(context.WithValue(ctx, sessionTokenKey{}, token)))
 	})
 }
 
@@ -305,9 +393,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.limiter.Succeed(name)
 	// A fresh token on every login: a token planted before the login is
 	// never promoted to a valid session.
-	if old := sessionToken(r); old != "" {
-		_ = s.store.DeleteSession(ctx, auth.HashSessionToken(old))
-	}
+	s.deleteOldSessions(r)
 	token, hash, err := auth.NewSessionToken()
 	if err != nil {
 		s.fail(w, r, http.StatusInternalServerError, "internal error", err)
@@ -322,18 +408,23 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("login", "user", u.Name, "addr", s.clientIP(r))
-	setSessionCookie(w, r, token, auth.MaxSessionAge)
+	s.setSessionCookie(w, r, token, auth.MaxSessionAge)
 	s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(u.Name, u.IsAdmin, u.MustChangePassword, false)})
 }
 
 // handleLogout ends the session. A logout never fails because of the audit
 // log: without its entry the session is deleted anyway.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if token := sessionToken(r); token != "" {
+	// Only a valid session writes a logout entry; every other session
+	// cookie's session is deleted too.
+	sess, valid, err := s.sessionWithToken(r)
+	if err != nil {
+		sess = nil
+	}
+	for _, token := range sessionTokens(r) {
 		hash := auth.HashSessionToken(token)
 		ctx := r.Context()
-		// Only a valid session writes a logout entry.
-		if sess, err := s.session(r); err == nil && sess != nil {
+		if sess != nil && token == valid {
 			e := s.auditEntry(r, "auth.logout")
 			e.SetUser(sess.UserID, sess.UserName)
 			ctx = withAudit(r, e)
@@ -348,7 +439,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	clearSessionCookies(w, r)
+	s.clearSessionCookies(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 
