@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -37,10 +38,18 @@ func newWorker(ctx context.Context, a *app, log *slog.Logger, workers int) (w *p
 		return nil, nil, fmt.Errorf("%w (%s; set %s=0 to run without processing)", err, config.EnvOCRLanguages, config.EnvOCRWorkers)
 	}
 	w = &process.Worker{
-		Store: a.store, Blobs: blobs, Pipeline: &process.Pipeline{Runner: runner}, WorkDir: wd,
-		Log: log, Workers: workers, Timeout: a.cfg.OCRTimeout,
+		Store: a.store, Blobs: blobs, WorkDir: wd,
+		Pipeline: &process.Pipeline{Runner: runner, Languages: a.cfg.OCRLanguages, Jobs: ocrJobs(workers)},
+		Log:      log, Workers: workers, Timeout: a.cfg.OCRTimeout,
 	}
 	return w, func() { _ = wd.Close() }, nil
+}
+
+// ocrJobs is how many pages each OCRmyPDF run works on at once: the
+// usable CPUs (GOMAXPROCS follows the container's CPU limit) shared by the
+// workers that run at the same time.
+func ocrJobs(workers int) int {
+	return max(1, runtime.GOMAXPROCS(0)/max(workers, 1))
 }
 
 func newProcessCmd() *cobra.Command {

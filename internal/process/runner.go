@@ -1,6 +1,6 @@
 // Package process turns stored documents into searchable ones: a queue
 // worker claims a job, runs the external tools (poppler; OCRmyPDF and the
-// image converters in part 3) in a private work directory and stores the
+// image converters) in a private work directory and stores the
 // text, the page count and the archive PDF.
 package process
 
@@ -21,6 +21,9 @@ type Command struct {
 	// Dir is the working directory; it is also HOME and TMPDIR of the tool,
 	// so nothing it writes ends up outside the job's work directory.
 	Dir string
+	// Env holds extra environment variables (KEY=value) on top of the
+	// minimal environment.
+	Env []string
 }
 
 // Runner runs external tools. The worker uses ExecRunner; tests use fakes.
@@ -89,6 +92,7 @@ func (r *ExecRunner) Run(ctx context.Context, c Command) ([]byte, error) {
 		"HOME=" + c.Dir,
 		"TMPDIR=" + c.Dir,
 	}
+	cmd.Env = append(cmd.Env, c.Env...)
 	stdout := &limitedBuffer{max: maxStdout}
 	stderr := &tailBuffer{max: stderrTail}
 	cmd.Stdout, cmd.Stderr = stdout, stderr

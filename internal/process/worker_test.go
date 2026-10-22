@@ -3,6 +3,8 @@ package process
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -92,13 +94,23 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 // queues it.
 func (e *env) doc(t *testing.T, content string) *store.Document {
 	t.Helper()
+	return e.docAs(t, content, mimePDF)
+}
+
+// docAs is doc with an original of the given MIME type.
+func (e *env) docAs(t *testing.T, content, mime string) *store.Document {
+	t.Helper()
+	title := content
+	if mime != mimePDF {
+		title = "image"
+	}
 	b, _, err := e.blobs.Put(strings.NewReader(content))
 	if err != nil {
 		t.Fatal(err)
 	}
 	d, err := e.st.CreateDocument(context.Background(), e.owner, store.NewDocument{
-		Title: content, Source: store.SourceFile, OriginalSHA256: b.SHA256, OriginalSize: b.Size,
-		OriginalMIME: mimePDF, IsInbox: true,
+		Title: title, Source: store.SourceFile, OriginalSHA256: b.SHA256, OriginalSize: b.Size,
+		OriginalMIME: mime, IsInbox: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -164,6 +176,57 @@ func TestWorkerProcessesPDF(t *testing.T) {
 		t.Fatalf("job: %+v", j)
 	}
 	e.workDirEmpty(t)
+}
+
+func TestWorkerStoresArchive(t *testing.T) {
+	// OCR and image conversion make an archive PDF of their own: it is
+	// stored in the blob store, and the document points to it.
+	for _, tc := range []struct {
+		name, mime string
+		original   []byte
+		archive    string // what the fake tools write as the archive
+	}{
+		{"scan", mimePDF, []byte("%PDF-1.4 scan"), "%PDF-1.4 OCRed"},
+		{"photo", mimePNG, pngOf(t, 40, 20, 0), "%PDF-1.4 OCRed"},
+		{"photo without text", mimePNG, pngOf(t, 40, 20, 0), "%PDF-1.4 image"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			ctx := context.Background()
+			d := e.docAs(t, string(tc.original), tc.mime)
+			ocr := []string{longText}
+			if tc.archive == "%PDF-1.4 image" {
+				ocr = []string{""}
+			}
+			e.runner.handle = poppler(pdf{pages: []string{""}, ocr: ocr})
+			e.runOnce(t, ctx, Done)
+			got, err := e.st.GetDocument(ctx, e.owner, d.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256([]byte(tc.archive))
+			want := hex.EncodeToString(sum[:])
+			if got.ArchiveSHA256 == nil || *got.ArchiveSHA256 != want || *got.ArchiveSize != int64(len(tc.archive)) {
+				t.Fatalf("archive %v, want %s", got.ArchiveSHA256, want)
+			}
+			if wantSource := map[bool]string{true: store.TextSourceTesseract, false: ""}[ocr[0] != ""]; got.TextSource != wantSource || got.PageCount != 1 {
+				t.Fatalf("processed: %+v", got)
+			}
+			f, err := e.blobs.OpenHash(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := io.ReadAll(f)
+			_ = f.Close()
+			if string(b) != tc.archive {
+				t.Fatalf("stored archive %q", b)
+			}
+			if got.OriginalSHA256 != d.OriginalSHA256 || !e.blobs.Exists(d.OriginalSHA256) {
+				t.Fatal("the original changed")
+			}
+			e.workDirEmpty(t)
+		})
+	}
 }
 
 func TestWorkerRetriesWithBackoff(t *testing.T) {

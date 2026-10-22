@@ -93,6 +93,15 @@ next login). A password reset by an admin (Users page or `./pgo user
 reset-password`) now also revokes the user's API keys, unless the admin
 unticks it or passes `--keep-api-keys`.
 
+**OCR and images (#5).** Scans (PDFs with pages without text) and photos
+(JPEG, PNG, HEIC) now get a text layer with OCRmyPDF and Tesseract. The
+version before failed them with a message to run `reprocess --failed`; you
+need not do that: `./pgo migrate` queues them again, together with the PDFs
+it left without OCR because of an owner password, and the web server
+processes them after `docker compose up -d web`. A PDF that opens without
+a password is OCRed unless its permissions forbid changes; the archive PDF
+is then not encrypted (the original stays as it is).
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build

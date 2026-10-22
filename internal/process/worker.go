@@ -292,12 +292,31 @@ func (w *Worker) attempt(ctx context.Context, job *store.Job) (store.ProcessResu
 	out := store.ProcessResult{
 		PageCount: res.PageCount, Text: res.Text, TextSource: res.TextSource, Note: res.Note,
 	}
-	if res.Archive != "" {
-		// OCRmyPDF and image conversion (#5, part 3) make archive files.
-		return store.ProcessResult{}, errors.New("archive files are not supported yet")
+	if res.Archive == "" {
+		out.ArchiveSHA256, out.ArchiveSize = doc.OriginalSHA256, doc.OriginalSize
+		return out, nil
 	}
-	out.ArchiveSHA256, out.ArchiveSize = doc.OriginalSHA256, doc.OriginalSize
+	if out.ArchiveSHA256, out.ArchiveSize, err = w.putArchive(res.Archive); err != nil {
+		return store.ProcessResult{}, err
+	}
 	return out, nil
+}
+
+// putArchive stores the archive PDF at path in the blob store, durably,
+// before the result is committed. If the commit does not happen (the
+// document was deleted, the lease lost), the blob is an orphan for the
+// cleanup; nothing refers to it.
+func (w *Worker) putArchive(path string) (hash string, size int64, err error) {
+	f, err := os.Open(path) //nolint:gosec // in the job's work directory
+	if err != nil {
+		return "", 0, fmt.Errorf("open archive: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	b, _, err := w.Blobs.Put(f)
+	if err != nil {
+		return "", 0, fmt.Errorf("store archive: %w", err)
+	}
+	return b.SHA256, b.Size, nil
 }
 
 // msgDamagedOriginal is a stored original whose content does not match its

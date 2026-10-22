@@ -88,8 +88,8 @@ for example the data directory (`/data/...`); stdout works anywhere:
 Every new document is queued for processing: its text is extracted, its
 pages counted and its archive PDF made. `serve` processes the queue in the
 background (`PAPERLESS_GO_OCR_WORKERS`). A failed attempt is retried twice,
-after 1 and 5 minutes; a damaged PDF or one that needs a password to open
-fails at once. The error stays with the document.
+after 1 and 5 minutes; a damaged PDF or image, one that needs a password to
+open, or an image with more than 50 megapixels fails at once. The error stays with the document.
 
 | Command | Does |
 |---|---|
@@ -104,7 +104,10 @@ archive PDF. Text that did not come from processing (`PDF-Text` or
 `Tesseract`), such as text imported from the app or edited by hand, is kept.
 `reprocess` writes a `document.reprocess` entry to the audit log.
 
-This version extracts the text layer of PDFs. A PDF with fewer than 15
-characters on some page needs OCR, and images need conversion; both come
-with the next version, and until then such documents fail with a message
-that says so. After the update, `reprocess --failed` queues them again.
+A PDF keeps its own text layer on pages with at least 15 characters; the
+other pages are OCRed with OCRmyPDF and Tesseract (`PAPERLESS_GO_OCR_LANGUAGES`),
+and the archive PDF is the original with an invisible text layer (a plain
+PDF, not PDF/A). JPEG, PNG and HEIC images become a one-page PDF that is
+OCRed the same way. The original is always kept. A PDF whose permissions
+forbid changes, or that is digitally signed, is not OCRed: it keeps the
+original as its archive, and the document gets a note that says so.

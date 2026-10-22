@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"os"
 	"path/filepath"
 	"slices"
@@ -39,16 +41,38 @@ func (f *fakeRunner) names() []string {
 	return out
 }
 
-// pdf is what the fake poppler tools report about a PDF.
+// pdf is what the fake tools report about a document.
 type pdf struct {
 	pages     []string // the text of each page
 	encrypted bool
-	info      error // pdfinfo's error
-	text      error // pdftotext's error
+	perms     string // the permissions pdfinfo lists; "" means change:no
+	info      error  // pdfinfo's error
+	text      error  // pdftotext's error
+	// ocr is the text of each page after OCR; nil means OCRmyPDF must not
+	// run.
+	ocr    []string
+	ocrErr error // OCRmyPDF's error
+	// convertErr is the error of img2pdf and heif-dec.
+	convertErr error
+	// decoded is what heif-dec writes; nil means a small JPEG.
+	decoded []byte
 }
 
-// poppler answers pdfinfo and pdftotext as the real tools would for p.
+// poppler answers the tools as the real ones would for p: pdfinfo and
+// pdftotext on the original (or the image's PDF) and on OCRmyPDF's output,
+// OCRmyPDF, img2pdf and heif-dec. Output files are written into the
+// command's directory.
 func poppler(p pdf) func(context.Context, Command) ([]byte, error) {
+	write := func(c Command, name, content string) error {
+		return os.WriteFile(filepath.Join(c.Dir, name), []byte(content), 0o600)
+	}
+	pageText := func(pages []string) string {
+		var b strings.Builder
+		for _, page := range pages {
+			b.WriteString(page + "\f")
+		}
+		return b.String()
+	}
 	return func(_ context.Context, c Command) ([]byte, error) {
 		switch c.Name {
 		case "pdfinfo":
@@ -57,32 +81,80 @@ func poppler(p pdf) func(context.Context, Command) ([]byte, error) {
 			}
 			enc := "no"
 			if p.encrypted {
-				enc = "yes (print:yes copy:yes change:no addNotes:no algorithm:AES-256)"
+				perms := p.perms
+				if perms == "" {
+					perms = "print:yes copy:yes change:no addNotes:no"
+				}
+				enc = "yes (" + perms + " algorithm:AES-256)"
 			}
 			return fmt.Appendf(nil, "Title:           a title\nPages:           %d\nEncrypted:       %s\nPage size:       595 x 842 pts (A4)\n", len(p.pages), enc), nil
 		case "pdftotext":
+			if c.Args[2] == archiveFile {
+				return nil, write(c, c.Args[3], pageText(p.ocr))
+			}
 			if p.text != nil {
 				return nil, p.text
 			}
-			var b strings.Builder
-			for _, page := range p.pages {
-				b.WriteString(page + "\f")
+			return nil, write(c, c.Args[len(c.Args)-1], pageText(p.pages))
+		case "ocrmypdf":
+			if p.ocrErr != nil {
+				return nil, p.ocrErr
 			}
-			return nil, os.WriteFile(filepath.Join(c.Dir, c.Args[len(c.Args)-1]), []byte(b.String()), 0o600)
+			if p.ocr == nil {
+				return nil, errors.New("OCRmyPDF must not run")
+			}
+			return nil, write(c, c.Args[len(c.Args)-1], "%PDF-1.4 OCRed")
+		case "img2pdf":
+			if p.convertErr != nil {
+				return nil, p.convertErr
+			}
+			return nil, write(c, c.Args[slices.Index(c.Args, "-o")+1], "%PDF-1.4 image")
+		case "heif-dec":
+			if p.convertErr != nil {
+				return nil, p.convertErr
+			}
+			out := p.decoded
+			if out == nil {
+				out = jpegOf(100, 50)
+			}
+			return nil, os.WriteFile(filepath.Join(c.Dir, c.Args[len(c.Args)-1]), out, 0o600)
 		}
 		return nil, fmt.Errorf("unexpected tool %s", c.Name)
 	}
 }
 
+// jpegOf encodes a white w×h JPEG.
+func jpegOf(w, h int) []byte {
+	img := image.NewGray(image.Rect(0, 0, w, h))
+	for i := range img.Pix {
+		img.Pix[i] = 255
+	}
+	var b bytes.Buffer
+	if err := jpeg.Encode(&b, img, nil); err != nil {
+		panic(err)
+	}
+	return b.Bytes()
+}
+
 func runPipeline(t *testing.T, p pdf, mime string) (Result, *fakeRunner, error) {
+	t.Helper()
+	return runPipelineOn(t, p, mime, []byte("%PDF-1.4"))
+}
+
+// runPipelineOn runs the pipeline with the fake tools on an original with
+// the given content.
+func runPipelineOn(t *testing.T, p pdf, mime string, original []byte) (Result, *fakeRunner, error) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "original")
-	if err := os.WriteFile(path, []byte("%PDF-1.4"), 0o600); err != nil {
+	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f := &fakeRunner{handle: poppler(p)}
-	res, err := (&Pipeline{Runner: f}).Run(context.Background(), Input{Dir: dir, Path: path, MIME: mime})
+	res, err := (&Pipeline{Runner: f, Languages: "deu+eng", Jobs: 3}).Run(context.Background(), Input{Dir: dir, Path: path, MIME: mime})
+	if res.Archive != "" && filepath.Dir(res.Archive) != dir {
+		t.Fatalf("archive %s outside the work directory %s", res.Archive, dir)
+	}
 	return res, f, err
 }
 
@@ -116,35 +188,6 @@ func TestPipelineArguments(t *testing.T) {
 	}
 	if info.Dir == "" || info.Dir != text.Dir {
 		t.Errorf("directories %q and %q", info.Dir, text.Dir)
-	}
-}
-
-func TestPipelineNeedsOCR(t *testing.T) {
-	// One page without text is enough, even if the others have some; a
-	// page with a little text (a scanner's header) needs OCR too.
-	for _, pages := range [][]string{{longText, ""}, {"Page 1 of 2", longText}} {
-		_, _, err := runPipeline(t, pdf{pages: pages}, "application/pdf")
-		var pe *PermanentError
-		if !errors.As(err, &pe) || pe.Msg != msgOCRLater {
-			t.Errorf("pages %q: %v", pages, err)
-		}
-	}
-}
-
-func TestPipelineOwnerPassword(t *testing.T) {
-	// Opens without a password but may not be changed: no OCR, the
-	// original stays the archive, with a note.
-	res, _, err := runPipeline(t, pdf{pages: []string{longText, ""}, encrypted: true}, "application/pdf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Archive != "" || res.Note != msgOwnerPassword || res.PageCount != 2 || res.Text != longText {
-		t.Fatalf("result %+v", res)
-	}
-	// With text on every page it is an ordinary PDF.
-	res, _, err = runPipeline(t, pdf{pages: []string{longText}, encrypted: true}, "application/pdf")
-	if err != nil || res.Note != "" || res.TextSource != store.TextSourcePDF {
-		t.Fatalf("encrypted PDF with text: %+v, %v", res, err)
 	}
 }
 
@@ -185,13 +228,10 @@ func TestPipelineTransientToolError(t *testing.T) {
 }
 
 func TestPipelineOtherTypes(t *testing.T) {
-	for mime, want := range map[string]string{
-		"image/jpeg": msgImagesLater, "image/png": msgImagesLater, "image/heic": msgImagesLater,
-		"image/heif": msgImagesLater, "text/plain": msgUnsupported, "": msgUnsupported,
-	} {
+	for _, mime := range []string{"text/plain", ""} {
 		_, f, err := runPipeline(t, pdf{}, mime)
 		var pe *PermanentError
-		if !errors.As(err, &pe) || pe.Msg != want {
+		if !errors.As(err, &pe) || pe.Msg != msgUnsupported {
 			t.Errorf("%q: %v", mime, err)
 		}
 		if len(f.calls) != 0 {
@@ -243,6 +283,18 @@ func TestParsePDFInfo(t *testing.T) {
 	info, err := parsePDFInfo(out)
 	if err != nil || info.pages != 3 || info.encrypted {
 		t.Fatalf("parsePDFInfo: %+v, %v", info, err)
+	}
+	for line, want := range map[string]pdfInfo{
+		"Encrypted: yes (print:yes copy:yes change:yes addNotes:yes algorithm:AES-256)": {pages: 1, encrypted: true, changeAllowed: true},
+		"Encrypted: yes (print:yes copy:yes change:no addNotes:yes algorithm:AES-256)":  {pages: 1, encrypted: true},
+		"Encrypted: yes": {pages: 1, encrypted: true},
+		// Metadata cannot grant the permission: the last line wins.
+		"Encrypted: yes (change:yes)\nEncrypted: yes (print:yes change:no)": {pages: 1, encrypted: true},
+		"Encrypted: no": {pages: 1},
+	} {
+		if got, err := parsePDFInfo("Pages: 1\n" + line + "\n"); err != nil || got != want {
+			t.Errorf("%q: %+v, %v; want %+v", line, got, err, want)
+		}
 	}
 	for _, bad := range []string{"", "Pages: x\n", "Pages: -1\n", "Pages: 99999999999\n"} {
 		if _, err := parsePDFInfo(bad); err == nil {
