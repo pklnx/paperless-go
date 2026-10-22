@@ -116,7 +116,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	res := &result{Options: o, Host: hostInfo(), StartedAt: time.Now().UTC(), Scenarios: map[string]*scenarioResult{}}
+	if o.Bin != "" {
+		if err := checkPortFree(o.Listen); err != nil {
+			return err
+		}
+	}
+	res := &result{Options: o, Host: hostInfo(), ServerPool: poolSize(&o), StartedAt: time.Now().UTC(), Scenarios: map[string]*scenarioResult{}}
 	for _, name := range o.Scenarios {
 		fmt.Fprintf(os.Stderr, "== %s\n", name)
 		sr, err := runScenario(ctx, &o, name)

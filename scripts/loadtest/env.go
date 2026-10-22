@@ -59,12 +59,58 @@ func checkLoopbackDB(raw string, allow bool) error {
 	return nil
 }
 
+// isLoopbackHost accepts loopback IP literals only: a name, "localhost"
+// included, could resolve elsewhere.
 func isLoopbackHost(h string) bool {
-	if strings.EqualFold(h, "localhost") {
-		return true
-	}
 	ip := net.ParseIP(strings.Trim(h, "[]"))
 	return ip != nil && ip.IsLoopback()
+}
+
+// serverPool is the database pool of the server under test, as far as the
+// script knows it.
+type serverPool struct {
+	MaxConns int    `json:"maxConns"` // 0: unknown
+	Source   string `json:"source"`
+}
+
+// poolSize is the server's pool: pool_max_conns of its database URL, or
+// pgxpool's default (the store sets none). In external mode the server's
+// URL is not known.
+func poolSize(o *options) serverPool {
+	if o.Bin == "" {
+		return serverPool{Source: "unknown in external mode"}
+	}
+	if u, err := url.Parse(o.PGAdminURL); err == nil {
+		if v := u.Query().Get("pool_max_conns"); v != "" {
+			var n int
+			if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+				return serverPool{MaxConns: n, Source: "pool_max_conns of the database URL"}
+			}
+		}
+	}
+	return serverPool{MaxConns: max(4, runtime.NumCPU()), Source: "pgxpool default max(4, NumCPU)"}
+}
+
+// checkPortFree refuses a -listen address something already listens on:
+// the script would otherwise log in to that server.
+func checkPortFree(addr string) error {
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("-listen %s is not free (%w): stop what listens there or pick another address", addr, err)
+	}
+	return l.Close()
+}
+
+// childEnv is the environment of the managed server: the script's own,
+// without any inherited PAPERLESS_GO_ variable, plus extra.
+func childEnv(extra ...string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "PAPERLESS_GO_") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, extra...)
 }
 
 // env is the server and database one scenario runs against.
@@ -140,7 +186,7 @@ func managedEnv(ctx context.Context, o *options, scenario string) (*env, error) 
 	_, _ = rand.Read(key)
 	// A throwaway key for a throwaway server: it lives only in the child's
 	// environment.
-	environ := append(os.Environ(),
+	environ := childEnv(
 		"PAPERLESS_GO_DATABASE_URL="+dbURL,
 		"PAPERLESS_GO_DATA_DIR="+dataDir,
 		"PAPERLESS_GO_SECRET_KEY="+base64.StdEncoding.EncodeToString(key),
@@ -155,6 +201,9 @@ func managedEnv(ctx context.Context, o *options, scenario string) (*env, error) 
 		return nil, fmt.Errorf("migrate up: %w: %s", err, out)
 	}
 
+	if err := checkPortFree(o.Listen); err != nil {
+		return nil, err
+	}
 	logPath := filepath.Join(dir, "server.log")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // our own work folder
 	if err != nil {

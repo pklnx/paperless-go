@@ -19,6 +19,7 @@ type result struct {
 	Options    options                    `json:"options"`
 	Host       host                       `json:"host"`
 	Postgres   *pgInfo                    `json:"postgres"`
+	ServerPool serverPool                 `json:"serverPool"`
 	StartedAt  time.Time                  `json:"startedAt"`
 	FinishedAt time.Time                  `json:"finishedAt"`
 	Scenarios  map[string]*scenarioResult `json:"scenarios"`
@@ -52,11 +53,104 @@ func passFail(ok bool) string {
 	return "fail"
 }
 
+// expected4xx are the refusals that are part of the mix (README.md).
+var expected4xx = map[string]bool{
+	"400 owner_mismatch": true, "404": true, "409 tag_cycle": true,
+	"409 tag_name_conflict": true, "409 name_taken": true, "409 match_changed": true,
+}
+
+// maxUnexpected4xx is the share of unexpected 4xx answers above which a
+// scenario counts as not measured.
+const maxUnexpected4xx = 0.01
+
+// notMeasured says why a scenario's numbers do not measure what it is
+// meant to (empty when they do): a refused bulk flow, bulk changes or
+// uploads that never succeeded, or more than a small share of unexpected
+// refusals. Its timing criteria then fail instead of passing vacuously.
+func notMeasured(name string, s *scenarioResult) []string {
+	var why []string
+	var all, unexpected int
+	for _, op := range slices.Sorted(maps.Keys(s.Ops)) {
+		o := s.Ops[op]
+		all += o.Requests
+		for k, n := range o.Status {
+			if strings.HasPrefix(k, "4") && !expected4xx[k] {
+				unexpected += n
+			}
+		}
+		if n := o.Status["400 invalid_selection"]; n > 0 && strings.HasPrefix(op, "bulk_") {
+			why = append(why, fmt.Sprintf("%s: %d × 400 invalid_selection (the bulk flow does not fit the server)", op, n))
+		}
+	}
+	if all > 0 && float64(unexpected) > maxUnexpected4xx*float64(all) {
+		why = append(why, fmt.Sprintf("%d of %d answers are unexpected 4xx", unexpected, all))
+	}
+	changed := func(op string) int {
+		if o := s.Ops[op]; o != nil {
+			return o.Changed
+		}
+		return 0
+	}
+	switch name {
+	case "S1", "S2":
+		for _, op := range []string{"bulk_ids", "bulk_match", "patch"} {
+			if o := s.Ops[op]; o == nil || o.Status["200"] == 0 {
+				why = append(why, op+": no successful request")
+			}
+		}
+		if changed("bulk_match") == 0 {
+			why = append(why, "bulk_match: no bulk change by match changed a document")
+		}
+	case "S3":
+		if o := s.Ops["bulk_loop"]; o == nil || o.Status["200"] == 0 || changed("bulk_loop") == 0 {
+			why = append(why, "bulk_loop: no successful bulk change")
+		}
+		for _, op := range []string{"upload_baseline_alice", "upload_baseline_bob", "upload_bulk_alice", "upload_bulk_bob"} {
+			o := s.Ops[op]
+			if o == nil || o.Requests == 0 {
+				why = append(why, op+": no upload")
+				continue
+			}
+			if o.Status["201"] != o.Requests {
+				why = append(why, fmt.Sprintf("%s: %d of %d answers are not 201 (%s)", op, o.Requests-o.Status["201"], o.Requests, joinCounts(o.Status)))
+			}
+		}
+	}
+	return why
+}
+
+// comparable lists the parameters in which baseline differs from r, so
+// that their S2 throughput cannot be compared.
+func comparable(r, baseline *result) []string {
+	a, b := r.Options, baseline.Options
+	var diff []string
+	if a.Threads != b.Threads {
+		diff = append(diff, fmt.Sprintf("threads %d vs %d", a.Threads, b.Threads))
+	}
+	if a.DurationText != b.DurationText {
+		diff = append(diff, fmt.Sprintf("duration %s vs %s", a.DurationText, b.DurationText))
+	}
+	if a.Seed != b.Seed {
+		diff = append(diff, fmt.Sprintf("seed %d vs %d", a.Seed, b.Seed))
+	}
+	if a.BulkFlow != b.BulkFlow {
+		diff = append(diff, fmt.Sprintf("bulk flow %s vs %s", a.BulkFlow, b.BulkFlow))
+	}
+	if p, q := r.ServerPool.MaxConns, baseline.ServerPool.MaxConns; p != q {
+		diff = append(diff, fmt.Sprintf("server pool %d vs %d connections", p, q))
+	}
+	return diff
+}
+
 // evaluate prints the #102 plan's acceptance criteria as checks.
 func evaluate(r *result, baseline *result) []check {
 	var out []check
+	invalid := map[string][]string{}
 	for _, name := range r.Options.Scenarios {
 		s := r.Scenarios[name]
+		why := notMeasured(name, s)
+		invalid[name] = why
+		out = append(out, check{name + ": measured", passFail(len(why) == 0), strings.Join(why, "; ")})
 		logDl := -1
 		if s.Log != nil {
 			logDl = s.Log.Deadlocks
@@ -84,19 +178,33 @@ func evaluate(r *result, baseline *result) []check {
 			}
 		}
 		out = append(out, check{name + ": audit log matches the answers", passFail(len(bad) == 0), strings.Join(bad, "; ")})
-		if o := s.Ops["bulk_match"]; o != nil && r.Options.BulkFlow == flowLegacy && o.Status["400 invalid_selection"] > 0 {
-			out = append(out, check{name + ": bulk flow", "info",
-				"the server refused changes by match without a fingerprint (#106): run with -bulk-flow fingerprint"})
+		for _, op := range []string{"bulk_match", "bulk_loop"} {
+			if o := s.Ops[op]; o != nil && r.Options.BulkFlow == flowLegacy && o.Status["400 invalid_selection"] > 0 {
+				out = append(out, check{name + ": bulk flow", "info",
+					op + ": the server refused changes by match without a fingerprint (#106): run with -bulk-flow fingerprint"})
+			}
 		}
 	}
 
 	if s := r.Scenarios["S2"]; s != nil {
 		c := check{Name: "S2: throughput ≥ half of the baseline's", Status: "skip", Detail: "no -baseline with S2"}
-		if baseline != nil && baseline.Scenarios["S2"] != nil {
-			b := baseline.Scenarios["S2"].Totals.PerSecond
+		var bs *scenarioResult
+		if baseline != nil {
+			bs = baseline.Scenarios["S2"]
+		}
+		switch {
+		case len(invalid["S2"]) > 0:
+			c.Status, c.Detail = "fail", "nothing measured: "+strings.Join(invalid["S2"], "; ")
+		case bs == nil:
+		case len(notMeasured("S2", bs)) > 0:
+			c.Status, c.Detail = "fail", "the baseline's S2 measured nothing: "+strings.Join(notMeasured("S2", bs), "; ")
+		case len(comparable(r, baseline)) > 0:
+			c.Status, c.Detail = "fail", "baseline not comparable: "+strings.Join(comparable(r, baseline), "; ")
+		default:
+			b := bs.Totals.PerSecond
 			c.Status = passFail(s.Totals.PerSecond >= b/2)
 			c.Detail = fmt.Sprintf("%.2f requests/s vs baseline %.2f requests/s (2xx/s %.2f vs %.2f)",
-				s.Totals.PerSecond, b, s.Totals.OKPerSecond, baseline.Scenarios["S2"].Totals.OKPerSecond)
+				s.Totals.PerSecond, b, s.Totals.OKPerSecond, bs.Totals.OKPerSecond)
 		}
 		out = append(out, c)
 	}
@@ -108,8 +216,12 @@ func evaluate(r *result, baseline *result) []check {
 			return 0
 		}
 		withBulk, base, bulk := p99("upload_bulk_alice"), p99("upload_baseline_alice"), p99("bulk_loop")
-		out = append(out, check{"S3: alice's upload p99 ≤ baseline p99 + bulk p99", passFail(withBulk <= base+bulk),
-			fmt.Sprintf("%.0f ms ≤ %.0f ms + %.0f ms", withBulk, base, bulk)})
+		c := check{"S3: alice's upload p99 ≤ baseline p99 + bulk p99", passFail(withBulk <= base+bulk),
+			fmt.Sprintf("%.0f ms ≤ %.0f ms + %.0f ms", withBulk, base, bulk)}
+		if len(invalid["S3"]) > 0 {
+			c.Status, c.Detail = "fail", "nothing measured: "+strings.Join(invalid["S3"], "; ")
+		}
+		out = append(out, c)
 		out = append(out, check{"S3: bob's uploads vs his baseline", "info",
 			fmt.Sprintf("p99 %.0f ms with the bulk loop, %.0f ms without", p99("upload_bulk_bob"), p99("upload_baseline_bob"))})
 	}
@@ -131,6 +243,7 @@ func printSummary(w io.Writer, r *result) {
 	if r.Postgres != nil {
 		fmt.Fprintf(w, "postgres: %s %s; %v\n", o.PGImage, firstWords(r.Postgres.Version, 2), r.Postgres.Settings)
 	}
+	fmt.Fprintf(w, "server database pool: %d connections (%s)\n", r.ServerPool.MaxConns, r.ServerPool.Source)
 
 	for _, name := range o.Scenarios {
 		s := r.Scenarios[name]

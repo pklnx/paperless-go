@@ -6,15 +6,20 @@ PR #103 and adds the scenarios of the #102 plan (section 6), so the locking
 can be measured before and after a change on the same host.
 
 It is a tool for developers, not a test: it is built only with the
-`loadtest` build tag, so `go build ./...`, `go vet ./...`, `go test ./...`
-and CI never compile it.
+`loadtest` build tag, so `go build ./...`, `go vet ./...` and
+`go test ./...` never compile it. CI only vets it and runs the unit tests
+of its report logic (`go vet -tags loadtest ./scripts/loadtest/...`,
+`go test -tags loadtest ./scripts/loadtest/...`); it never runs the load.
 
 **Never point it at a real server or database.** It creates users, writes
 thousands of documents and deletes metadata. It refuses:
 
-- a server or database host that is not a loopback address or a Unix socket
-  (`-allow-non-loopback` overrides; there is no reason to use it on a real
-  installation);
+- a server or database host that is not a loopback IP literal (`127.0.0.1`,
+  `::1`) or a Unix socket; names, `localhost` included, are refused because a
+  resolver could map them elsewhere (`-allow-non-loopback` overrides; there is
+  no reason to use it on a real installation);
+- in managed mode, a `-listen` address something already listens on (the
+  script would log in to that server instead of its own);
 - a database that already has users or documents: it only runs on a fresh,
   throwaway database that it fills itself.
 
@@ -118,7 +123,8 @@ statistics:
 
 The three scenarios take about 9 minutes. The databases stay for inspection
 until the next run; the server logs are in `-workdir` (a new temporary folder
-by default), named `s1/server.log` and so on.
+by default), named `s1/server.log` and so on. The managed server gets none
+of the caller's `PAPERLESS_GO_*` variables, only the script's own.
 
 Then the after run, with the baseline for the S2 check:
 
@@ -142,6 +148,11 @@ The server needs `PAPERLESS_GO_OCR_WORKERS=0` and must accept the host of
 may lag by a few seconds (PostgreSQL flushes a backend's statistics when it
 goes idle or exits); the log count from `-pg-log-cmd` does not.
 
+**Limitation:** nothing checks that the server at `-url` really uses the
+database given with `-db`; the emptiness check runs on `-db` only. Start the
+server on that fresh, migrated database yourself, or use managed mode. The
+server's pool size is not known in this mode (reported as 0).
+
 ## Output
 
 The human summary goes to stdout, progress to stderr, and with `-out` the
@@ -149,7 +160,9 @@ whole result as JSON (the input of a later `-baseline`). Per scenario:
 
 - requests (without dry runs), 2xx, 4xx by code, 500, 503 by operation,
   transport errors;
-- per operation: requests, p50/p99/max latency and answers;
+- per operation: requests, p50/p99/max latency and answers. Percentiles are
+  nearest-rank, so with fewer than 100 samples p99 is the slowest request:
+  the p99 of an upload series of 50 is its slowest upload;
 - successful bulk changes and documents changed;
 - deadlocks: the delta of `pg_stat_database.deadlocks`, and from the
   PostgreSQL log the `deadlock detected` lines, the logged lock waits
@@ -169,13 +182,31 @@ whole result as JSON (the input of a later `-baseline`). Per scenario:
 
 Then the checks, each `PASS`, `FAIL`, `SKIP` (input missing) or `INFO`:
 
-- per scenario: no deadlocks (both counts 0), no 500 and no 503, every
-  consistency check 0, the audit log matches the answers;
+- per scenario: measured (see below), no deadlocks (both counts 0), no 500
+  and no 503, every consistency check 0, the audit log matches the answers;
 - S2: requests per second at least half of the `-baseline` run's S2 (the
-  maintainer's criterion on #102);
+  maintainer's criterion on #102). It fails when the baseline is not
+  comparable (other threads, duration, seed, bulk flow or server pool size)
+  or its S2 measured nothing, and skips without a baseline;
 - S3: alice's upload p99 during the bulk loop ≤ her baseline p99 + the bulk
   loop's p99 (an upload waits at most one bulk change); bob's p99 with and
   without the loop as information.
+
+A scenario counts as **not measured**, and its S2 or S3 criterion fails with
+"nothing measured" instead of passing on empty numbers, when:
+
+- a bulk change answers `400 invalid_selection` (the bulk flow does not fit
+  the server, e.g. `-bulk-flow legacy` against a server with #106; an `INFO`
+  line names the flow to use);
+- more than 1 % of all answers are 4xx other than the expected ones above;
+- S1/S2: bulk changes by IDs or by match, or PATCHes, never succeeded, or no
+  bulk change by match changed a document;
+- S3: the bulk loop never changed a document, or an upload answered anything
+  other than 201.
+
+The report also records the server's database pool (`pool_max_conns` of the
+database URL, else pgxpool's default of max(4, CPUs)), which bounds the
+throughput.
 
 The exit code is 0 when the run completed, whatever the checks say (a before
 run is expected to fail some), and 2 when it could not run.
