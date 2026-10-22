@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pklnx/paperless-go/internal/ingest"
+	"github.com/pklnx/paperless-go/internal/search"
 	"github.com/pklnx/paperless-go/internal/store"
 )
 
@@ -111,14 +112,14 @@ func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = min(n, documentListMax)
 	}
-	docs, err := s.store.RecentDocuments(r.Context(), requestScope(r), limit)
+	page, err := s.store.SearchDocuments(r.Context(), requestScope(r), search.Query{Limit: limit})
 	if err != nil {
 		s.failStore(w, r, err)
 		return
 	}
-	out := documentListJSON{Documents: make([]documentJSON, len(docs)), MaxUploadSize: s.importer.MaxSize()}
-	for i, d := range docs {
-		out.Documents[i] = toDocumentJSON(d)
+	out := documentListJSON{Documents: make([]documentJSON, len(page.Hits)), MaxUploadSize: s.importer.MaxSize()}
+	for i, h := range page.Hits {
+		out.Documents[i] = toDocumentJSON(h.Document)
 	}
 	s.writeJSON(w, http.StatusOK, out)
 }
