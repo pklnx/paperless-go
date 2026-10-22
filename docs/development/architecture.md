@@ -52,7 +52,7 @@ app and the server through the app's archive folder format:
 | App (SwiftData) | Server table |
 |---|---|
 | — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`, `webauthn_handle` in `00008_passkeys.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges`, `passkeys`, `webauthn_ceremonies` (network columns in `00014_ceremony_networks.sql`), `api_keys` (`00009_api_keys.sql`) |
-| — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; see [Audit log](#audit-log)) |
+| — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; actor `system` in `00015_audit_system_actor.sql`; see [Audit log](#audit-log)) |
 | `Document`: id (UUID), title, documentDate, createdAt, modifiedAt, notes, isFavorite, isInbox, archiveSerialNumber, pageCount, fileSize, extractedText, source, originalFileName, textSource, contentHash | `documents`, with the UUID as primary key; the original file (`original_sha256`, size, MIME type) and the archive PDF (`archive_sha256`, size) |
 | `Tag`: name, colorHex, symbol, parent, matchText, matchMode | `tags`, `document_tags` (nested through `parent_id`) |
 | `Correspondent`, `DocumentType`: name, matchText, matchMode | `correspondents`, `document_types` |
@@ -462,9 +462,23 @@ creates it). One scan every 10 s (the trigger and the clock are injected):
   be imported in its partial state; it then stays and is imported again as
   a new document once it settles. The recheck before `Remove` and the
   `Remove` itself are not atomic.
-- **Audit.** No audit entry: the audit log's actors are `session`,
-  `api_key` and `cli`, none of which fits the server itself. The log has an
-  info line per consumed file.
+- **Audit.** `Options.Audit` (in `serve`, `store.Audit`; nil writes
+  nothing) gets one `document.consume` entry per user folder and scan that
+  changed something: actor `system`, no user or client, target the user
+  (ID and name), details `imported`, `duplicates`, `failed` and
+  `interrupted: true` when the folder's pass stopped on an error or
+  cancellation. Outcomes are counted, not attempts: a duplicate only once
+  `remove` deleted it, a refused file only once it moved to `failed/`, so
+  a held file tried again after `HoldTime` adds nothing. The entries are
+  written at the end of `Scan` (deferred, so also after an error, an
+  unknown user or shutdown), with `context.WithoutCancel` and a 10 s
+  timeout. An entry that cannot be written is logged once (until the error
+  changes) and kept in memory per user ID; every scan tries the kept
+  entries again, adding its own counts, also when it changed nothing
+  itself. They are lost only if the process exits first. The log has an
+  info line per consumed file, with its name; the entry has none.
+  Processing results are not audited (maintainer decision on #49): the job
+  state and `processing_note` show them.
 
 ## Processing
 
@@ -799,13 +813,21 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
 `cmd/paperless-go/audit.go`, migration `00005_audit_log.sql`).
 
 - **Table.** `audit_log` is partitioned by month (`at`, from the database
-  clock). Each row has the actor (`session`, `api_key`, `cli`), the user's
+  clock). Each row has the actor (`session`, `api_key`, `cli`, `system`), the user's
   ID and name at the time, the action (`area.verb`), an optional target
   (`document`, `user`, `api_key`; a document target must be a UUID), client
   address, a user agent (stored once in `audit_user_agents`) and details as
   a JSON object. `user_id`, `api_key_id` and `target_id` have **no foreign
   keys**: removing a user keeps their rows, and the log never blocks a
   removal.
+- **Actors.** `user_id` is who acted. `cli` and `system` (the server on
+  its own, `00015`) have no client IP or user agent
+  (`audit_log_actor_no_client`); `system` has no user either
+  (`audit_log_system_no_user`), and the user it concerns is the target, so
+  that user sees it through the target branch of the log page. The checks
+  are on the partitioned table and reach every partition, also later ones.
+  The down migration of `00015` refuses while `system` rows exist (the old
+  checks would refuse them, and the log is append-only).
 - **Append-only.** Row triggers refuse `UPDATE` and `DELETE` on the log and
   its partitions, statement triggers refuse `TRUNCATE`; all are `ENABLE
   ALWAYS`, so `session_replication_role = replica` does not skip them. The
@@ -840,7 +862,8 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   written before the export starts), `document.create` (upload, with
   `via: upload`; the target is the new document), `document.search` (the
   first page of a search, with `q` and the filter parameters; see
-  [Documents API](#documents-api)).
+  [Documents API](#documents-api)), `document.import` (CLI) and
+  `document.consume` (system; see [Consume folder](#consume-folder)).
   A two-factor login records `method: 2fa` and its `factor` (`totp`,
   `recovery_code` with `recoveryCodesLeft`); a wrong code gives
   `auth.login_failed` with `reason: second_factor`. Requests refused

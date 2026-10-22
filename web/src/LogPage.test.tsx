@@ -76,8 +76,8 @@ describe("LogPage", () => {
     await vi.waitFor(() => expect(screen.getAllByRole("option", { name: "a.b" })).toHaveLength(1));
     const who = (screen.getByText(t.logWho).querySelector("select") as HTMLSelectElement).options;
     const names = Array.from(who, (o) => o.textContent);
-    expect(names.slice(0, 3)).toEqual([t.logEveryone, t.logCommandLine, t.logApiKeys]);
-    expect(names.slice(3)).toEqual(["a", "a.b", "b"]);
+    expect(names.slice(0, 4)).toEqual([t.logEveryone, t.logCommandLine, t.logApiKeys, t.logServer]);
+    expect(names.slice(4)).toEqual(["a", "a.b", "b"]);
   });
 
   it("filters by action and person", async () => {
@@ -89,8 +89,51 @@ describe("LogPage", () => {
     await screen.findByRole("option", { name: "bob" });
     fireEvent.change(screen.getByLabelText(t.logWho), { target: { value: "bob" } });
     await vi.waitFor(() => expect(urls.some((u) => u.includes("user=bob"))).toBe(true));
-    fireEvent.change(screen.getByLabelText(t.logWho), { target: { value: "cli" } });
+    fireEvent.change(screen.getByLabelText(t.logWho), { target: { value: "@cli" } });
     await vi.waitFor(() => expect(urls.some((u) => u.includes("actor=cli"))).toBe(true));
+    fireEvent.change(screen.getByLabelText(t.logWho), { target: { value: "@system" } });
+    await vi.waitFor(() => expect(urls.some((u) => u.includes("actor=system"))).toBe(true));
+  });
+
+  it("selects a user named like an actor as a user", async () => {
+    stubServer({ "": { entries: [] } }, ["cli", "system"]);
+    render(<LogPage admin />);
+    await screen.findByRole("option", { name: "cli" });
+    fireEvent.change(screen.getByLabelText(t.logWho), { target: { value: "cli" } });
+    await vi.waitFor(() => expect(urls.some((u) => u.includes("user=cli"))).toBe(true));
+    expect(urls.some((u) => u.includes("actor=cli"))).toBe(false);
+    fireEvent.change(screen.getByLabelText(t.logWho), { target: { value: "system" } });
+    await vi.waitFor(() => expect(urls.some((u) => u.includes("user=system"))).toBe(true));
+    expect(urls.some((u) => u.includes("actor=system"))).toBe(false);
+  });
+
+  const consumeEntry = (byOther: boolean): AuditEntry => ({
+    id: 9,
+    at: "2026-10-22T10:00:00Z",
+    actor: "system",
+    action: "document.consume",
+    target: { type: "user", id: "2", name: "alice" },
+    details: { imported: 2, duplicates: 1, failed: 0 },
+    ...(byOther ? { byOther: true } : {}),
+  });
+
+  it("shows the admin the server's entries with the user they are about", async () => {
+    stubServer({ "": { entries: [consumeEntry(false)] } });
+    render(<LogPage admin />);
+    expect(await screen.findByText(t.auditAction("document.consume"))).toBeTruthy();
+    expect(screen.getByText(`· ${t.logServer}`, { exact: false })).toBeTruthy();
+    expect(screen.getByText(/· alice/)).toBeTruthy();
+    expect(screen.getByText(`${t.logImported(2)}, ${t.logDuplicates(1)}`)).toBeTruthy();
+    expect(screen.queryByText(new RegExp(t.logByServer))).toBeNull();
+  });
+
+  it("tells a user the server imported files into their account", async () => {
+    stubServer({ "": { entries: [consumeEntry(true)] } });
+    render(<LogPage admin={false} />);
+    expect(await screen.findByText(t.auditAction("document.consume"))).toBeTruthy();
+    expect(screen.getByText(`· ${t.logByServer}`, { exact: false })).toBeTruthy();
+    expect(screen.getByText(`${t.logImported(2)}, ${t.logDuplicates(1)}`)).toBeTruthy();
+    expect(screen.queryByText(/alice/)).toBeNull();
   });
 
   it("shows a user their own entries without the person filter", async () => {

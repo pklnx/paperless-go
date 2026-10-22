@@ -17,8 +17,16 @@ const entry = (action: string, more: Partial<AuditEntry> = {}): AuditEntry => ({
 describe("auditQuery", () => {
   it("maps the filter to the API's parameters", () => {
     expect(auditQuery({ since: "2026-10-01", until: "", group: "login", who: "" })).toBe("since=2026-10-01&action=login");
-    expect(auditQuery({ since: "", until: "2026-10-31", group: "", who: "cli" }, "abc")).toBe("until=2026-10-31&actor=cli&cursor=abc");
+    expect(auditQuery({ since: "", until: "2026-10-31", group: "", who: "@cli" }, "abc")).toBe("until=2026-10-31&actor=cli&cursor=abc");
+    expect(auditQuery({ since: "", until: "", group: "", who: "@api_key" })).toBe("actor=api_key");
+    expect(auditQuery({ since: "", until: "", group: "", who: "@system" })).toBe("actor=system");
     expect(auditQuery({ since: "", until: "", group: "", who: "bob" })).toBe("user=bob");
+  });
+
+  it("selects users named like an actor by name", () => {
+    expect(auditQuery({ since: "", until: "", group: "", who: "cli" })).toBe("user=cli");
+    expect(auditQuery({ since: "", until: "", group: "", who: "system" })).toBe("user=system");
+    expect(auditQuery({ since: "", until: "", group: "", who: "api_key" })).toBe("user=api_key");
   });
 });
 
@@ -81,6 +89,23 @@ describe("entry texts", () => {
     expect(entryDetail(failed, messagesFor("de"))).toBe(`${messagesFor("de").auditAction("profile.2fa_disable")}, falsches Passwort`);
   });
 
+  it("counts the files of an import from the consume folder or the command line", () => {
+    const en = messagesFor("en");
+    const de = messagesFor("de");
+    const consume = entry("document.consume", { actor: "system", user: undefined, details: { imported: 2, duplicates: 1, failed: 0, interrupted: true } });
+    expect(entryDetail(consume, en)).toBe("2 files imported, 1 duplicate");
+    expect(entryDetail(consume, de)).toBe("2 Dateien importiert, 1 Duplikat");
+    const one = entry("document.consume", { actor: "system", details: { imported: 1, duplicates: 2, failed: 3 } });
+    expect(entryDetail(one, en)).toBe("1 file imported, 2 duplicates, 3 files failed");
+    expect(entryDetail(one, de)).toBe("1 Datei importiert, 2 Duplikate, 3 Dateien fehlgeschlagen");
+    expect(entryDetail(entry("document.import", { actor: "cli", details: { path: "/srv/x", imported: 3, duplicates: 0, failed: 1 } }), en)).toBe(
+      "3 files imported, 1 file failed",
+    );
+    expect(entryDetail(entry("document.consume", { details: {} }), en)).toBe("");
+    expect(en.auditAction("document.consume")).toBe("Imported from the consume folder");
+    expect(de.auditAction("document.consume")).toBe("Aus dem Eingangsordner importiert");
+  });
+
   it("names the operator of a command", () => {
     expect(commandOperator(entry("user.add", { actor: "cli", details: { operator: "patrick", os_user: "nonroot" } }))).toBe("patrick");
     expect(commandOperator(entry("user.add", { actor: "cli", details: { os_user: "nonroot" } }))).toBe("nonroot");
@@ -95,5 +120,14 @@ describe("shortUserAgent", () => {
       shortUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"),
     ).toBe("Safari 18 · iPhone");
     expect(shortUserAgent("Go-http-client/1.1")).toBe("Go-http-client/1.1");
+  });
+});
+
+describe("the server as an actor", () => {
+  it("is named in both languages", () => {
+    expect(messagesFor("en").logServer).toBe("Server");
+    expect(messagesFor("en").logByServer).toBe("by the server");
+    expect(messagesFor("de").logServer).toBe("Server");
+    expect(messagesFor("de").logByServer).toBe("vom Server");
   });
 });

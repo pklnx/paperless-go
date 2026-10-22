@@ -21,7 +21,7 @@ export function targetLabel(e: AuditEntry): string {
  * The detail worth a glance: a login's method, passkey, second factor and
  * reason, a failed login's name, the role of a new user, the factor that
  * confirmed a 2FA change, the passkey added or removed, the text of a
- * search.
+ * search, the counts of an import.
  */
 export function entryDetail(e: AuditEntry, m: Messages = t): string {
   const d = e.details;
@@ -33,6 +33,10 @@ export function entryDetail(e: AuditEntry, m: Messages = t): string {
       .join(", ");
   if (e.action === "profile.passkey_add" || e.action === "profile.passkey_remove") return str(d.name) && m.logTriedName(str(d.name));
   if (e.action === "document.search") return str(d.q) && m.logTriedName(str(d.q));
+  if (e.action === "document.consume" || e.action === "document.import") {
+    const count = (v: unknown, text: (n: number) => string) => (typeof v === "number" && v > 0 ? text(v) : "");
+    return [count(d.imported, m.logImported), count(d.duplicates, m.logDuplicates), count(d.failed, m.logFailedFiles)].filter(Boolean).join(", ");
+  }
   if (e.action === "user.passkeys_removed" && typeof d.count === "number") return m.passkeyCount(d.count);
   if (e.action === "user.password_reset" && typeof d.passkeysRemoved === "number" && d.passkeysRemoved > 0) return `${m.removePasskeys}: ${d.passkeysRemoved}`;
   if (e.action === "profile.2fa_disable" || e.action === "profile.recovery_codes") return code(d.factor);

@@ -91,8 +91,9 @@ export function LogPage({ admin }: { admin: boolean }) {
             {t.logWho}
             <select className={control} value={filter.who} onChange={(e) => set({ who: e.target.value })}>
               <option value="">{t.logEveryone}</option>
-              <option value="cli">{t.logCommandLine}</option>
-              <option value="api_key">{t.logApiKeys}</option>
+              <option value="@cli">{t.logCommandLine}</option>
+              <option value="@api_key">{t.logApiKeys}</option>
+              <option value="@system">{t.logServer}</option>
               {users.map((u) => (
                 <option key={u.name} value={u.name}>
                   {u.name}
@@ -130,8 +131,8 @@ export function LogPage({ admin }: { admin: boolean }) {
 }
 
 function EntryLine({ entry: e, admin }: { entry: AuditEntry; admin: boolean }) {
-  // An entry about a user by an admin or the command line: name who made
-  // it; the target is the user themself.
+  // An entry about a user by an admin, the command line or the server:
+  // name who made it; the target is the user themself.
   const byOther = !admin && e.byOther === true;
   const target = byOther ? "" : targetLabel(e);
   const detail = entryDetail(e);
@@ -145,6 +146,7 @@ function EntryLine({ entry: e, admin }: { entry: AuditEntry; admin: boolean }) {
         {admin && e.user && <span className="text-ink-muted"> · {e.user}</span>}
         {byOther && e.actor !== "cli" && e.user && <span className="text-ink-muted"> · {t.logByAdmin(e.user)}</span>}
         {e.actor === "cli" && <span className="text-ink-muted"> · {operator ? t.logCLIBy(operator) : t.logCLI}</span>}
+        {e.actor === "system" && <span className="text-ink-muted"> · {byOther ? t.logByServer : t.logServer}</span>}
         {e.apiKey && <span className="text-ink-muted"> · {t.logViaKey(e.apiKey)}</span>}
         {target && <span> · {target}</span>}
         {detail && <span className="block break-words text-ink-muted">{detail}</span>}
