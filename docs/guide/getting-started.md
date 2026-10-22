@@ -18,6 +18,13 @@ by default; to reach it from your network or a VPN, follow
 
 ## Install
 
+::: warning No release yet
+No release has been published yet, so the bundle and the `ghcr.io` image
+below do not exist. Until the first release, install from source (see
+**From source instead** below): `git clone` the repository and continue
+with `cp .env.example .env`; `./pgo` builds the image locally.
+:::
+
 Download the Docker Compose bundle of the latest release, check it against
 the release's `SHA256SUMS` file and extract it:
 

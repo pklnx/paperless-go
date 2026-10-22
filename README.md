@@ -41,6 +41,12 @@ and the full document UI follow step by step; see the
 
 ## Quick start
 
+> **No release yet.** Until the first release is published, there is no
+> bundle to download and no image on `ghcr.io`. Install from source instead:
+> `git clone https://github.com/pklnx/paperless-go.git && cd paperless-go`,
+> then continue with `cp .env.example .env` below; `./pgo` builds the image
+> locally. See [From source](https://pklnx.github.io/paperless-go/guide/getting-started#install).
+
 Download the Docker Compose bundle of the latest release, check it and
 extract it. The first `./pgo` command pulls the images from `ghcr.io`
 without a sign-in, as does `docker pull ghcr.io/pklnx/paperless-go:latest`
