@@ -26,11 +26,15 @@ const (
 	ActorCLI     = "cli"
 )
 
-// What an audit entry is about. A document is named by its UUID.
+// What an audit entry is about. Documents, tags, correspondents and
+// document types are named by their UUID.
 const (
-	TargetDocument = "document"
-	TargetUser     = "user"
-	TargetAPIKey   = "api_key"
+	TargetDocument      = "document"
+	TargetUser          = "user"
+	TargetAPIKey        = "api_key"
+	TargetTag           = "tag"
+	TargetCorrespondent = "correspondent"
+	TargetDocumentType  = "document_type"
 )
 
 // ErrAuditUnavailable wraps every failure to write an audit entry. Whatever

@@ -7,6 +7,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -125,9 +126,10 @@ func (q *Queries) CreateTag(ctx context.Context, arg CreateTagParams) (Tag, erro
 	return i, err
 }
 
-const deleteCorrespondent = `-- name: DeleteCorrespondent :execrows
+const deleteCorrespondent = `-- name: DeleteCorrespondent :one
 DELETE FROM correspondents
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+RETURNING id, owner_id, name
 `
 
 type DeleteCorrespondentParams struct {
@@ -135,17 +137,23 @@ type DeleteCorrespondentParams struct {
 	Owner *int64
 }
 
-func (q *Queries) DeleteCorrespondent(ctx context.Context, arg DeleteCorrespondentParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteCorrespondent, arg.ID, arg.Owner)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+type DeleteCorrespondentRow struct {
+	ID      pgtype.UUID
+	OwnerID int64
+	Name    string
 }
 
-const deleteDocumentType = `-- name: DeleteDocumentType :execrows
+func (q *Queries) DeleteCorrespondent(ctx context.Context, arg DeleteCorrespondentParams) (DeleteCorrespondentRow, error) {
+	row := q.db.QueryRow(ctx, deleteCorrespondent, arg.ID, arg.Owner)
+	var i DeleteCorrespondentRow
+	err := row.Scan(&i.ID, &i.OwnerID, &i.Name)
+	return i, err
+}
+
+const deleteDocumentType = `-- name: DeleteDocumentType :one
 DELETE FROM document_types
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+RETURNING id, owner_id, name
 `
 
 type DeleteDocumentTypeParams struct {
@@ -153,17 +161,23 @@ type DeleteDocumentTypeParams struct {
 	Owner *int64
 }
 
-func (q *Queries) DeleteDocumentType(ctx context.Context, arg DeleteDocumentTypeParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteDocumentType, arg.ID, arg.Owner)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+type DeleteDocumentTypeRow struct {
+	ID      pgtype.UUID
+	OwnerID int64
+	Name    string
 }
 
-const deleteTag = `-- name: DeleteTag :execrows
+func (q *Queries) DeleteDocumentType(ctx context.Context, arg DeleteDocumentTypeParams) (DeleteDocumentTypeRow, error) {
+	row := q.db.QueryRow(ctx, deleteDocumentType, arg.ID, arg.Owner)
+	var i DeleteDocumentTypeRow
+	err := row.Scan(&i.ID, &i.OwnerID, &i.Name)
+	return i, err
+}
+
+const deleteTag = `-- name: DeleteTag :one
 DELETE FROM tags
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+RETURNING id, owner_id, name
 `
 
 type DeleteTagParams struct {
@@ -171,12 +185,38 @@ type DeleteTagParams struct {
 	Owner *int64
 }
 
-func (q *Queries) DeleteTag(ctx context.Context, arg DeleteTagParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteTag, arg.ID, arg.Owner)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+type DeleteTagRow struct {
+	ID      pgtype.UUID
+	OwnerID int64
+	Name    string
+}
+
+func (q *Queries) DeleteTag(ctx context.Context, arg DeleteTagParams) (DeleteTagRow, error) {
+	row := q.db.QueryRow(ctx, deleteTag, arg.ID, arg.Owner)
+	var i DeleteTagRow
+	err := row.Scan(&i.ID, &i.OwnerID, &i.Name)
+	return i, err
+}
+
+const documentCounts = `-- name: DocumentCounts :one
+SELECT count(*) FILTER (WHERE is_inbox)::bigint AS inbox,
+       count(*) FILTER (WHERE is_favorite)::bigint AS favorites,
+       count(*)::bigint AS total
+FROM documents
+WHERE $1::bigint IS NULL OR owner_id = $1
+`
+
+type DocumentCountsRow struct {
+	Inbox     int64
+	Favorites int64
+	Total     int64
+}
+
+func (q *Queries) DocumentCounts(ctx context.Context, owner *int64) (DocumentCountsRow, error) {
+	row := q.db.QueryRow(ctx, documentCounts, owner)
+	var i DocumentCountsRow
+	err := row.Scan(&i.Inbox, &i.Favorites, &i.Total)
+	return i, err
 }
 
 const getCorrespondent = `-- name: GetCorrespondent :one
@@ -292,6 +332,58 @@ func (q *Queries) ListCorrespondents(ctx context.Context, owner *int64) ([]Corre
 	return items, nil
 }
 
+const listCorrespondentsWithCounts = `-- name: ListCorrespondentsWithCounts :many
+
+SELECT c.id, c.owner_id, c.name, c.match_text, c.match_mode, c.created_at, c.modified_at,
+       count(d.id)::bigint AS document_count
+FROM correspondents c
+LEFT JOIN documents d ON d.correspondent_id = c.id
+WHERE $1::bigint IS NULL OR c.owner_id = $1
+GROUP BY c.id
+ORDER BY c.owner_id, lower(c.name), c.id
+`
+
+type ListCorrespondentsWithCountsRow struct {
+	ID            pgtype.UUID
+	OwnerID       int64
+	Name          string
+	MatchText     string
+	MatchMode     string
+	CreatedAt     time.Time
+	ModifiedAt    time.Time
+	DocumentCount int64
+}
+
+// The lists with their document counts: one aggregate per list.
+func (q *Queries) ListCorrespondentsWithCounts(ctx context.Context, owner *int64) ([]ListCorrespondentsWithCountsRow, error) {
+	rows, err := q.db.Query(ctx, listCorrespondentsWithCounts, owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListCorrespondentsWithCountsRow
+	for rows.Next() {
+		var i ListCorrespondentsWithCountsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OwnerID,
+			&i.Name,
+			&i.MatchText,
+			&i.MatchMode,
+			&i.CreatedAt,
+			&i.ModifiedAt,
+			&i.DocumentCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDocumentTypes = `-- name: ListDocumentTypes :many
 SELECT id, owner_id, name, symbol, match_text, match_mode, created_at, modified_at FROM document_types
 WHERE $1::bigint IS NULL OR owner_id = $1
@@ -316,6 +408,58 @@ func (q *Queries) ListDocumentTypes(ctx context.Context, owner *int64) ([]Docume
 			&i.MatchMode,
 			&i.CreatedAt,
 			&i.ModifiedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDocumentTypesWithCounts = `-- name: ListDocumentTypesWithCounts :many
+SELECT t.id, t.owner_id, t.name, t.symbol, t.match_text, t.match_mode, t.created_at, t.modified_at,
+       count(d.id)::bigint AS document_count
+FROM document_types t
+LEFT JOIN documents d ON d.document_type_id = t.id
+WHERE $1::bigint IS NULL OR t.owner_id = $1
+GROUP BY t.id
+ORDER BY t.owner_id, lower(t.name), t.id
+`
+
+type ListDocumentTypesWithCountsRow struct {
+	ID            pgtype.UUID
+	OwnerID       int64
+	Name          string
+	Symbol        string
+	MatchText     string
+	MatchMode     string
+	CreatedAt     time.Time
+	ModifiedAt    time.Time
+	DocumentCount int64
+}
+
+func (q *Queries) ListDocumentTypesWithCounts(ctx context.Context, owner *int64) ([]ListDocumentTypesWithCountsRow, error) {
+	rows, err := q.db.Query(ctx, listDocumentTypesWithCounts, owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListDocumentTypesWithCountsRow
+	for rows.Next() {
+		var i ListDocumentTypesWithCountsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OwnerID,
+			&i.Name,
+			&i.Symbol,
+			&i.MatchText,
+			&i.MatchMode,
+			&i.CreatedAt,
+			&i.ModifiedAt,
+			&i.DocumentCount,
 		); err != nil {
 			return nil, err
 		}
@@ -362,6 +506,169 @@ func (q *Queries) ListTags(ctx context.Context, owner *int64) ([]Tag, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const listTagsWithCounts = `-- name: ListTagsWithCounts :many
+WITH RECURSIVE scoped AS (
+    SELECT tags.id FROM tags
+    WHERE $1::bigint IS NULL OR tags.owner_id = $1
+), subtree (root, id) AS (
+    SELECT scoped.id, scoped.id FROM scoped
+    UNION
+    SELECT subtree.root, c.id FROM subtree JOIN tags c ON c.parent_id = subtree.id
+), own AS (
+    SELECT dt.tag_id, count(*) AS n FROM document_tags dt
+    WHERE dt.tag_id IN (SELECT scoped.id FROM scoped)
+    GROUP BY dt.tag_id
+), deep AS (
+    SELECT subtree.root, count(DISTINCT dt.document_id) AS n
+    FROM subtree JOIN document_tags dt ON dt.tag_id = subtree.id
+    GROUP BY subtree.root
+)
+SELECT t.id, t.owner_id, t.name, t.color_hex, t.symbol, t.parent_id, t.match_text, t.match_mode,
+       t.created_at, t.modified_at,
+       coalesce(own.n, 0)::bigint AS document_count, coalesce(deep.n, 0)::bigint AS subtree_count
+FROM tags t
+JOIN scoped ON scoped.id = t.id
+LEFT JOIN own ON own.tag_id = t.id
+LEFT JOIN deep ON deep.root = t.id
+ORDER BY t.owner_id, lower(t.name), t.id
+`
+
+type ListTagsWithCountsRow struct {
+	ID            pgtype.UUID
+	OwnerID       int64
+	Name          string
+	ColorHex      string
+	Symbol        string
+	ParentID      pgtype.UUID
+	MatchText     string
+	MatchMode     string
+	CreatedAt     time.Time
+	ModifiedAt    time.Time
+	DocumentCount int64
+	SubtreeCount  int64
+}
+
+// ListTagsWithCounts counts per tag its own documents (document_count) and
+// the distinct documents of the tag and its descendants (subtree_count),
+// which is what a tag filter (SearchTagIDs) lists.
+func (q *Queries) ListTagsWithCounts(ctx context.Context, owner *int64) ([]ListTagsWithCountsRow, error) {
+	rows, err := q.db.Query(ctx, listTagsWithCounts, owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTagsWithCountsRow
+	for rows.Next() {
+		var i ListTagsWithCountsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OwnerID,
+			&i.Name,
+			&i.ColorHex,
+			&i.Symbol,
+			&i.ParentID,
+			&i.MatchText,
+			&i.MatchMode,
+			&i.CreatedAt,
+			&i.ModifiedAt,
+			&i.DocumentCount,
+			&i.SubtreeCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockCorrespondent = `-- name: LockCorrespondent :one
+SELECT id, owner_id, name, match_text, match_mode, created_at, modified_at FROM correspondents
+WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+FOR UPDATE
+`
+
+type LockCorrespondentParams struct {
+	ID    pgtype.UUID
+	Owner *int64
+}
+
+// LockCorrespondent reads a row for a change in the same transaction (a patch).
+func (q *Queries) LockCorrespondent(ctx context.Context, arg LockCorrespondentParams) (Correspondent, error) {
+	row := q.db.QueryRow(ctx, lockCorrespondent, arg.ID, arg.Owner)
+	var i Correspondent
+	err := row.Scan(
+		&i.ID,
+		&i.OwnerID,
+		&i.Name,
+		&i.MatchText,
+		&i.MatchMode,
+		&i.CreatedAt,
+		&i.ModifiedAt,
+	)
+	return i, err
+}
+
+const lockDocumentType = `-- name: LockDocumentType :one
+SELECT id, owner_id, name, symbol, match_text, match_mode, created_at, modified_at FROM document_types
+WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+FOR UPDATE
+`
+
+type LockDocumentTypeParams struct {
+	ID    pgtype.UUID
+	Owner *int64
+}
+
+// LockDocumentType reads a row for a change in the same transaction (a patch).
+func (q *Queries) LockDocumentType(ctx context.Context, arg LockDocumentTypeParams) (DocumentType, error) {
+	row := q.db.QueryRow(ctx, lockDocumentType, arg.ID, arg.Owner)
+	var i DocumentType
+	err := row.Scan(
+		&i.ID,
+		&i.OwnerID,
+		&i.Name,
+		&i.Symbol,
+		&i.MatchText,
+		&i.MatchMode,
+		&i.CreatedAt,
+		&i.ModifiedAt,
+	)
+	return i, err
+}
+
+const lockTag = `-- name: LockTag :one
+SELECT id, owner_id, name, color_hex, symbol, parent_id, match_text, match_mode, created_at, modified_at FROM tags
+WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+FOR UPDATE
+`
+
+type LockTagParams struct {
+	ID    pgtype.UUID
+	Owner *int64
+}
+
+// LockTag reads a row for a change in the same transaction (a patch).
+func (q *Queries) LockTag(ctx context.Context, arg LockTagParams) (Tag, error) {
+	row := q.db.QueryRow(ctx, lockTag, arg.ID, arg.Owner)
+	var i Tag
+	err := row.Scan(
+		&i.ID,
+		&i.OwnerID,
+		&i.Name,
+		&i.ColorHex,
+		&i.Symbol,
+		&i.ParentID,
+		&i.MatchText,
+		&i.MatchMode,
+		&i.CreatedAt,
+		&i.ModifiedAt,
+	)
+	return i, err
 }
 
 const tagRootNameConflict = `-- name: TagRootNameConflict :one
