@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pklnx/paperless-go/internal/store"
 )
@@ -418,6 +419,7 @@ func TestThumbnailRefused(t *testing.T) {
 		"too wide":   {thumb: jpegOf(ThumbnailSize+1, 10)},
 		"too tall":   {thumb: jpegOf(10, ThumbnailSize+1)},
 		"too large":  {thumb: append(jpegOf(10, 10), make([]byte, MaxThumbnailBytes)...)},
+		"truncated":  {thumb: truncatedJPEG(t)},
 	} {
 		if path, _, _, err := runThumbnail(t, p); err == nil || path != "" {
 			t.Errorf("%s: %q, %v", name, path, err)
@@ -426,5 +428,87 @@ func TestThumbnailRefused(t *testing.T) {
 	// At the limits it is fine.
 	if _, _, _, err := runThumbnail(t, pdf{thumb: jpegOf(ThumbnailSize, ThumbnailSize)}); err != nil {
 		t.Fatalf("512×512: %v", err)
+	}
+}
+
+// truncatedJPEG is a 362×512 JPEG cut a few bytes into its image data: its
+// header is whole, so DecodeConfig accepts it.
+func truncatedJPEG(t *testing.T) []byte {
+	t.Helper()
+	full := jpegOf(362, 512)
+	sos := bytes.Index(full, []byte{0xFF, 0xDA}) // start of scan
+	if sos < 0 {
+		t.Fatal("no start of scan")
+	}
+	cut := full[:sos+20]
+	if cfg, err := jpeg.DecodeConfig(bytes.NewReader(cut)); err != nil || cfg.Width != 362 || cfg.Height != 512 {
+		t.Fatalf("the header of the cut JPEG: %+v, %v", cfg, err)
+	}
+	return cut
+}
+
+// blockingThumbnail answers like tools, but pdftoppm signals started and
+// then waits until its context ends, and fails with that context's error
+// as ExecRunner does.
+func blockingThumbnail(started chan<- struct{}, tools func(context.Context, Command) ([]byte, error)) func(context.Context, Command) ([]byte, error) {
+	return func(ctx context.Context, c Command) ([]byte, error) {
+		if c.Name != "pdftoppm" {
+			return tools(ctx, c)
+		}
+		started <- struct{}{}
+		<-ctx.Done()
+		return nil, fmt.Errorf("%s: %w", c.Name, ctx.Err())
+	}
+}
+
+// A pdftoppm that hangs is stopped by the thumbnail's own limit, while the
+// caller's context goes on; when the caller's context ends instead, the
+// error is not the thumbnail's timeout.
+func TestThumbnailTimeout(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "archive.pdf")
+	if err := os.WriteFile(in, []byte("%PDF-1.4"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{}, 1)
+	f := &fakeRunner{handle: blockingThumbnail(started, poppler(pdf{}))}
+
+	t.Run("own limit", func(t *testing.T) {
+		ctx := context.Background()
+		p := &Pipeline{Runner: f, ThumbnailTimeout: time.Millisecond}
+		path, err := p.Thumbnail(ctx, dir, in)
+		<-started
+		if path != "" || !errors.Is(err, errThumbnailTimeout) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Thumbnail: %q, %v", path, err)
+		}
+		if ctx.Err() != nil {
+			t.Fatal("the caller's context ended")
+		}
+		var te *timeoutError
+		if errors.As(err, &te) {
+			t.Fatal("a thumbnail timeout is an attempt timeout")
+		}
+	})
+	t.Run("caller's context ends", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			<-started
+			cancel()
+		}()
+		p := &Pipeline{Runner: f, ThumbnailTimeout: time.Hour}
+		_, err := p.Thumbnail(ctx, dir, in)
+		if !errors.Is(err, context.Canceled) || errors.Is(err, errThumbnailTimeout) {
+			t.Fatalf("Thumbnail: %v", err)
+		}
+	})
+}
+
+func TestThumbnailDefaultTimeout(t *testing.T) {
+	if got := (&Pipeline{}).thumbnailTimeout(); DefaultThumbnailTimeout != 60*time.Second || got != DefaultThumbnailTimeout {
+		t.Fatalf("default limit %s", got)
+	}
+	if got := (&Pipeline{ThumbnailTimeout: time.Second}).thumbnailTimeout(); got != time.Second {
+		t.Fatalf("set limit %s", got)
 	}
 }

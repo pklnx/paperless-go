@@ -42,6 +42,17 @@ afterEach(() => {
 });
 
 describe("UsersPage", () => {
+  it("lists users in collator order, whatever order the server returns", async () => {
+    stubServer([user("b"), user("a.b"), user("a")]);
+    render(<UsersPage />);
+    const rows = await screen.findAllByRole("listitem");
+    const text = rows.map((r) => r.textContent ?? "");
+    expect(text[0]!.startsWith("a.b")).toBe(false);
+    expect(text[1]!.startsWith("a.b")).toBe(true);
+    expect(text[2]!.startsWith("b")).toBe(true);
+    expect(text[0]!.startsWith("a")).toBe(true);
+  });
+
   it("lists users; the own row has no actions, owners cannot be removed", async () => {
     stubServer([user("admin", { admin: true, self: true }), user("kim", { owned: { ...none, documents: 3 } }), user("lee", { locked: true })]);
     render(<UsersPage />);

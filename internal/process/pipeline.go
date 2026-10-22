@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/pklnx/paperless-go/internal/store"
@@ -91,6 +92,9 @@ type Pipeline struct {
 	Languages string
 	// Jobs is how many pages OCRmyPDF works on at once (at least 1).
 	Jobs int
+	// ThumbnailTimeout limits rendering the thumbnail;
+	// DefaultThumbnailTimeout when 0. Only tests set it.
+	ThumbnailTimeout time.Duration
 }
 
 // DefaultLanguages are the OCR languages without configuration.
