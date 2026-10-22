@@ -16,6 +16,8 @@ import (
 )
 
 // EnvURL names the variable holding a PostgreSQL URL with CREATEDB rights.
+// The server must be PostgreSQL 17 or newer (store.MinServerVersion); on
+// an older one every test fails in migrate with that message.
 const EnvURL = "TEST_DATABASE_URL"
 
 // New creates a fresh, migrated database that is dropped when the test ends.

@@ -54,6 +54,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+        # Restart when the database container is recreated (a new image),
+        # so the start-up checks run again: serve refuses to run on text
+        # indexes built under another locale until ./pgo migrate has
+        # rebuilt them.
+        restart: true
     environment:
       PAPERLESS_GO_DATABASE_URL: postgres://paperless:${POSTGRES_PASSWORD}@postgres:5432/paperless?sslmode=disable
       PAPERLESS_GO_LOG_LEVEL: ${PAPERLESS_GO_LOG_LEVEL:-info}

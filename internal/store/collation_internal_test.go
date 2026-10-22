@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNeedsRebuild(t *testing.T) {
 	libc := databaseLocale{Provider: "c", Collate: "en_US.utf8", Ctype: "en_US.utf8", ActualVersion: "2.41", ServerMajor: 18}
@@ -36,5 +39,29 @@ func TestNeedsRebuild(t *testing.T) {
 		if got := needsRebuild(tt.cur, tt.stored); got != tt.want {
 			t.Errorf("%s: needsRebuild = %v, want %v", tt.name, got, tt.want)
 		}
+	}
+}
+
+func TestCheckServerVersion(t *testing.T) {
+	for _, tt := range []struct {
+		num     int
+		version string
+		ok      bool
+	}{
+		{160015, "16.15", false},
+		{150010, "15.10 (Debian 15.10-1)", false},
+		{170000, "17.0", true},
+		{180006, "18.6 (Debian 18.6-1.pgdg13+2)", true},
+	} {
+		err := checkServerVersion(tt.num, tt.version)
+		if tt.ok != (err == nil) {
+			t.Errorf("%s: %v", tt.version, err)
+		}
+		if err != nil && err.Error() != "PostgreSQL 17 or newer is required, found "+tt.version {
+			t.Errorf("%s: message %q", tt.version, err)
+		}
+	}
+	if !strings.Contains(checkServerVersion(160015, "16.15").Error(), "17 or newer") {
+		t.Error("no minimum in the message")
 	}
 }

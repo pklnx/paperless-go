@@ -135,8 +135,13 @@ database moves to glibc. `Store.Migrate` (`internal/store/collation.go`)
 keeps a fingerprint of the locale (provider, collate, ctype, provider
 version, PostgreSQL major) in `index_collation` and, when it changed or is
 unknown under a libc or ICU locale, rebuilds every index with a collatable
-key whose collation is not `C`/`POSIX` (`REINDEX INDEX`, one at a time,
-before the migrations run) and refreshes `datcollversion`. `serve` and
+key whose collation is not `C`/`POSIX` (`REINDEX INDEX`, one at a time
+with a 30 s `lock_timeout`, before the migrations run; a failed unique
+index is reported with all its duplicated keys after the others are
+rebuilt), stores the fingerprint and refreshes `datcollversion` (only a
+warning when the user does not own the database). PostgreSQL 17 or newer
+is required (`pg_database.datlocale`); `migrate`, `serve` and `process`
+check `server_version_num` first. `serve` and
 `process` refuse to start while it is stale. The GIN search index needs no
 rebuild: lexemes compare bytewise.
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -24,6 +26,29 @@ import (
 // Migrate therefore keeps a fingerprint of the locale in index_collation
 // and rebuilds the collation-dependent indexes when it changes. The queries
 // read the system catalogs, which sqlc does not model, so they live here.
+
+// MinServerVersion is the oldest PostgreSQL major version paperless-go
+// supports. The locale queries need 17 (pg_database.datlocale).
+const MinServerVersion = 17
+
+// checkServerVersion refuses a server older than MinServerVersion.
+func checkServerVersion(num int, version string) error {
+	if num/10000 < MinServerVersion {
+		return fmt.Errorf("PostgreSQL %d or newer is required, found %s", MinServerVersion, version)
+	}
+	return nil
+}
+
+// CheckServerVersion refuses a PostgreSQL server older than
+// MinServerVersion. Migrate runs it first; serve and process too.
+func (s *Store) CheckServerVersion(ctx context.Context) error {
+	var num int
+	var version string
+	if err := s.pool.QueryRow(ctx, `SELECT current_setting('server_version_num')::int, current_setting('server_version')`).Scan(&num, &version); err != nil {
+		return fmt.Errorf("read the PostgreSQL version: %w", err)
+	}
+	return checkServerVersion(num, version)
+}
 
 // databaseLocale describes the current database's locale.
 type databaseLocale struct {
@@ -144,6 +169,9 @@ ORDER BY n.nspname, c.relname`)
 // be out of order because the database locale changed since they were
 // built (or is unknown and not stable). Migrate rebuilds them.
 func (s *Store) CollationNeedsRebuild(ctx context.Context) (bool, error) {
+	if err := s.CheckServerVersion(ctx); err != nil {
+		return false, err
+	}
 	cur, err := s.databaseLocale(ctx)
 	if err != nil {
 		return false, err
@@ -155,57 +183,152 @@ func (s *Store) CollationNeedsRebuild(ctx context.Context) (bool, error) {
 	return needsRebuild(cur, stored), nil
 }
 
+// reindexLockTimeout bounds how long a REINDEX waits for its table, so a
+// running web server or a long transaction makes migrate fail fast instead
+// of queueing every query on the table behind it. Tests shorten it.
+var reindexLockTimeout = 30 * time.Second
+
 // ensureCollation rebuilds the collation-dependent indexes if the locale
 // changed, unless this run already rebuilt them for the same fingerprint
 // (builtFor), and stores the fingerprint once the table exists. It returns
-// the fingerprint the indexes are now built for and the rebuilt indexes.
-func (s *Store) ensureCollation(ctx context.Context, builtFor string) (string, []string, error) {
+// the fingerprint the indexes are now built for, the rebuilt indexes and
+// warnings for the operator.
+func (s *Store) ensureCollation(ctx context.Context, builtFor string) (fp string, rebuilt, warnings []string, err error) {
 	cur, err := s.databaseLocale(ctx)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
-	fp := cur.fingerprint()
+	fp = cur.fingerprint()
 	stored, exists, err := s.storedFingerprint(ctx)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
-	var rebuilt []string
 	if needsRebuild(cur, stored) && builtFor != fp {
 		indexes, err := s.collationIndexes(ctx)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
+		// One index at a time, so a failure names its index and the others
+		// still get rebuilt; every failure is reported at the end. A unique
+		// index fails if duplicates got in while it was out of order.
+		var failed []error
 		for _, ix := range indexes {
-			name := ix.Sanitize()
-			// One statement each, so a failure names its index and the
-			// ones before it stay rebuilt. A unique index fails here if
-			// duplicates got in while it was out of order.
-			if _, err := s.pool.Exec(ctx, "REINDEX INDEX "+name); err != nil {
-				// The detail names the duplicated key.
-				var pgErr *pgconn.PgError
-				if errors.As(err, &pgErr) && pgErr.Detail != "" {
-					err = fmt.Errorf("%w: %s", err, pgErr.Detail)
-				}
-				return "", rebuilt, fmt.Errorf("rebuild index %s after a change of the database locale: %w", name, err)
+			if err := s.reindex(ctx, ix); err != nil {
+				failed = append(failed, err)
+				continue
 			}
-			rebuilt = append(rebuilt, name)
+			rebuilt = append(rebuilt, ix.Sanitize())
+		}
+		if len(failed) > 0 {
+			return "", rebuilt, nil, fmt.Errorf("rebuild the text indexes after a change of the database locale: %w", errors.Join(failed...))
 		}
 	}
-	// The indexes now match the current locale. Record the provider's new
-	// version so PostgreSQL stops warning about a mismatch. It refuses to
-	// set one where none was recorded (musl), which is why the fingerprint
-	// is kept in a table.
-	if cur.RecordedVersion != "" && cur.ActualVersion != "" && cur.RecordedVersion != cur.ActualVersion {
-		if _, err := s.pool.Exec(ctx, "ALTER DATABASE "+pgx.Identifier{cur.Database}.Sanitize()+" REFRESH COLLATION VERSION"); err != nil {
-			return "", rebuilt, fmt.Errorf("refresh the collation version: %w", err)
-		}
-	}
+	// The indexes now match the current locale.
 	if exists && stored != fp {
 		if _, err := s.pool.Exec(ctx, `
 INSERT INTO public.index_collation (fingerprint) VALUES ($1)
 ON CONFLICT (singleton) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, built_at = now()`, fp); err != nil {
-			return "", rebuilt, fmt.Errorf("store the index collation: %w", err)
+			return "", rebuilt, nil, fmt.Errorf("store the index collation: %w", err)
 		}
 	}
-	return fp, rebuilt, nil
+	// Record the provider's new version so PostgreSQL stops warning about
+	// a mismatch. It refuses to set one where none was recorded (musl),
+	// which is why the fingerprint is kept in a table. Only the database
+	// owner may do it; on your own server that can be an administrator,
+	// and the indexes are correct either way, so that is only a warning.
+	if cur.RecordedVersion != "" && cur.ActualVersion != "" && cur.RecordedVersion != cur.ActualVersion {
+		stmt := "ALTER DATABASE " + pgx.Identifier{cur.Database}.Sanitize() + " REFRESH COLLATION VERSION"
+		if _, err := s.pool.Exec(ctx, stmt); err != nil {
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "42501" { // insufficient_privilege
+				return fp, rebuilt, nil, fmt.Errorf("refresh the collation version: %w", err)
+			}
+			warnings = append(warnings, fmt.Sprintf(
+				"the text indexes were rebuilt, but only the owner of the database may record the new collation version "+
+					"(PostgreSQL warns about a mismatch until then); have an administrator run: %s;", stmt))
+		}
+	}
+	return fp, rebuilt, warnings, nil
+}
+
+// reindex rebuilds one index in a transaction with a lock timeout. A
+// failure because of duplicates lists the duplicated keys.
+func (s *Store) reindex(ctx context.Context, ix pgx.Identifier) error {
+	name := ix.Sanitize()
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = %d", reindexLockTimeout.Milliseconds())); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, "REINDEX INDEX "+name)
+		return err
+	})
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "55P03": // lock_not_available
+			return fmt.Errorf("index %s: its table stayed locked for %s; stop the web server and other users of the database and run migrate again: %w",
+				name, reindexLockTimeout, err)
+		case "23505": // unique_violation
+			keys, kerr := s.duplicateKeys(ctx, ix)
+			if kerr != nil || len(keys) == 0 {
+				return fmt.Errorf("index %s: %w: %s", name, err, pgErr.Detail)
+			}
+			return fmt.Errorf("index %s: these keys are duplicated, rename or remove all but one row of each: %s",
+				name, strings.Join(keys, ", "))
+		}
+	}
+	return fmt.Errorf("index %s: %w", name, err)
+}
+
+// maxDuplicateKeys caps the keys one error lists.
+const maxDuplicateKeys = 50
+
+// duplicateKeys lists the key values of the unique index ix that occur
+// more than once among the rows it covers (its predicate, and NULLs only
+// with NULLS NOT DISTINCT), as (columns)=(values).
+func (s *Store) duplicateKeys(ctx context.Context, ix pgx.Identifier) ([]string, error) {
+	var table, pred string
+	var nkeys int
+	var nullsNotDistinct bool
+	if err := s.pool.QueryRow(ctx, `
+SELECT i.indrelid::regclass::text, coalesce(pg_get_expr(i.indpred, i.indrelid), ''), i.indnkeyatts, i.indnullsnotdistinct
+FROM pg_index i WHERE i.indexrelid = to_regclass($1)`, ix.Sanitize()).Scan(&table, &pred, &nkeys, &nullsNotDistinct); err != nil {
+		return nil, err
+	}
+	cols := make([]string, nkeys)
+	for k := range cols {
+		if err := s.pool.QueryRow(ctx, `SELECT pg_get_indexdef(to_regclass($1), $2, true)`, ix.Sanitize(), k+1).Scan(&cols[k]); err != nil {
+			return nil, err
+		}
+	}
+	var where []string
+	if pred != "" {
+		where = append(where, "("+pred+")")
+	}
+	if !nullsNotDistinct {
+		for _, c := range cols {
+			where = append(where, "("+c+") IS NOT NULL")
+		}
+	}
+	list := strings.Join(cols, ", ")
+	q := "SELECT ROW(" + list + ")::text FROM " + table
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += " GROUP BY " + list + " HAVING count(*) > 1 ORDER BY 1 LIMIT " + fmt.Sprint(maxDuplicateKeys)
+	rows, err := s.pool.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
+	for i, k := range keys {
+		keys[i] = "(" + list + ")=" + k
+	}
+	return keys, nil
 }
