@@ -28,6 +28,9 @@ change or delete entries.
 | `document.create` | A user uploads a document in the web UI or with an API key (with the title). |
 | `document.search` | A user searches their documents, in the web UI or with an API key: the first page of each search, with the search text and the filters. Further pages and the plain list of recent documents are not recorded. |
 | `document.reprocess` | `reprocess` queues documents for processing again (with the selection and how many it queued), or a user clicks Retry on a document in the web UI or calls the API with a key (with the document). |
+| `tag.create`, `tag.update`, `tag.delete` | A user creates, changes or deletes a tag in the web UI or with an API key, with its name; a change records the old name on a rename and the names of the changed fields (`name`, `color`, `parentId`), never their values. An admin's change of another user's tag records that user's ID (`ownerId`). |
+| `correspondent.create`, `correspondent.update`, `correspondent.delete` | Likewise for a correspondent. |
+| `document_type.create`, `document_type.update`, `document_type.delete` | Likewise for a document type. |
 | `document.import` | `import` added documents: one entry per run that imported something, naming the user who owns them, the path and the counts of imported, duplicate and failed files. |
 | `document.consume` | The [consume folder](./import#consume-folder) changed a user's folder: one entry per scan and user that imported, deleted or moved files, made by the server, naming the user and with the counts: files imported, duplicates deleted, files moved to `failed/`, and `interrupted` when the scan stopped early (the server stopped, or the database was down). File names are only in the server log. If the entry cannot be written, the files are handled anyway and the counts go into the user's next entry. |
 

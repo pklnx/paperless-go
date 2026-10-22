@@ -255,6 +255,13 @@ migration (`00015_audit_system_actor.sql`) cannot be rolled back while it
 holds entries by the server, and `migrate down` refuses with that hint.
 Before the first one, `migrate down` rolls it back.
 
+**Tags, correspondents and document types in the API (#7).** Run `./pgo
+migrate` before `docker compose up -d web`. The migration lets the audit log
+record changes of tags, correspondents and document types. Rolling it back
+(`migrate down`) works only until the first such change: the log is
+append-only and the old checks would refuse those entries, so after that,
+going back needs a restore of a backup made before the upgrade.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build

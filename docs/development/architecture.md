@@ -52,7 +52,7 @@ app and the server through the app's archive folder format:
 | App (SwiftData) | Server table |
 |---|---|
 | — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`, `webauthn_handle` in `00008_passkeys.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges`, `passkeys`, `webauthn_ceremonies` (network columns in `00014_ceremony_networks.sql`), `api_keys` (`00009_api_keys.sql`) |
-| — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; actor `system` in `00015_audit_system_actor.sql`; see [Audit log](#audit-log)) |
+| — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; actor `system` in `00015_audit_system_actor.sql`; metadata targets in `00016_audit_metadata_targets.sql`; see [Audit log](#audit-log)) |
 | `Document`: id (UUID), title, documentDate, createdAt, modifiedAt, notes, isFavorite, isInbox, archiveSerialNumber, pageCount, fileSize, extractedText, source, originalFileName, textSource, contentHash | `documents`, with the UUID as primary key; the original file (`original_sha256`, size, MIME type) and the archive PDF (`archive_sha256`, size) |
 | `Tag`: name, colorHex, symbol, parent, matchText, matchMode | `tags`, `document_tags` (nested through `parent_id`) |
 | `Correspondent`, `DocumentType`: name, matchText, matchMode | `correspondents`, `document_types` |
@@ -702,6 +702,55 @@ another user's document answers `404` and an admin sees all.
   `200` when it was queued or running already, `404` outside the scope,
   `503` without the audit log.
 
+## Metadata API
+
+`internal/web/metadata.go`, on `store` functions in `metadata.go`. Tags,
+correspondents and document types each have `GET` and `POST` on
+`/api/tags`, `/api/correspondents` and `/api/document-types`, and `PATCH`
+and `DELETE` on `/api/{kind}/{id}`. Reads are `accessRead`, changes
+`accessWrite`; the scope comes from `requestScope`, so another user's row
+answers `404` and an admin may change everyone's (the row keeps its owner).
+
+- **Lists** hold `id`, `name`, `ownerId`, `createdAt`, `modifiedAt` and
+  `documentCount`; tags add `parentId`, `color`, `symbol` and
+  `subtreeCount`, the distinct documents of the tag and its descendants
+  (what a `tag=` filter lists; summing the children's counts would count a
+  document with a parent and a child tag twice). One aggregate query per
+  list (`List*WithCounts`, the subtree by a recursive CTE). `owner=me`
+  limits an admin to their own rows; `owner=<user ID>` (admins only; a
+  non-admin may name only themselves, else `403`) to one user's, for the
+  pickers of another user's document.
+- **`POST`** creates a row owned by the caller: `name`, for tags also
+  `parentId` and `color`. An admin may pass `ownerId` to create it for
+  another user (inline creation on that user's document); anybody else
+  gets `403` for another owner, an unknown owner `400` `unknown_owner`.
+- **`PATCH`** changes only the fields sent: `name`, for tags also `color`
+  and `parentId` (`null` makes a root tag). `matchText`, `matchMode` and
+  `symbol` stay as stored; unknown fields and an empty patch answer `400`.
+  `store.Patch*` locks the row (`SELECT … FOR UPDATE`), merges and writes
+  in one transaction, so a concurrent patch of another field is not lost.
+  Only the fields sent are checked: a name of 1 to 128 characters after
+  trimming (`invalid_name`), a colour `#RRGGBB` (`invalid_color`); an
+  imported name that is longer does not block a colour change.
+- **`DELETE`** answers `204`; documents keep everything else, a deleted
+  tag's children become root tags. A deadlock with a concurrent change of
+  the documents (`40P01`) is retried up to 3 times (`retryDeadlock`), then
+  answers `503` with `Retry-After: 1`.
+- **Errors** carry `error` and `code`: `409` `name_taken` (case-insensitive
+  per owner, per parent for tags), `409` `tag_cycle`, `409`
+  `tag_name_conflict` (a child would clash with a root tag on delete;
+  `childId` and `childName` when the lookup found it; nothing changes),
+  `400` `owner_mismatch` (a parent of another owner, or no such tag).
+- **`GET /api/documents/counts`** answers `{inbox, favorites, total}` for
+  the scope, with `owner` as for the lists.
+- **Audit.** `tag.create`, `tag.update`, `tag.delete`, likewise
+  `correspondent.*` and `document_type.*`, in the transaction of the
+  change (`503` and no change without the log). The target is the row's
+  UUID and name; details hold `name`, `oldName` on a rename, `fields` (the
+  names of the fields an update sent) and `ownerId` when the owner is not
+  the acting user (an admin's change). Values other than names are never
+  recorded.
+
 ## Login
 
 Ported from mail-archive (`internal/auth`, the auth parts of `internal/web`
@@ -815,7 +864,8 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
 - **Table.** `audit_log` is partitioned by month (`at`, from the database
   clock). Each row has the actor (`session`, `api_key`, `cli`, `system`), the user's
   ID and name at the time, the action (`area.verb`), an optional target
-  (`document`, `user`, `api_key`; a document target must be a UUID), client
+  (`document`, `user`, `api_key`, and since `00016` `tag`, `correspondent`,
+  `document_type`; a document or metadata target must be a UUID), client
   address, a user agent (stored once in `audit_user_agents`) and details as
   a JSON object. `user_id`, `api_key_id` and `target_id` have **no foreign
   keys**: removing a user keeps their rows, and the log never blocks a
@@ -828,6 +878,12 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   are on the partitioned table and reach every partition, also later ones.
   The down migration of `00015` refuses while `system` rows exist (the old
   checks would refuse them, and the log is append-only).
+- **Metadata targets.** `00016_audit_metadata_targets.sql` replaces the
+  target-type check and the document UUID check of `00005`, which it finds
+  on the parent table by what they are (exactly one each, or the migration
+  stops), with `audit_log_target_type_check` and `audit_log_target_uuid`.
+  The checks are on the partitioned table and reach every partition, also
+  later ones. Its down migration refuses while metadata entries exist.
 - **Append-only.** Row triggers refuse `UPDATE` and `DELETE` on the log and
   its partitions, statement triggers refuse `TRUNCATE`; all are `ENABLE
   ALWAYS`, so `session_replication_role = replica` does not skip them. The
@@ -862,8 +918,10 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   written before the export starts), `document.create` (upload, with
   `via: upload`; the target is the new document), `document.search` (the
   first page of a search, with `q` and the filter parameters; see
-  [Documents API](#documents-api)), `document.import` (CLI) and
-  `document.consume` (system; see [Consume folder](#consume-folder)).
+  [Documents API](#documents-api)), `document.import` (CLI),
+  `document.consume` (system; see [Consume folder](#consume-folder)),
+  `tag.*`, `correspondent.*`, `document_type.*` (see [Metadata
+  API](#metadata-api)).
   A two-factor login records `method: 2fa` and its `factor` (`totp`,
   `recovery_code` with `recoveryCodesLeft`); a wrong code gives
   `auth.login_failed` with `reason: second_factor`. Requests refused
