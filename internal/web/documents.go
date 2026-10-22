@@ -136,21 +136,31 @@ func toDocumentJSON(d *store.Document, job *store.Job) documentJSON {
 // fillOwnerNames sets the owner names of docs for an admin; for anybody
 // else it does nothing.
 func (s *Server) fillOwnerNames(r *http.Request, docs ...*documentJSON) error {
-	if !requestScope(r).All || len(docs) == 0 {
+	if len(docs) == 0 {
 		return nil
+	}
+	names, err := s.ownerNames(r)
+	for _, d := range docs {
+		d.OwnerName = names[d.OwnerID]
+	}
+	return err
+}
+
+// ownerNames maps user IDs to names for an admin (one ListUsers); for
+// anybody else it is nil and reads nothing.
+func (s *Server) ownerNames(r *http.Request) (map[int64]string, error) {
+	if !requestScope(r).All {
+		return nil, nil
 	}
 	users, err := s.store.ListUsers(r.Context())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	names := make(map[int64]string, len(users))
 	for _, u := range users {
 		names[u.ID] = u.Name
 	}
-	for _, d := range docs {
-		d.OwnerName = names[d.OwnerID]
-	}
-	return nil
+	return names, nil
 }
 
 // latestJobs reads the processing status of docs.

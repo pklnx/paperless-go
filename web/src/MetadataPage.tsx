@@ -44,6 +44,8 @@ type Row = { kind: "tags"; row: Tag } | { kind: "correspondents" | "document-typ
 interface Props {
   /** The names in the list's owner scope (an admin's own unless "Everyone's documents" is on). */
   metadata: Loaded<Metadata>;
+  /** The logged-in user: another owner's rows (an admin's "Everyone's documents") show the owner's name. */
+  userName: string;
   /** After a change: the names and counts load again. */
   onChanged: () => void;
   /** Opens the document list filtered by a row. */
@@ -56,7 +58,7 @@ interface Props {
  * for tags the colour and the parent (drag in the tree, or the parent
  * picker in the edit sheet).
  */
-export function MetadataPage({ metadata, onChanged, open }: Props) {
+export function MetadataPage({ metadata, userName, onChanged, open }: Props) {
   const [tab, setTab] = useState<Tab>("tags");
   const [editing, setEditing] = useState<Row | null>(null);
   const [deleting, setDeleting] = useState<Row | null>(null);
@@ -119,12 +121,12 @@ export function MetadataPage({ metadata, onChanged, open }: Props) {
       )}
       {data && (
         <div role="tabpanel" id={`${baseId}-${tab}-panel`} aria-labelledby={`${baseId}-${tab}`}>
-          {tab === "tags" && <TagTree tags={data.tags} actions={(row) => actions({ kind: "tags", row })} open={open} move={move} />}
+          {tab === "tags" && <TagTree tags={data.tags} userName={userName} actions={(row) => actions({ kind: "tags", row })} open={open} move={move} />}
           {tab === "correspondents" && (
-            <NamedList rows={data.correspondents} empty={t.noCorrespondentsYet} label={t.correspondents} actions={(row) => actions({ kind: "correspondents", row })} open={(id) => open({ kind: "corr", id })} />
+            <NamedList rows={data.correspondents} userName={userName} empty={t.noCorrespondentsYet} label={t.correspondents} actions={(row) => actions({ kind: "correspondents", row })} open={(id) => open({ kind: "corr", id })} />
           )}
           {tab === "document-types" && (
-            <NamedList rows={data.documentTypes} empty={t.noTypesYet} label={t.documentTypes} actions={(row) => actions({ kind: "document-types", row })} open={(id) => open({ kind: "type", id })} />
+            <NamedList rows={data.documentTypes} userName={userName} empty={t.noTypesYet} label={t.documentTypes} actions={(row) => actions({ kind: "document-types", row })} open={(id) => open({ kind: "type", id })} />
           )}
         </div>
       )}
@@ -160,6 +162,12 @@ export function MetadataPage({ metadata, onChanged, open }: Props) {
 }
 
 const rowClass = "flex flex-wrap items-center gap-x-3 gap-y-1 px-2 py-2";
+
+/** The owner of another user's row; the server names owners in an admin's lists only. */
+function Owner({ name, userName }: { name?: string; userName: string }) {
+  if (!name || name === userName) return null;
+  return <span className="text-sm text-ink-muted wrap-anywhere">{t.ownedBy(name)}</span>;
+}
 const linkButton = "text-accent-ink hover:underline pointer-coarse:min-h-11";
 
 function RowActions({ name, actions }: { name: string; actions: { edit: () => void; remove: () => void } }) {
@@ -175,7 +183,21 @@ function RowActions({ name, actions }: { name: string; actions: { edit: () => vo
   );
 }
 
-function NamedList({ rows, empty, label, actions, open }: { rows: NamedRow[]; empty: string; label: string; actions: (r: NamedRow) => { edit: () => void; remove: () => void }; open: (id: string) => void }) {
+function NamedList({
+  rows,
+  userName,
+  empty,
+  label,
+  actions,
+  open,
+}: {
+  rows: NamedRow[];
+  userName: string;
+  empty: string;
+  label: string;
+  actions: (r: NamedRow) => { edit: () => void; remove: () => void };
+  open: (id: string) => void;
+}) {
   if (rows.length === 0) return <p className="py-4 text-sm text-ink-muted">{empty}</p>;
   return (
     <ul aria-label={label} className="divide-y divide-line">
@@ -184,6 +206,7 @@ function NamedList({ rows, empty, label, actions, open }: { rows: NamedRow[]; em
           <button type="button" className={`${linkButton} min-w-0 text-left font-medium wrap-anywhere`} title={t.showDocumentsOf(r.name)} onClick={() => open(r.id)}>
             {r.name}
           </button>
+          <Owner name={r.ownerName} userName={userName} />
           <span className="text-sm text-ink-muted">{t.documentCount(r.documentCount ?? 0)}</span>
           <RowActions name={r.name} actions={actions(r)} />
         </li>
@@ -208,13 +231,14 @@ function findNode(nodes: TagNode[], id: string): TagNode | null {
 
 interface TreeProps {
   tags: Tag[];
+  userName: string;
   actions: (t: Tag) => { edit: () => void; remove: () => void };
   open: (f: Filter) => void;
   move: (tag: Tag, parentId: string | null) => void;
 }
 
 /** The tag tree; a tag dragged onto another of the same owner moves under it, onto the top zone to the top level. */
-function TagTree({ tags, actions, open, move }: TreeProps) {
+function TagTree({ tags, userName, actions, open, move }: TreeProps) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [over, setOver] = useState<string | null>(null);
   if (tags.length === 0) return <p className="py-4 text-sm text-ink-muted">{t.noTagsYet}</p>;
@@ -278,6 +302,7 @@ function TagTree({ tags, actions, open, move }: TreeProps) {
             <button type="button" className={`${linkButton} min-w-0 text-left font-medium wrap-anywhere`} title={t.showDocumentsOf(tag.name)} onClick={() => open({ kind: "tag", id: tag.id })}>
               {tag.name}
             </button>
+            <Owner name={tag.ownerName} userName={userName} />
             <span className="text-sm text-ink-muted">{t.documentCount(tag.documentCount ?? 0)}</span>
             <RowActions name={tag.name} actions={actions(tag)} />
           </li>
