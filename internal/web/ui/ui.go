@@ -20,6 +20,9 @@ var dist embed.FS
 const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
 	"connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
+// permissionsPolicy turns off browser features the UI never uses.
+const permissionsPolicy = "camera=(), microphone=(), geolocation=()"
+
 // Handler serves index.html at "/" and the hashed build assets at
 // "/assets/".
 func Handler() http.Handler {
@@ -37,6 +40,8 @@ func Handler() http.Handler {
 		h := w.Header()
 		h.Set("Content-Security-Policy", contentSecurityPolicy)
 		h.Set("X-Frame-Options", "DENY")
+		h.Set("Permissions-Policy", permissionsPolicy)
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
 		if strings.HasPrefix(r.URL.Path, "/assets/") {
 			// File names contain a content hash, so they never change.
 			h.Set("Cache-Control", "public, max-age=31536000, immutable")

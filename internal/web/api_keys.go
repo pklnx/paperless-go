@@ -76,7 +76,10 @@ type scopeJSON struct {
 // a. It answers the request and returns nil when the key is refused.
 func (s *Server) authenticateKey(w http.ResponseWriter, r *http.Request, key string, a access) *http.Request {
 	addr := s.clientAddr(r)
-	if wait := s.badKeyRate.Blocked(addr); wait > 0 {
+	if wait, first := s.badKeyRate.BlockedFirst(addr); wait > 0 {
+		if first {
+			s.logRefused(r, "api_key", reasonRateLimited, "")
+		}
 		s.tooMany(w, wait, "too many invalid API keys; try again later")
 		return nil
 	}
@@ -90,7 +93,7 @@ func (s *Server) authenticateKey(w http.ResponseWriter, r *http.Request, key str
 	}
 	if errors.Is(err, store.ErrNotFound) {
 		s.badKeyRate.Allow(addr)
-		s.auditRefusedKey(r, hash, now)
+		s.auditRefusedKey(r, addr, hash, now)
 		w.Header().Set("WWW-Authenticate", bearerRealm+`, error="invalid_token"`)
 		s.fail(w, r, http.StatusUnauthorized, "invalid API key", nil)
 		return nil
@@ -131,21 +134,32 @@ func (s *Server) authenticateKey(w http.ResponseWriter, r *http.Request, key str
 	return r.WithContext(context.WithValue(ctx, apiKeyKey{}, k))
 }
 
-// auditRefusedKey records a refused key, with its name and owner if it
-// exists. The key itself is never written anywhere.
-func (s *Server) auditRefusedKey(r *http.Request, hash []byte, now time.Time) {
+// auditRefusedKey logs a refused key (logRefused) and records it. A key
+// that exists (revoked, expired, owner locked) gets an entry with its name
+// and owner every time; an unknown key only the first of its client
+// address (addr) in each window, so that unauthenticated guessing cannot
+// grow the audit log without bound. The key itself is never written
+// anywhere.
+func (s *Server) auditRefusedKey(r *http.Request, addr string, hash []byte, now time.Time) {
 	e := s.auditEntry(r, "auth.login_failed")
 	e.Detail("method", "api_key")
-	e.Detail("reason", "invalid")
 	k, err := s.store.FindRefusedAPIKey(r.Context(), hash, now)
-	switch {
-	case err == nil:
-		e.SetUser(k.UserID, k.UserName)
-		e.SetTarget(store.TargetAPIKey, strconv.FormatInt(k.ID, 10), k.Name)
-		e.Detail("reason", k.Reason)
-	case !errors.Is(err, store.ErrNotFound):
-		s.log.Warn("look up refused API key", "err", err)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.log.Warn("look up refused API key", "err", err)
+		}
+		s.logRefused(r, "api_key", reasonInvalid, "")
+		if ok, _ := s.unknownKeyAudit.Allow(addr); !ok {
+			return
+		}
+		e.Detail("reason", reasonInvalid)
+		s.auditBestEffort(r, e)
+		return
 	}
+	s.logRefused(r, "api_key", k.Reason, k.UserName)
+	e.SetUser(k.UserID, k.UserName)
+	e.SetTarget(store.TargetAPIKey, strconv.FormatInt(k.ID, 10), k.Name)
+	e.Detail("reason", k.Reason)
 	s.auditBestEffort(r, e)
 }
 
