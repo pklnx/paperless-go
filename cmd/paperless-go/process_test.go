@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -139,5 +140,18 @@ func TestProcessChecksLanguages(t *testing.T) {
 	t.Setenv(config.EnvOCRLanguages, "deu+fra")
 	if _, err := run(t, url, "process", "--until-empty"); err == nil || !strings.Contains(err.Error(), "fra") {
 		t.Fatalf("process without French: %v", err)
+	}
+}
+
+func TestOCRJobs(t *testing.T) {
+	cpus := runtime.GOMAXPROCS(0)
+	if got := ocrJobs(1); got != cpus {
+		t.Errorf("one worker: %d jobs, want %d", got, cpus)
+	}
+	if got := ocrJobs(cpus * 2); got != 1 {
+		t.Errorf("more workers than CPUs: %d jobs, want 1", got)
+	}
+	if got := ocrJobs(0); got != cpus {
+		t.Errorf("no workers: %d jobs", got)
 	}
 }

@@ -17,7 +17,7 @@ Planned, with the [roadmap](./roadmap):
 upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/blobstore ──▶ data/documents/ab/cd/<sha256>
                                               │                ▲
                                               ▼                │
-                                       job queue (PostgreSQL) ──▶ internal/ocr (OCRmyPDF, Tesseract; Mistral optional)
+                                       job queue (PostgreSQL) ──▶ internal/process (OCRmyPDF, Tesseract; Mistral optional)
                                                                  internal/classify (matching rules, dates, Mistral)
 ```
 
@@ -338,12 +338,44 @@ A queue in PostgreSQL turns stored documents into searchable ones
   dump, not a document).
   A page with fewer than 15 characters (white space does not count) needs
   OCR. With text on every page, the original is the archive and
-  `text_source` is `PDF-Text`. A PDF that opens without a password but is
-  encrypted (an owner password) is not changed: the original is the
-  archive, with a `processing_note`; so is one that forbids copying text.
-  OCR (`text_source` `Tesseract`, the server's own value next to the app's)
-  and image conversion come with part 3; until then such documents fail
-  with a message that says so.
+  `text_source` is `PDF-Text`.
+- **OCR.** The pages that need it go to `ocrmypdf --pages <those pages>
+  --rotate-pages -l <PAPERLESS_GO_OCR_LANGUAGES> --output-type pdf
+  --optimize 1 --jobs <n>`: a plain PDF (no PDF/A; the original is kept
+  anyway) with an invisible text layer, the other pages unchanged. Pages
+  without any text get `--skip-text`; when one of them has a little text
+  (a scanner's header, a page number), `--redo-ocr` runs instead, because
+  `--skip-text` would skip such a page; it keeps the visible text. `--jobs`
+  is the usable CPUs (`GOMAXPROCS`) divided by the workers, and each
+  Tesseract runs with `OMP_THREAD_LIMIT=1`. The OCRed PDF becomes the
+  archive, stored content-addressed in the blob store before the result
+  commits, and its text (`pdftotext` again, same cap) the document's text
+  with `text_source` `Tesseract` (the server's own value next to the
+  app's), but only when it has more characters on the OCRed pages than
+  before; otherwise (blank back sides, nothing readable) the document
+  stays as without OCR.
+- **Encrypted PDFs.** One that needs a password to open fails at once. One
+  that opens without a password (an empty user password) is OCRed when its
+  permissions allow changes (`change:yes` in `pdfinfo`): OCRmyPDF opens it
+  itself and writes the archive without encryption. When they forbid
+  changes, the original is the archive, with a `processing_note`; so is a
+  PDF that forbids copying text, and one OCRmyPDF refuses although poppler
+  reads it (exit status 2, 6 or 8: a digital signature, input it cannot
+  parse, earlier OCR, encryption). Its other exit statuses are retried.
+- **Images.** JPEG and PNG become a one-page PDF with `img2pdf --imgsize
+  <dpi>dpi --rotation=ifvalid`, which embeds the image without re-encoding.
+  The DPI comes from the image (JFIF, then EXIF for JPEG; `pHYs` for PNG)
+  when it is between 100 and 2400; otherwise (cameras write 72 or 96) it is
+  300. It only sets the page size. HEIC/HEIF is decoded with `heif-dec`
+  to a JPEG (quality 92, 300 DPI) first. Before any conversion the pixel
+  limit of ingest (50 MP) is checked again on the stored file, and on the
+  decoded HEIC once more. The converted PDF then goes through the PDF
+  steps; it is the archive even when OCR finds no text. An image the tools
+  cannot read (exit status 1) fails at once.
+- **Upgrade.** Migration `00010_requeue_ocr.sql` queues again the
+  documents the version before OCR failed for good (scans and images,
+  selected by its messages) and those it left with the old owner-password
+  note.
 - **Text rule.** The result replaces `extracted_text` and `text_source` only
   when the text is empty or came from processing (`PDF-Text`,
   `Tesseract`), so text imported from the app (`Mistral OCR`) or edited
@@ -352,8 +384,10 @@ A queue in PostgreSQL turns stored documents into searchable ones
 - **Tests.** Unit tests use a fake `Runner`, the test database and an
   injected clock. The tests with the real tools have the build tag `tools`
   and run in the Dockerfile's `toolstest` stage as UID 65532 (CI job
-  `toolstest`); they generate every PDF and encrypt with pikepdf, which
-  comes with ocrmypdf.
+  `toolstest`). They generate every document: PDFs in Go, scans rendered
+  from them with `pdftoppm` (a Go-written image-only PDF, a JPEG, a PNG),
+  HEIC with `heif-enc` (the x265 plugin is only in that stage); pikepdf,
+  which comes with ocrmypdf, encrypts and marks a PDF as signed.
 
 ## Web server
 
@@ -543,7 +577,7 @@ OCR needs external programs, installed with `--no-install-recommends`:
 | `tesseract-ocr-deu`, `-eng`, `-osd` | German and English, page orientation |
 | `poppler-utils` | `pdfinfo`, `pdftotext` (text per page), `pdftoppm` (thumbnails) |
 | `img2pdf` | JPEG and PNG to PDF without re-encoding |
-| `libheif-examples`, `libheif-plugin-libde265` | `heif-dec` (HEIC to PNG; trixie keeps `heif-convert` as a link to it) and its HEVC decoder plugin, which is not installed without recommended packages |
+| `libheif-examples`, `libheif-plugin-libde265` | `heif-dec` (HEIC to JPEG; trixie keeps `heif-convert` as a link to it) and its HEVC decoder plugin, which is not installed without recommended packages |
 | `ca-certificates` | TLS to optional external services |
 
 The image is about 145 MB compressed per architecture (about 540 MB
