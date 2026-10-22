@@ -12,25 +12,42 @@ import (
 
 const countOpenLoginCeremonies = `-- name: CountOpenLoginCeremonies :one
 SELECT count(*) AS total,
-       count(*) FILTER (WHERE client_key = $1::text) AS client
-FROM webauthn_ceremonies WHERE kind = 'login' AND expires_at > $2
+       count(*) FILTER (WHERE client_key = $1::text) AS client,
+       count(*) FILTER (WHERE client_net_mid = NULLIF($2::text, '')) AS net_mid,
+       count(*) FILTER (WHERE client_net_wide = NULLIF($3::text, '')) AS net_wide
+FROM webauthn_ceremonies WHERE kind = 'login' AND expires_at > $4
 `
 
 type CountOpenLoginCeremoniesParams struct {
 	ClientKey string
+	NetMid    string
+	NetWide   string
 	Now       time.Time
 }
 
 type CountOpenLoginCeremoniesRow struct {
-	Total  int64
-	Client int64
+	Total   int64
+	Client  int64
+	NetMid  int64
+	NetWide int64
 }
 
-// All open logins, and those of one client.
+// All open logins, those of one client and those of its two networks. An
+// empty network key counts nothing: NULL matches no row.
 func (q *Queries) CountOpenLoginCeremonies(ctx context.Context, arg CountOpenLoginCeremoniesParams) (CountOpenLoginCeremoniesRow, error) {
-	row := q.db.QueryRow(ctx, countOpenLoginCeremonies, arg.ClientKey, arg.Now)
+	row := q.db.QueryRow(ctx, countOpenLoginCeremonies,
+		arg.ClientKey,
+		arg.NetMid,
+		arg.NetWide,
+		arg.Now,
+	)
 	var i CountOpenLoginCeremoniesRow
-	err := row.Scan(&i.Total, &i.Client)
+	err := row.Scan(
+		&i.Total,
+		&i.Client,
+		&i.NetMid,
+		&i.NetWide,
+	)
 	return i, err
 }
 
@@ -75,20 +92,22 @@ func (q *Queries) CountPasskeysByUser(ctx context.Context) ([]CountPasskeysByUse
 }
 
 const createWebAuthnCeremony = `-- name: CreateWebAuthnCeremony :exec
-INSERT INTO webauthn_ceremonies (id, kind, user_id, name, factor, data, client_key, created_at, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+INSERT INTO webauthn_ceremonies (id, kind, user_id, name, factor, data, client_key, client_net_mid, client_net_wide, created_at, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 `
 
 type CreateWebAuthnCeremonyParams struct {
-	ID        []byte
-	Kind      string
-	UserID    *int64
-	Name      *string
-	Factor    *string
-	Data      []byte
-	ClientKey *string
-	Now       time.Time
-	ExpiresAt time.Time
+	ID            []byte
+	Kind          string
+	UserID        *int64
+	Name          *string
+	Factor        *string
+	Data          []byte
+	ClientKey     *string
+	ClientNetMid  *string
+	ClientNetWide *string
+	Now           time.Time
+	ExpiresAt     time.Time
 }
 
 func (q *Queries) CreateWebAuthnCeremony(ctx context.Context, arg CreateWebAuthnCeremonyParams) error {
@@ -100,6 +119,8 @@ func (q *Queries) CreateWebAuthnCeremony(ctx context.Context, arg CreateWebAuthn
 		arg.Factor,
 		arg.Data,
 		arg.ClientKey,
+		arg.ClientNetMid,
+		arg.ClientNetWide,
 		arg.Now,
 		arg.ExpiresAt,
 	)
@@ -112,6 +133,20 @@ DELETE FROM webauthn_ceremonies WHERE expires_at <= $1
 
 func (q *Queries) DeleteExpiredWebAuthnCeremonies(ctx context.Context, now time.Time) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteExpiredWebAuthnCeremonies, now)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteLoginCeremonies = `-- name: DeleteLoginCeremonies :execrows
+DELETE FROM webauthn_ceremonies WHERE id = ANY($1::bytea[]) AND kind = 'login'
+`
+
+// Drops logins by the hashes of their tokens, expired or not; never a
+// registration.
+func (q *Queries) DeleteLoginCeremonies(ctx context.Context, ids [][]byte) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteLoginCeremonies, ids)
 	if err != nil {
 		return 0, err
 	}
@@ -275,7 +310,7 @@ func (q *Queries) SetWebAuthnHandle(ctx context.Context, arg SetWebAuthnHandlePa
 
 const takeWebAuthnCeremony = `-- name: TakeWebAuthnCeremony :one
 DELETE FROM webauthn_ceremonies WHERE id = $1 AND kind = $2 AND expires_at > $3
-RETURNING id, kind, user_id, name, factor, data, client_key, created_at, expires_at
+RETURNING id, kind, user_id, name, factor, data, client_key, created_at, expires_at, client_net_mid, client_net_wide
 `
 
 type TakeWebAuthnCeremonyParams struct {
@@ -298,6 +333,8 @@ func (q *Queries) TakeWebAuthnCeremony(ctx context.Context, arg TakeWebAuthnCere
 		&i.ClientKey,
 		&i.CreatedAt,
 		&i.ExpiresAt,
+		&i.ClientNetMid,
+		&i.ClientNetWide,
 	)
 	return i, err
 }
