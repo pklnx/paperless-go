@@ -20,7 +20,7 @@ interface Props {
   state: ViewState;
   /** Sets the one sidebar filter; null lists everything. */
   select: (f: Filter | null) => void;
-  /** Opens a page: "profile", "log" or "users". */
+  /** Opens a page: "metadata", "profile", "log" or "users". */
   show: (view: string) => void;
   user: User;
   logout: () => void;
@@ -139,6 +139,7 @@ export function Sidebar({ state, select, show, user, logout, counts, metadata, c
       {data && named("type", t.documentTypes, data.documentTypes)}
 
       <div className="mt-auto flex flex-col gap-0.5 border-t border-line pt-2">
+        {page("metadata", t.manageMetadata)}
         {page("log", t.log)}
         {user.admin && page("users", t.users)}
         <div className="flex items-center justify-between gap-2 px-2 pt-1 text-sm">

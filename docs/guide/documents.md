@@ -78,6 +78,61 @@ An admin can open and change other users' documents. Their tags,
 correspondents and types are the owner's, and new ones created there
 belong to the owner. Each change is in the audit log.
 
+## Changing several documents at once
+
+Each row has a checkbox. Shift-click a second checkbox to check every
+document between the two; "Select all loaded" checks every document the
+list has loaded, at most 500. On a phone the checkboxes appear after a long
+press on a row.
+
+Once documents are checked, a bar at the bottom changes them together:
+
+| Action | What it does |
+|---|---|
+| Tags… | Adds and removes tags in one step. A tag cannot be both added and removed. |
+| Correspondent…, Type… | Sets one, or removes it from the documents. |
+| Remove from inbox, Move to inbox | Takes the documents out of the inbox, or puts them back. |
+| Favorite, Unfavorite | Marks them as favourites, or unmarks them. |
+
+A change is all or nothing: either every checked document changes or none
+does. Afterwards the list and the counts load again, and the documents
+stay checked for the next change.
+
+When every loaded document is checked and the search has more, "Select all
+matches of this search" covers every match, also those not loaded yet (at
+most 5 000). Before such a change the bar counts the matches again and
+asks; the change then applies to the search, as the server finds it at
+that moment.
+
+Tags, correspondents and types belong to one user. An admin who checked
+documents of several users can move them in or out of the inbox, mark
+them as favourites and remove a correspondent or type, but setting tags,
+a correspondent or a type needs documents of a single user.
+
+Documents cannot be deleted yet: that comes with the trash.
+
+## Tags, correspondents and types
+
+"Tags, correspondents & types" at the foot of the sidebar lists them in
+three tabs, each with the number of its documents. A click on a name opens
+the list filtered by it.
+
+- **Edit** renames a row. For a tag it also sets the colour (one of the
+  palette, or any `#RRGGBB`) and the parent tag; "None (a top-level tag)" makes it a
+  top-level tag. A tag cannot be moved under itself or one of its own
+  sub-tags.
+- On a larger screen a tag can also be dragged onto another tag to move it
+  there, or onto the field above the tree to make it a top-level tag.
+- **Delete** asks first and says how many documents are affected. The
+  documents stay; they only lose the tag, correspondent or type. A deleted
+  tag's sub-tags become top-level tags. If one of them has the name of an
+  existing top-level tag, the delete is refused and names it: rename one
+  of the two first.
+
+An admin sees their own rows here, and everyone's with "Everyone's
+documents" on; an admin may rename, recolour, move and delete other users'
+rows, and each such change is in the log.
+
 ## Admins
 
 An admin sees their own documents, their own tags, correspondents and

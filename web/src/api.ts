@@ -536,3 +536,78 @@ export const metadataApi = {
   create: async <K extends MetadataKind>(kind: K, name: string, ownerId?: number): Promise<K extends "tags" ? Tag : NamedRow> =>
     (await send<K extends "tags" ? Tag : NamedRow>("POST", `/api/${kind}`, ownerId === undefined ? { name } : { name, ownerId }))!,
 };
+
+/**
+ * A bulk change by search: the list's parameters (GET /api/documents),
+ * resolved by the server across all pages. inbox and favorite are only
+ * sent as filters (true), as the list sends them.
+ */
+export interface BulkMatch {
+  q?: string;
+  tag?: string[];
+  correspondent?: string[];
+  type?: string[];
+  inbox?: boolean;
+  favorite?: boolean;
+  owner?: string;
+  tz?: string;
+}
+
+/** The match of a list: the same documents the list shows, on every page. owner=me while an admin's "Everyone's documents" is off. */
+export function bulkMatch(dq: DocumentQuery, timeZone = browserTimeZone()): BulkMatch {
+  const m: BulkMatch = {};
+  if (dq.q) m.q = dq.q;
+  if (dq.tag) m.tag = [dq.tag];
+  if (dq.correspondent) m.correspondent = [dq.correspondent];
+  if (dq.type) m.type = [dq.type];
+  if (dq.inbox) m.inbox = true;
+  if (dq.favorite) m.favorite = true;
+  if (dq.ownOnly) m.owner = "me";
+  if (timeZone) m.tz = timeZone;
+  return m;
+}
+
+/** Which documents a bulk change covers: these IDs (at most 500), or every match of a search. */
+export type BulkSelection = { ids: string[] } | { match: BulkMatch };
+
+/** What a bulk change does; null clears the correspondent or type. */
+export interface BulkChange {
+  addTags?: string[];
+  removeTags?: string[];
+  correspondent?: string | null;
+  documentType?: string | null;
+  inbox?: boolean;
+  favorite?: boolean;
+}
+
+/** The dry run of a match: how many documents and owners it covers, and the server's limit. owners is 0 above the limit. */
+export interface BulkCount {
+  matched: number;
+  owners: number;
+  limit: number;
+}
+
+const bulkPath = "/api/documents/bulk";
+
+export const bulkApi = {
+  /** Counts a match without changing anything. */
+  count: async (match: BulkMatch): Promise<BulkCount> => (await send<BulkCount>("POST", bulkPath, { match, dryRun: true }))!,
+  /** Changes the documents, all or nothing; answers how many were changed. */
+  apply: async (sel: BulkSelection, change: BulkChange): Promise<number> => (await send<{ updated: number }>("POST", bulkPath, { ...sel, ...change }))!.updated,
+};
+
+/** A change of a tag: only the fields sent change; parentId null makes it a top-level tag. */
+export interface TagPatch {
+  name?: string;
+  color?: string;
+  parentId?: string | null;
+}
+
+const metadataPath = (kind: MetadataKind, id: string) => `/api/${kind}/${encodeURIComponent(id)}`;
+
+export const metadataEditApi = {
+  /** Renames a row, and for tags changes colour or parent. */
+  patch: (kind: MetadataKind, id: string, patch: TagPatch) => send("PATCH", metadataPath(kind, id), patch),
+  /** Deletes a row; the documents stay, a tag's sub-tags become top-level tags. */
+  remove: (kind: MetadataKind, id: string) => send("DELETE", metadataPath(kind, id)),
+};

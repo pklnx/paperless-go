@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, documentsApi, processingPending, type DocumentPage, type DocumentQuery, type DocumentSummary, type Metadata, type User } from "./api";
+import { ApiError, bulkApi, bulkMatch, documentsApi, processingPending, type DocumentPage, type DocumentQuery, type DocumentSummary, type Metadata, type User } from "./api";
+import { BulkBar, bulkErrorText, type BulkTarget } from "./BulkBar";
 import { DocumentDetail } from "./DocumentDetail";
 import { documentName, ProcessingStatus } from "./DocumentParts";
 import { EmptyState } from "./EmptyState";
 import { ArrowIcon, CloseIcon, DocumentIcon, InboxIcon, SearchIcon, StarIcon } from "./icons";
 import { lang, t } from "./i18n";
+import { clickSelect, maxSelection, pruneSelection, selectAll, useLongPress } from "./selection";
 import { snippetParts } from "./snippet";
 import { button, input } from "./styles";
 import { chipInk } from "./tagTree";
@@ -51,7 +53,7 @@ interface Props {
   reload: number;
   /** The upload limit from the server's answer. */
   onMaxUploadSize: (bytes: number) => void;
-  /** A document was changed in its detail: counts and names may differ now. */
+  /** A document was changed in its detail, or several by a bulk change: counts and names may differ now. */
   onChanged?: () => void;
 }
 
@@ -69,6 +71,9 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   onMax.current = onMaxUploadSize;
   const queryRef = useRef(query);
   queryRef.current = query;
+  // The list on screen: answers started for another list are dropped.
+  const keyRef = useRef(key);
+  keyRef.current = key;
 
   // One request at a time per controller: a new list or page aborts the
   // previous one; the polling has its own, so it never aborts "Load more".
@@ -157,6 +162,110 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   };
   const openDoc = (id: string) => update({ doc: id });
 
+  // After a bulk change: every loaded page again, in place, so the
+  // rows and the selection stay where they were. Only the first page of
+  // a typed search writes a document.search entry, as any reload does.
+  const refresh = () => {
+    // Started for a list that is no longer shown (the user moved on while
+    // the change ran): the shown list has loaded on its own, and its
+    // request must not be aborted.
+    if (keyRef.current !== key) return;
+    const want = list.docs?.length ?? 0;
+    ctl.current?.abort();
+    pollCtl.current?.abort();
+    const c = new AbortController();
+    ctl.current = c;
+    setList((l) => ({ ...l, loading: true, error: "" }));
+    void (async () => {
+      const docs: DocumentSummary[] = [];
+      let first: DocumentSummary[] | null = null;
+      let cursor = "";
+      do {
+        const page = await documentsApi.list(queryRef.current, pageSize, cursor, c.signal);
+        first ??= page.documents;
+        docs.push(...page.documents);
+        cursor = page.nextCursor ?? "";
+      } while (cursor && docs.length < want);
+      return { docs, first: first ?? [], cursor };
+    })().then(
+      (r) => {
+        if (!c.signal.aborted && keyRef.current === key) setList({ key, docs: r.docs, first: new Set(r.first.map((d) => d.id)), cursor: r.cursor, loading: false, error: "" });
+      },
+      (err: unknown) => {
+        if (!c.signal.aborted && keyRef.current === key) setList((l) => ({ ...l, loading: false, error: errorText(err) }));
+      },
+    );
+  };
+
+  // The selection: checked IDs of loaded documents (at most maxSelection),
+  // or, after "Select all matches", every match of the search.
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const anchor = useRef<string | null>(null);
+  const [capped, setCapped] = useState(false);
+  // "All matches": the count and owners of the dry run, for the list it was made for.
+  const [matchSel, setMatchSel] = useState<{ key: string; matched: number; owners: number } | null>(null);
+  const allMatches = matchSel !== null && matchSel.key === key ? matchSel.matched : null;
+  const [selectError, setSelectError] = useState("");
+  const clearSelection = () => {
+    setSelected(new Set());
+    anchor.current = null;
+    setCapped(false);
+    setMatchSel(null);
+    setSelectError("");
+  };
+  // Another list: another selection.
+  useEffect(clearSelection, [key]);
+  const loaded = list.key === key ? list.docs : null;
+  const order = (loaded ?? []).map((d) => d.id);
+  // Documents that left the list (after a change, or a reload) leave the selection.
+  const orderKey = order.join(",");
+  useEffect(() => setSelected((s) => pruneSelection(s, order)), [orderKey]);
+  const pick = (id: string, shift: boolean) => {
+    setMatchSel(null);
+    setSelectError("");
+    const r = clickSelect(order, selected, anchor.current, id, shift);
+    if (!shift) anchor.current = id;
+    setSelected(r.ids);
+    setCapped(r.capped);
+  };
+  const allLoaded = order.length > 0 && (selected.size === Math.min(order.length, maxSelection));
+  const toggleAll = () => {
+    setMatchSel(null);
+    setSelectError("");
+    if (allLoaded) {
+      clearSelection();
+      return;
+    }
+    const r = selectAll(order);
+    setSelected(r.ids);
+    setCapped(r.capped);
+  };
+  const countMatches = () => {
+    setSelectError("");
+    const k = key;
+    bulkApi.count(bulkMatch(query)).then(
+      (c) => {
+        // Counted for a list that is no longer shown: not this list's selection.
+        if (keyRef.current !== k) return;
+        if (c.matched > c.limit) setSelectError(`${t.bulkMatchCount(c.matched)} ${t.bulkTooMany(c.limit)}`);
+        else if (c.matched === 0) setSelectError(t.bulkNoMatches);
+        else setMatchSel({ key: k, matched: c.matched, owners: c.owners });
+      },
+      (err: unknown) => {
+        if (keyRef.current === k) setSelectError(bulkErrorText(err).text);
+      },
+    );
+  };
+  const selectedIds = order.filter((id) => selected.has(id));
+  const target: BulkTarget | null = allMatches !== null ? { match: bulkMatch(query), matched: allMatches } : selectedIds.length > 0 ? { ids: selectedIds } : null;
+  const owners = new Set((loaded ?? []).filter((d) => selected.has(d.id)).map((d) => d.ownerId));
+  // The one owner of the selection, when known. For all matches the dry
+  // run says how many owners there are; with one, every loaded row is a
+  // match of it.
+  const selectedOwner =
+    allMatches !== null ? (matchSel?.owners === 1 ? (loaded?.[0]?.ownerId ?? null) : null) : owners.size === 1 ? ([...owners][0] ?? null) : null;
+  const selecting = target !== null;
+
   const filter = activeFilter(state);
   // The chip says what kind of filter it is ("Tag: Steuer"); the heading names the list.
   const [filterName, listName] = (() => {
@@ -199,12 +308,37 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
           {list.error}
         </p>
       )}
+      {docs && docs.length > 0 && (
+        <SelectionHeader
+          allLoaded={allLoaded}
+          some={selected.size > 0}
+          count={allMatches ?? selected.size}
+          capped={capped && allMatches === null}
+          allMatches={allMatches}
+          moreMatches={allMatches === null && allLoaded && (list.cursor !== "" || capped)}
+          error={selectError}
+          toggleAll={toggleAll}
+          selectMatches={countMatches}
+          clear={clearSelection}
+        />
+      )}
       {!docs && list.loading && <p className="text-sm text-ink-muted">{t.loading}</p>}
       {docs && docs.length === 0 && <Empty query={query} clearSearch={() => update({ q: "" })} showAll={() => update(filterPatch(null))} />}
       {docs && docs.length > 0 && (
         <ul aria-label={title} className="flex flex-col gap-2 md:gap-0 md:divide-y md:divide-line md:rounded-lg md:border md:border-line">
           {docs.map((d) => (
-            <DocumentRow key={d.id} doc={d} metadata={metadata} owner={everyone && d.ownerName && d.ownerName !== user.name ? d.ownerName : ""} onChange={replaceDoc} href={formatState({ ...state, doc: d.id }) || "?"} onOpen={() => openDoc(d.id)} />
+            <DocumentRow
+              key={d.id}
+              doc={d}
+              metadata={metadata}
+              owner={everyone && d.ownerName && d.ownerName !== user.name ? d.ownerName : ""}
+              onChange={replaceDoc}
+              href={formatState({ ...state, doc: d.id }) || "?"}
+              onOpen={() => openDoc(d.id)}
+              checked={allMatches !== null || selected.has(d.id)}
+              selecting={selecting}
+              onPick={(shift) => pick(d.id, shift)}
+            />
           ))}
         </ul>
       )}
@@ -212,6 +346,19 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
         <button type="button" className={`${button} self-start`} disabled={list.loading} onClick={loadMore}>
           {t.loadMore}
         </button>
+      )}
+      {target && (
+        <BulkBar
+          target={target}
+          metadata={metadata}
+          ownerId={selectedOwner}
+          onDone={() => {
+            // The count of all matches is stale after a change: back to the checked rows.
+            setMatchSel(null);
+            refresh();
+            onChanged?.();
+          }}
+        />
       )}
     </section>
     </>
@@ -341,6 +488,63 @@ const day = (iso: string) => {
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString(lang, { dateStyle: "medium" });
 };
 
+interface HeaderProps {
+  allLoaded: boolean;
+  some: boolean;
+  count: number;
+  capped: boolean;
+  allMatches: number | null;
+  /** Whether the search has more matches than are checked. */
+  moreMatches: boolean;
+  error: string;
+  toggleAll: () => void;
+  selectMatches: () => void;
+  clear: () => void;
+}
+
+/** "Select all loaded", the count, and "Select all matches of this search" once every loaded one is checked. */
+function SelectionHeader({ allLoaded, some, count, capped, allMatches, moreMatches, error, toggleAll, selectMatches, clear }: HeaderProps) {
+  return (
+    <div className="flex flex-col gap-1 text-sm">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <label className="flex items-center gap-2 pointer-coarse:min-h-11">
+          <input
+            type="checkbox"
+            className="size-4 pointer-coarse:size-5"
+            checked={allMatches !== null || allLoaded}
+            ref={(el) => {
+              if (el) el.indeterminate = some && !allLoaded && allMatches === null;
+            }}
+            onChange={toggleAll}
+          />
+          {t.selectAllLoaded}
+        </label>
+        {(some || allMatches !== null) && (
+          <>
+            <span className="text-ink-muted" role="status">
+              {allMatches !== null ? t.allMatchesSelected(allMatches) : t.selectedCount(count)}
+            </span>
+            {moreMatches && (
+              <button type="button" className="text-accent-ink hover:underline pointer-coarse:min-h-11" onClick={selectMatches}>
+                {t.selectAllMatches}
+              </button>
+            )}
+            <button type="button" className="text-accent-ink hover:underline pointer-coarse:min-h-11" onClick={clear}>
+              {t.clearSelection}
+            </button>
+          </>
+        )}
+      </div>
+      {capped && <p className="text-ink-muted">{t.selectionCapped(maxSelection)}</p>}
+      {error && (
+        <p role="alert" className="text-danger">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 interface RowProps {
   doc: DocumentSummary;
   metadata: Metadata | null;
@@ -349,15 +553,31 @@ interface RowProps {
   /** The detail's URL, so the title is a real link (a new tab works). */
   href: string;
   onOpen: () => void;
+  checked: boolean;
+  /** Something is selected: on phones the checkboxes show (before, a long press starts selecting). */
+  selecting: boolean;
+  onPick: (shift: boolean) => void;
 }
 
-function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen }: RowProps) {
+function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen, checked, selecting, onPick }: RowProps) {
   const name = documentName(d);
+  const press = useLongPress(() => {
+    if (!checked) onPick(false);
+  });
   const correspondent = d.correspondentId ? metadata?.correspondents.find((c) => c.id === d.correspondentId)?.name : undefined;
   const type = d.documentTypeId ? metadata?.documentTypes.find((c) => c.id === d.documentTypeId)?.name : undefined;
   const tags = (d.tagIds ?? []).flatMap((id) => metadata?.tags.find((x) => x.id === id) ?? []);
   return (
-    <li className="flex items-start gap-3 rounded-lg border border-line px-3 py-3 md:rounded-none md:border-0 md:py-2">
+    <li className={`flex items-start gap-3 rounded-lg border px-3 py-3 select-none [-webkit-touch-callout:none] md:rounded-none md:border-0 md:py-2 md:select-auto ${checked ? "border-accent bg-accent-soft/40" : "border-line"}`} {...press}>
+      <label className={`-m-2 flex shrink-0 items-center justify-center p-2 pointer-coarse:size-11 ${selecting ? "" : "pointer-coarse:hidden"}`}>
+        <input
+          type="checkbox"
+          className="size-4 pointer-coarse:size-5"
+          aria-label={t.selectDocument(name)}
+          checked={checked}
+          onChange={(e) => onPick((e.nativeEvent as MouseEvent).shiftKey === true)}
+        />
+      </label>
       <Thumbnail url={d.thumbnailUrl} />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
