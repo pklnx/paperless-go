@@ -445,6 +445,106 @@ func TestMetadataDeleteRetriesDeadlock(t *testing.T) {
 	}
 }
 
+// A metadata delete locks the documents linked to its row before it
+// deletes: held there (WithAfterLock), a bulk change of those documents
+// that links nothing waits for it. After the release both succeed with
+// one attempt each. Before #99 the delete had no such point, and its
+// cascade or SET NULL locked the documents in the plan's order.
+func TestMetadataDeleteLocksDocumentsFirst(t *testing.T) {
+	for _, kind := range []string{"tag", "correspondent", "documentType"} {
+		t.Run(kind, func(t *testing.T) {
+			st, dbURL := storetest.NewWithURL(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+			var id string
+			var del func(context.Context, *store.Store) error
+			var link func(in *store.NewDocument)
+			switch kind {
+			case "tag":
+				id = mustTag(t, st, alice, "T", nil).ID
+				link = func(in *store.NewDocument) { in.TagIDs = []string{id} }
+				del = func(ctx context.Context, s *store.Store) error { return s.DeleteTag(ctx, alice, id) }
+			case "correspondent":
+				id = mustCorrespondent(t, st, alice, "C").ID
+				link = func(in *store.NewDocument) { in.CorrespondentID = &id }
+				del = func(ctx context.Context, s *store.Store) error { return s.DeleteCorrespondent(ctx, alice, id) }
+			default:
+				id = mustDocType(t, st, alice, "Y").ID
+				link = func(in *store.NewDocument) { in.DocumentTypeID = &id }
+				del = func(ctx context.Context, s *store.Store) error { return s.DeleteDocumentType(ctx, alice, id) }
+			}
+			var docs []string
+			for _, name := range []string{"d1", "d2"} {
+				in := newDoc(name)
+				link(&in)
+				docs = append(docs, mustDoc(t, st, alice, in).ID)
+			}
+			deleter, bulkStore := lockOrderStores(t, dbURL, "deleter", "bulk")
+			conn := connect(t, dbURL)
+
+			h := holdAfterLock(ctx, t, "delete", func(ctx context.Context) error { return del(ctx, deleter) })
+			n, changed := countAfterLock(ctx, func(ctx context.Context) error {
+				_, err := bulkStore.BulkUpdateDocuments(ctx, alice, store.BulkSelection{IDs: docs}, store.BulkChange{IsFavorite: ptr(true)}, "document.update")
+				return err
+			})
+			waitForLock(ctx, t, conn, "bulk", changed)
+			close(h.release)
+			if err := <-h.done; err != nil || h.attempts.Load() != 1 {
+				t.Errorf("delete: %v after %d attempts, want success after 1", err, h.attempts.Load())
+			}
+			if err := <-changed; err != nil || n.Load() != 1 {
+				t.Errorf("bulk change: %v after %d attempts, want success after 1", err, n.Load())
+			}
+			for _, d := range docs {
+				if g := getDoc(t, st, d); !g.IsFavorite || len(g.TagIDs) != 0 || g.CorrespondentID != nil || g.DocumentTypeID != nil {
+					t.Errorf("after both: %+v", g)
+				}
+			}
+		})
+	}
+}
+
+// Deletes of a tag P and of its child C on a document with both do not
+// deadlock: P's delete locks its direct children before its documents, so
+// C's delete, holding C, never waits for documents P's delete holds. Held
+// after its locks, P's delete makes C's wait for C; after the release both
+// succeed with one attempt each. Without the children's lock C's delete
+// held C and waited for the document, and P's SET NULL (parent_id) waited
+// for C: a deadlock, and a second attempt of P's delete (10 ms).
+func TestDeleteParentAndChildTagNoDeadlock(t *testing.T) {
+	st, dbURL := storetest.NewWithURL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	p := mustTag(t, st, alice, "P", nil)
+	c := mustTag(t, st, alice, "C", p)
+	in := newDoc("doc")
+	in.TagIDs = []string{p.ID, c.ID}
+	doc := mustDoc(t, st, alice, in)
+	childStore, parentStore := lockOrderStores(t, dbURL, "child", "parent")
+	conn := connect(t, dbURL)
+
+	h := holdAfterLock(ctx, t, "parent's delete", func(ctx context.Context) error { return parentStore.DeleteTag(ctx, alice, p.ID) })
+	n, deleted := countAfterLock(ctx, func(ctx context.Context) error { return childStore.DeleteTag(ctx, alice, c.ID) })
+	waitForLock(ctx, t, conn, "child", deleted)
+	close(h.release)
+	if err := <-h.done; err != nil || h.attempts.Load() != 1 {
+		t.Errorf("parent's delete: %v after %d attempts, want success after 1", err, h.attempts.Load())
+	}
+	if err := <-deleted; err != nil || n.Load() != 1 {
+		t.Errorf("child's delete: %v after %d attempts, want success after 1", err, n.Load())
+	}
+	for _, tag := range []*store.Tag{p, c} {
+		if _, err := st.GetTag(ctx, alice, tag.ID); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("tag %s after the deletes: %v", tag.Name, err)
+		}
+	}
+	if g := getDoc(t, st, doc.ID); len(g.TagIDs) != 0 {
+		t.Errorf("document after the deletes: %+v", g)
+	}
+}
+
 // The metadata audit entries name the row and its owner when that is not
 // the acting user, and record a rename's old name.
 func TestMetadataAuditDetails(t *testing.T) {

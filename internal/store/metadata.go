@@ -122,8 +122,10 @@ func (s *Store) UpdateCorrespondent(ctx context.Context, sc Scope, id string, in
 }
 
 // DeleteCorrespondent removes a correspondent, with the audit entry of
-// ctx; its documents keep existing without one. A deadlock with a
-// concurrent change of those documents is retried (see retryDeadlock).
+// ctx; its documents keep existing without one. It locks the row, then
+// its documents in id order, the order every writer linking documents
+// takes (architecture.md, "Lock order"); a deadlock all the same (a writer
+// outside that order) is retried (see retryDeadlock).
 func (s *Store) DeleteCorrespondent(ctx context.Context, sc Scope, id string) error {
 	u, ok := parseID(id)
 	if !ok {
@@ -131,6 +133,16 @@ func (s *Store) DeleteCorrespondent(ctx context.Context, sc Scope, id string) er
 	}
 	return mapErr(s.retryDeadlock(func() error {
 		return s.inTx(ctx, func(q *db.Queries) error {
+			// The lock order of every metadata delete (architecture.md,
+			// "Lock order"): the row, then its documents in id order, then
+			// the DELETE, whose SET NULL touches only documents held here.
+			if _, err := q.LockCorrespondentForDelete(ctx, db.LockCorrespondentForDeleteParams{ID: u, Owner: sc.owner()}); err != nil {
+				return err
+			}
+			if err := q.LockCorrespondentDocuments(ctx, u); err != nil {
+				return err
+			}
+			afterLock(ctx)
 			r, err := q.DeleteCorrespondent(ctx, db.DeleteCorrespondentParams{ID: u, Owner: sc.owner()})
 			if err != nil {
 				return err
@@ -241,8 +253,10 @@ func (s *Store) UpdateDocumentType(ctx context.Context, sc Scope, id string, in 
 }
 
 // DeleteDocumentType removes a document type, with the audit entry of
-// ctx; its documents keep existing without one. A deadlock with a
-// concurrent change of those documents is retried (see retryDeadlock).
+// ctx; its documents keep existing without one. It locks the row, then
+// its documents in id order, the order every writer linking documents
+// takes (architecture.md, "Lock order"); a deadlock all the same (a writer
+// outside that order) is retried (see retryDeadlock).
 func (s *Store) DeleteDocumentType(ctx context.Context, sc Scope, id string) error {
 	u, ok := parseID(id)
 	if !ok {
@@ -250,6 +264,14 @@ func (s *Store) DeleteDocumentType(ctx context.Context, sc Scope, id string) err
 	}
 	return mapErr(s.retryDeadlock(func() error {
 		return s.inTx(ctx, func(q *db.Queries) error {
+			// The lock order of DeleteCorrespondent.
+			if _, err := q.LockDocumentTypeForDelete(ctx, db.LockDocumentTypeForDeleteParams{ID: u, Owner: sc.owner()}); err != nil {
+				return err
+			}
+			if err := q.LockDocumentTypeDocuments(ctx, u); err != nil {
+				return err
+			}
+			afterLock(ctx)
 			r, err := q.DeleteDocumentType(ctx, db.DeleteDocumentTypeParams{ID: u, Owner: sc.owner()})
 			if err != nil {
 				return err
@@ -380,8 +402,9 @@ func (s *Store) UpdateTag(ctx context.Context, sc Scope, id string, in TagInput)
 // DeleteTag removes a tag, with the audit entry of ctx. Its children
 // become root tags and its documents lose the tag. When a child would then
 // collide with a root tag of the same name, nothing changes and the error
-// is a *TagNameConflictError (ErrTagNameConflict). A deadlock with a
-// concurrent change of its documents is retried (see retryDeadlock).
+// is a *TagNameConflictError (ErrTagNameConflict). It locks the tag, its
+// direct children, then its documents in id order (architecture.md, "Lock
+// order"); a deadlock all the same is retried (see retryDeadlock).
 func (s *Store) DeleteTag(ctx context.Context, sc Scope, id string) error {
 	u, ok := parseID(id)
 	if !ok {
@@ -389,6 +412,21 @@ func (s *Store) DeleteTag(ctx context.Context, sc Scope, id string) error {
 	}
 	err := s.retryDeadlock(func() error {
 		return s.inTx(ctx, func(q *db.Queries) error {
+			// The lock order of DeleteCorrespondent, with the tag's direct
+			// children (its SET NULL updates them) between the tag and its
+			// documents: a child's delete holds the child and then waits
+			// only for documents, so this one waits for it before it holds
+			// any.
+			if _, err := q.LockTagForDelete(ctx, db.LockTagForDeleteParams{ID: u, Owner: sc.owner()}); err != nil {
+				return err
+			}
+			if err := q.LockTagChildren(ctx, u); err != nil {
+				return err
+			}
+			if err := q.LockTagDocuments(ctx, u); err != nil {
+				return err
+			}
+			afterLock(ctx)
 			r, err := q.DeleteTag(ctx, db.DeleteTagParams{ID: u, Owner: sc.owner()})
 			if err != nil {
 				return err
@@ -467,8 +505,9 @@ func deleted(n int64, err error) error {
 	return nil
 }
 
-// afterLockKey carries a test seam: a function a patch calls with the row
-// locked, before it writes (see export_test.go).
+// afterLockKey carries a test seam: a function a patch or a metadata
+// delete calls with the rows locked, before it writes (see
+// export_test.go).
 type afterLockKey struct{}
 
 func afterLock(ctx context.Context) {

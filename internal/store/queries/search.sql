@@ -472,7 +472,8 @@ ORDER BY x.document_date, x.id DESC;
 -- name: MatchDocumentIDs :many
 -- The ids of the documents a bulk change by search covers (store.
 -- BulkUpdateDocuments): every match of the filters, in id order, at most
--- lim, each with the number of all matches and their owners.
+-- lim, each with the number of all matches and their owners; with only_ids
+-- only those among them.
 SELECT d.id, d.owner_id, count(*) OVER ()::bigint AS total
 FROM documents d
 WHERE
@@ -512,5 +513,10 @@ WHERE
       AND (sqlc.narg(inbox)::boolean IS NULL OR d.is_inbox = sqlc.narg(inbox)::boolean)
       AND (sqlc.narg(favorite)::boolean IS NULL OR d.is_favorite = sqlc.narg(favorite)::boolean)
       -- filters:end
+      -- Outside the filter block on purpose (TestSearchFilterCopies): the
+      -- recheck after the lock passes the locked ids, so it returns at
+      -- most those and the limit cannot cut any off; the match and the
+      -- dry run pass NULL.
+      AND (sqlc.narg(only_ids)::uuid[] IS NULL OR d.id = ANY (sqlc.narg(only_ids)::uuid[]))
 ORDER BY d.id
 LIMIT sqlc.arg(lim);

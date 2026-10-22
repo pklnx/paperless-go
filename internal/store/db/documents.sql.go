@@ -333,6 +333,43 @@ func (q *Queries) GetDocument(ctx context.Context, arg GetDocumentParams) (GetDo
 	return i, err
 }
 
+const keyShareCorrespondent = `-- name: KeyShareCorrespondent :exec
+SELECT id FROM correspondents WHERE id = $1::uuid
+FOR KEY SHARE
+`
+
+func (q *Queries) KeyShareCorrespondent(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, keyShareCorrespondent, id)
+	return err
+}
+
+const keyShareDocumentType = `-- name: KeyShareDocumentType :exec
+SELECT id FROM document_types WHERE id = $1::uuid
+FOR KEY SHARE
+`
+
+func (q *Queries) KeyShareDocumentType(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, keyShareDocumentType, id)
+	return err
+}
+
+const keyShareTags = `-- name: KeyShareTags :exec
+SELECT id FROM tags WHERE id = ANY ($1::uuid[])
+ORDER BY id
+FOR KEY SHARE
+`
+
+// KeyShareTags, KeyShareCorrespondent and KeyShareDocumentType take the
+// key share a link's foreign-key check takes, before a writer that links
+// documents to these rows locks the documents (store.lockLinkTargets): a
+// delete of one of them locks the row first, then its documents, so both
+// take the locks in one order. A row deleted meanwhile is skipped; the
+// link then fails as before (ErrOwnerMismatch).
+func (q *Queries) KeyShareTags(ctx context.Context, ids []pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, keyShareTags, ids)
+	return err
+}
+
 const listDocuments = `-- name: ListDocuments :many
 SELECT d.id, d.owner_id, d.title, d.document_date, d.created_at, d.modified_at, d.notes, d.is_favorite,
        d.is_inbox, d.archive_serial_number, d.page_count, d.extracted_text, d.text_source, d.source,
