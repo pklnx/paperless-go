@@ -273,7 +273,7 @@ func TestListDocumentsUnchanged(t *testing.T) {
 	want := []string{
 		"archiveSerialNumber", "archiveSize", "correspondentId", "createdAt", "documentDate", "documentTypeId", "hasArchive", "id",
 		"isFavorite", "isInbox", "modifiedAt", "notes", "originalFileName", "originalMime", "originalSize", "pageCount",
-		"processingNote", "source", "tagIds", "title",
+		"processing", "processingNote", "source", "tagIds", "thumbnailUrl", "title",
 	}
 	for _, d := range listed(t, out) {
 		var keys []string

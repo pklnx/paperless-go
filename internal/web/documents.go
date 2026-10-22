@@ -45,12 +45,65 @@ type documentJSON struct {
 	OriginalSize        int64     `json:"originalSize"`
 	OriginalMIME        string    `json:"originalMime"`
 	// HasArchive: the archive PDF exists (processing has run).
-	HasArchive      bool     `json:"hasArchive"`
-	ArchiveSize     *int64   `json:"archiveSize"`
-	ProcessingNote  string   `json:"processingNote"`
+	HasArchive     bool   `json:"hasArchive"`
+	ArchiveSize    *int64 `json:"archiveSize"`
+	ProcessingNote string `json:"processingNote"`
+	// Processing is the processing status; it is left out only when it
+	// could not be read after an upload.
+	Processing *processingJSON `json:"processing,omitempty"`
+	// ThumbnailURL is where the thumbnail is, with its version, or null
+	// until processing made one.
+	ThumbnailURL    *string  `json:"thumbnailUrl"`
 	CorrespondentID *string  `json:"correspondentId"`
 	DocumentTypeID  *string  `json:"documentTypeId"`
 	TagIDs          []string `json:"tagIds"`
+}
+
+// processingJSON is a document's processing status.
+type processingJSON struct {
+	// State is the state of the document's newest job (queued, running,
+	// done or failed), or done when it has none: done jobs are deleted
+	// after a week.
+	State string `json:"state"`
+	// Error is the fixed message of the last failed attempt: why it
+	// failed, or why a queued job is retried. Never tool output.
+	Error       string `json:"error,omitempty"`
+	Attempts    int32  `json:"attempts"`
+	MaxAttempts int32  `json:"maxAttempts"`
+	// RetryAt is when a queued job that failed before runs again.
+	RetryAt *time.Time `json:"retryAt,omitempty"`
+}
+
+func toProcessingJSON(j *store.Job) *processingJSON {
+	if j == nil {
+		return &processingJSON{State: store.JobDone}
+	}
+	p := &processingJSON{State: j.State, Attempts: j.Attempts, MaxAttempts: j.MaxAttempts}
+	switch j.State {
+	case store.JobFailed:
+		p.Error = j.LastError
+	case store.JobQueued:
+		if j.LastError != "" {
+			p.Error = j.LastError
+			at := j.RunAfter
+			p.RetryAt = &at
+		}
+	}
+	return p
+}
+
+// thumbnailVersionLen is how many hex digits of the thumbnail's hash its
+// URL carries as the version.
+const thumbnailVersionLen = 16
+
+// thumbnailURL is the URL of d's thumbnail with its version (v), or nil.
+// A new thumbnail gets a new URL, so the browser may keep each one.
+func thumbnailURL(d *store.Document) *string {
+	if d.ThumbnailSHA256 == nil || len(*d.ThumbnailSHA256) < thumbnailVersionLen {
+		return nil
+	}
+	u := "/api/documents/" + url.PathEscape(d.ID) + "/thumbnail?v=" + (*d.ThumbnailSHA256)[:thumbnailVersionLen]
+	return &u
 }
 
 type documentDetailJSON struct {
@@ -59,7 +112,9 @@ type documentDetailJSON struct {
 	TextSource    string `json:"textSource"`
 }
 
-func toDocumentJSON(d *store.Document) documentJSON {
+// toDocumentJSON is d as the API shows it, with the processing status of
+// its newest job (nil: none).
+func toDocumentJSON(d *store.Document, job *store.Job) documentJSON {
 	tags := d.TagIDs
 	if tags == nil {
 		tags = []string{}
@@ -69,8 +124,18 @@ func toDocumentJSON(d *store.Document) documentJSON {
 		Notes: d.Notes, IsFavorite: d.IsFavorite, IsInbox: d.IsInbox, ArchiveSerialNumber: d.ArchiveSerialNumber,
 		PageCount: d.PageCount, Source: d.Source, OriginalFileName: d.OriginalFileName, OriginalSize: d.OriginalSize,
 		OriginalMIME: d.OriginalMIME, HasArchive: d.ArchiveSHA256 != nil, ArchiveSize: d.ArchiveSize,
-		ProcessingNote: d.ProcessingNote, CorrespondentID: d.CorrespondentID, DocumentTypeID: d.DocumentTypeID, TagIDs: tags,
+		ProcessingNote: d.ProcessingNote, Processing: toProcessingJSON(job), ThumbnailURL: thumbnailURL(d),
+		CorrespondentID: d.CorrespondentID, DocumentTypeID: d.DocumentTypeID, TagIDs: tags,
 	}
+}
+
+// latestJobs reads the processing status of docs.
+func (s *Server) latestJobs(r *http.Request, docs ...*store.Document) (map[string]*store.Job, error) {
+	ids := make([]string, len(docs))
+	for i, d := range docs {
+		ids[i] = d.ID
+	}
+	return s.store.LatestJobs(r.Context(), ids)
 }
 
 // documentsAvailable answers 503 when the server has no blob store (only
@@ -242,9 +307,18 @@ func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	docs := make([]*store.Document, len(page.Hits))
+	for i, h := range page.Hits {
+		docs[i] = h.Document
+	}
+	jobs, err := s.latestJobs(r, docs...)
+	if err != nil {
+		s.failStore(w, r, err)
+		return
+	}
 	out := documentListJSON{Documents: make([]documentListItemJSON, len(page.Hits)), NextCursor: page.NextCursor, MaxUploadSize: s.importer.MaxSize()}
 	for i, h := range page.Hits {
-		out.Documents[i] = documentListItemJSON{documentJSON: toDocumentJSON(h.Document)}
+		out.Documents[i] = documentListItemJSON{documentJSON: toDocumentJSON(h.Document, jobs[h.ID])}
 		if q.HasText() {
 			snippet := h.Snippet
 			out.Documents[i].Snippet = &snippet
@@ -276,7 +350,88 @@ func (s *Server) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 		s.failStore(w, r, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, documentDetailJSON{documentJSON: toDocumentJSON(d), ExtractedText: d.ExtractedText, TextSource: d.TextSource})
+	jobs, err := s.latestJobs(r, d)
+	if err != nil {
+		s.failStore(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, documentDetailJSON{documentJSON: toDocumentJSON(d, jobs[d.ID]), ExtractedText: d.ExtractedText, TextSource: d.TextSource})
+}
+
+// handleReprocess queues one document of the scope for processing again
+// (the Retry button), as `reprocess ID` does: its text, page count,
+// archive PDF and thumbnail are made again, while text that did not come
+// from processing stays. It writes document.reprocess in the queueing
+// transaction. Answers: 202 with the document when it was queued, 200 when
+// it was queued or running already, 404 for a document outside the scope,
+// 503 without the audit log.
+func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
+	if !s.documentsAvailable(w, r) {
+		return
+	}
+	d, err := s.store.GetDocument(r.Context(), requestScope(r), r.PathValue("id"))
+	if err != nil {
+		s.failStore(w, r, err)
+		return
+	}
+	e := s.auditEntry(r, "document.reprocess")
+	e.SetTarget(store.TargetDocument, d.ID, d.Title)
+	e.Detail("selection", "ids")
+	n, err := s.store.Reprocess(withAudit(r, e), store.ReprocessSelection{IDs: []string{d.ID}})
+	if err != nil {
+		s.failStore(w, r, err)
+		return
+	}
+	jobs, err := s.latestJobs(r, d)
+	if err != nil {
+		s.failStore(w, r, err)
+		return
+	}
+	status := http.StatusOK
+	if n > 0 {
+		status = http.StatusAccepted
+	}
+	s.writeJSON(w, status, toDocumentJSON(d, jobs[d.ID]))
+}
+
+// handleThumbnail sends a document's thumbnail, a JPEG of its first page
+// (404 until processing made one), to show inline. Its ETag is the blob's
+// hash, so a revalidation answers 304. The URL of the document JSON
+// carries the version (v, the start of the hash): with the current one the
+// browser may keep it for a day without asking, as a new thumbnail gets a
+// new URL; without it, or with an old one, it must revalidate. Either way
+// only the browser's own cache may keep it.
+func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
+	if !s.documentsAvailable(w, r) {
+		return
+	}
+	d, err := s.store.GetDocument(r.Context(), requestScope(r), r.PathValue("id"))
+	if err != nil {
+		s.failStore(w, r, err)
+		return
+	}
+	if d.ThumbnailSHA256 == nil {
+		s.fail(w, r, http.StatusNotFound, "this document has no thumbnail yet", nil)
+		return
+	}
+	hash := *d.ThumbnailSHA256
+	f, err := s.blobs.OpenHash(hash)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "internal error", fmt.Errorf("open the thumbnail of document %s: %w", d.ID, err))
+		return
+	}
+	defer func() { _ = f.Close() }()
+	h := w.Header()
+	h.Set("Content-Type", "image/jpeg")
+	h.Set("Content-Security-Policy", "sandbox")
+	h.Set("Cross-Origin-Resource-Policy", "same-origin")
+	h.Set("ETag", `"`+hash+`"`)
+	if v := r.URL.Query().Get("v"); len(hash) >= thumbnailVersionLen && v == hash[:thumbnailVersionLen] {
+		h.Set("Cache-Control", "private, max-age=86400, immutable")
+	} else {
+		h.Set("Cache-Control", "private, no-cache")
+	}
+	http.ServeContent(w, r, "", time.Time{}, f)
 }
 
 // handleDocumentFile sends a document's original file (kind=original, the
@@ -514,7 +669,16 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	switch res.Outcome {
 	case ingest.Imported:
 		w.Header().Set("Location", "/api/documents/"+res.Document.ID)
-		s.writeJSON(w, http.StatusCreated, toDocumentJSON(res.Document))
+		out := toDocumentJSON(res.Document, nil)
+		// The document is stored; a status that cannot be read is left
+		// out rather than failing the upload.
+		if jobs, err := s.latestJobs(r, res.Document); err != nil {
+			s.log.Warn("read the processing status of a new document", "document", res.Document.ID, "err", err)
+			out.Processing = nil
+		} else {
+			out.Processing = toProcessingJSON(jobs[res.Document.ID])
+		}
+		s.writeJSON(w, http.StatusCreated, out)
 	case ingest.Duplicate:
 		out := duplicateJSON{Duplicate: true}
 		if res.Existing.ID != "" {

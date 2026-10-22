@@ -228,6 +228,94 @@ if ./pgo import "$work/scans/sub/smoke.pdf" > "$work/out" 2>&1; then
 fi
 expect "$work/out" 'is not a directory'
 
+# A scan generated in the image (a PDF page rendered to pixels, without a
+# text layer) is imported and OCRed by `process --until-empty`, which
+# returns when the queue is empty: no waiting. serve is stopped meanwhile,
+# so it does not take the job; it gives a running one back.
+echo "== OCR of a generated scan"
+docker compose --progress quiet stop web
+mkdir "$work/ocr"
+chmod 777 "$work/ocr" # the container user writes the scan
+docker compose --progress quiet run --rm --no-deps -T --entrypoint sh -v "$work/ocr:/ocr" paperless-go -c '
+	set -e
+	python3 -I -c "
+import sys
+text = b\"BT /F1 24 Tf 72 720 Td (Rechnung 4711 vom 1. Oktober 2026) Tj ET\"
+objs = [b\"<< /Type /Catalog /Pages 2 0 R >>\", b\"<< /Type /Pages /Kids [3 0 R] /Count 1 >>\",
+        b\"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\",
+        b\"<< /Length %d >>\nstream\n%s\nendstream\" % (len(text), text),
+        b\"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\"]
+out, offsets = bytearray(b\"%PDF-1.4\n\"), []
+for i, o in enumerate(objs, 1):
+    offsets.append(len(out))
+    out += b\"%d 0 obj\n%s\nendobj\n\" % (i, o)
+xref = len(out)
+out += b\"xref\n0 %d\n0000000000 65535 f \n\" % (len(objs) + 1)
+for o in offsets:
+    out += b\"%010d 00000 n \n\" % o
+out += b\"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n\" % (len(objs) + 1, xref)
+open(sys.argv[1], \"wb\").write(out)
+" /tmp/page.pdf
+	pdftoppm -r 200 -gray -png -singlefile /tmp/page.pdf /tmp/page
+	img2pdf --imgsize 200dpi -o /ocr/scan.pdf /tmp/page.png
+	chmod 644 /ocr/scan.pdf
+	echo "text layer: $(pdftotext /ocr/scan.pdf - | wc -w) words"
+' | tee "$work/out"
+expect "$work/out" '^text layer: 0 words$'
+./pgo import "$work/ocr" | tee "$work/out"
+expect "$work/out" 'scan.pdf: imported'
+./pgo process --until-empty | tee "$work/out"
+expect "$work/out" '^processed: 1, to retry: 0,'
+
+echo "== processing status, thumbnail and retry in the API"
+docker compose --progress quiet up -d --wait web
+WEB_PORT=$(docker compose port web 8080 | sed 's/.*://')
+base="http://localhost:$WEB_PORT"
+# json <file> <expression>: evaluates a Python expression on the JSON in
+# file (as d) and prints the result.
+json() {
+	python3 -I -c 'import json, sys; d = json.load(open(sys.argv[1])); print(eval(sys.argv[2]))' "$1" "$2"
+}
+curl -fsS --retry 10 --retry-delay 1 --retry-all-errors -b "$work/cookies" "$base/api/documents" > "$work/list"
+id=$(json "$work/list" '[x["id"] for x in d["documents"] if x["originalFileName"] == "scan.pdf"][0]')
+thumb=$(json "$work/list" '[x["thumbnailUrl"] for x in d["documents"] if x["id"] == "'"$id"'"][0]')
+json "$work/list" '[(x["originalFileName"], x["processing"]["state"]) for x in d["documents"]]' | tee "$work/out"
+expect "$work/out" "\('scan.pdf', 'done'\)"
+expect "$work/out" "\('smoke.pdf', 'failed'\)"
+curl -fsS -b "$work/cookies" "$base/api/documents/$id" > "$work/doc"
+json "$work/doc" 'd["textSource"] + ": " + d["extractedText"]' | tee "$work/out"
+expect "$work/out" '^Tesseract: .*Rechnung'
+expect "$work/out" '4711'
+case $thumb in
+/api/documents/"$id"/thumbnail\?v=*) ;;
+*)
+	echo "unexpected thumbnailUrl: $thumb" >&2
+	exit 1
+	;;
+esac
+curl -fsS -b "$work/cookies" -D "$work/headers" -o "$work/thumb.jpg" "$base$thumb"
+expect "$work/headers" '^[Cc]ontent-[Tt]ype: image/jpeg'
+expect "$work/headers" '^[Cc]ache-[Cc]ontrol: private, max-age=86400, immutable'
+if [ "$(od -An -tx1 -N3 "$work/thumb.jpg" | tr -d ' \n')" != ffd8ff ]; then
+	echo "the thumbnail is no JPEG" >&2
+	exit 1
+fi
+etag=$(sed -n 's/^[Ee][Tt]ag: *//p' "$work/headers" | tr -d '\r')
+status=$(curl -s -o /dev/null -w '%{http_code}' -b "$work/cookies" -H "If-None-Match: $etag" "$base$thumb")
+if [ "$status" != 304 ]; then
+	echo "expected 304 for a cached thumbnail, got $status" >&2
+	exit 1
+fi
+status=$(curl -s -o "$work/out" -w '%{http_code}' -b "$work/cookies" -H 'Content-Type: application/json' \
+	-H "Origin: $base" -d '{}' "$base/api/documents/$id/reprocess")
+if [ "$status" != 202 ]; then
+	echo "expected 202 from reprocess, got $status" >&2
+	cat "$work/out" >&2
+	exit 1
+fi
+json "$work/out" 'd["processing"]["state"]' > "$work/state"
+expect "$work/state" '^(queued|running|done)$'
+
 echo "== backup"
 ./pgo backup "$work/backups" | tee "$work/out"
 expect "$work/out" "wrote .*paperless-[0-9TZ]+\.dump"

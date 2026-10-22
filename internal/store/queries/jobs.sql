@@ -83,10 +83,12 @@ FOR UPDATE;
 -- name: SetDocumentProcessed :exec
 -- Stores a processing result without touching modified_at. The text is
 -- replaced only when it is empty or came from processing itself
--- (own_sources): text from an import or an edit stays.
+-- (own_sources): text from an import or an edit stays. A NULL thumbnail
+-- keeps the stored one.
 UPDATE documents
 SET page_count = @page_count,
     archive_sha256 = @archive_sha256, archive_size = @archive_size,
+    thumbnail_sha256 = COALESCE(sqlc.narg(thumbnail_sha256)::text, thumbnail_sha256),
     processing_note = @processing_note,
     extracted_text = CASE WHEN extracted_text = '' OR text_source = ANY(@own_sources::text[])
                           THEN @extracted_text ELSE extracted_text END,
@@ -114,6 +116,12 @@ SELECT * FROM jobs WHERE id = @id;
 -- name: DocumentJobs :many
 -- A document's jobs, newest first.
 SELECT * FROM jobs WHERE document_id = @document_id ORDER BY id DESC;
+
+-- name: LatestDocumentJobs :many
+-- The newest process job of each of the documents: its processing status.
+SELECT DISTINCT ON (document_id) * FROM jobs
+WHERE document_id = ANY(@document_ids::uuid[]) AND kind = 'process'
+ORDER BY document_id, id DESC;
 
 -- name: JobCounts :one
 SELECT count(*) FILTER (WHERE state = 'queued' AND run_after <= @now) AS due,

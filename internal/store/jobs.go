@@ -296,7 +296,10 @@ type ProcessResult struct {
 	TextSource    string
 	ArchiveSHA256 string
 	ArchiveSize   int64
-	Note          string
+	// ThumbnailSHA256 is the thumbnail's blob; "" keeps the stored one
+	// (the thumbnail could not be made this time).
+	ThumbnailSHA256 string
+	Note            string
 }
 
 // CompleteJob stores r on j's document and marks j done, in one
@@ -326,8 +329,12 @@ func (s *Store) CompleteJob(ctx context.Context, j *Job, now time.Time, r Proces
 		if r.ArchiveSHA256 != "" {
 			archive, size = &r.ArchiveSHA256, &r.ArchiveSize
 		}
+		var thumb *string
+		if r.ThumbnailSHA256 != "" {
+			thumb = &r.ThumbnailSHA256
+		}
 		if err := q.SetDocumentProcessed(ctx, db.SetDocumentProcessedParams{
-			PageCount: r.PageCount, ArchiveSha256: archive, ArchiveSize: size, ProcessingNote: r.Note,
+			PageCount: r.PageCount, ArchiveSha256: archive, ArchiveSize: size, ProcessingNote: r.Note, ThumbnailSha256: thumb,
 			OwnSources: ownTextSources, ExtractedText: r.Text, TextSource: r.TextSource, ID: doc,
 		}); err != nil {
 			return mapErr(err)
@@ -368,6 +375,33 @@ func (s *Store) DocumentJobs(ctx context.Context, documentID string) ([]*Job, er
 	out := make([]*Job, len(rows))
 	for i, r := range rows {
 		out[i] = jobFromDB(r)
+	}
+	return out, nil
+}
+
+// LatestJobs returns the newest process job of each of the documents with
+// these IDs, by document ID: their processing status. A document without
+// one (its done job was deleted after a week) is missing from the map, as
+// are malformed IDs. The caller has checked that the documents are in its
+// scope.
+func (s *Store) LatestJobs(ctx context.Context, documentIDs []string) (map[string]*Job, error) {
+	ids := make([]pgtype.UUID, 0, len(documentIDs))
+	for _, id := range documentIDs {
+		if u, ok := parseID(id); ok {
+			ids = append(ids, u)
+		}
+	}
+	out := make(map[string]*Job, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.q.LatestDocumentJobs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		j := jobFromDB(r)
+		out[j.DocumentID] = j
 	}
 	return out, nil
 }

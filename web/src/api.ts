@@ -311,12 +311,32 @@ export interface DocumentSummary {
   originalMime: string;
   originalSize: number;
   hasArchive: boolean;
+  /** The processing status; missing only when the server could not read it after an upload. */
+  processing?: Processing;
+  /** The thumbnail's URL (with its version), or null until processing made one. */
+  thumbnailUrl?: string | null;
   /**
    * Only in a search with words: up to two fragments of the text, each
    * match between SNIPPET_START and SNIPPET_STOP. Plain text, never HTML.
    */
   snippet?: string;
 }
+
+/**
+ * A document's processing status: the state of its newest job. error is
+ * the fixed message of the last failed attempt (a failed job's reason, or
+ * why a queued one runs again at retryAt).
+ */
+export interface Processing {
+  state: "queued" | "running" | "done" | "failed";
+  error?: string;
+  attempts: number;
+  maxAttempts: number;
+  retryAt?: string;
+}
+
+/** Whether processing of d has not finished yet (queued or running). */
+export const processingPending = (d: DocumentSummary) => d.processing?.state === "queued" || d.processing?.state === "running";
 
 /** A page of GET /api/documents; nextCursor is missing on the last page. */
 export interface DocumentPage {
@@ -349,4 +369,7 @@ export const documentsApi = {
   search: (q: string, limit: number, cursor = "", signal?: AbortSignal) => getJSON<DocumentPage>(`/api/documents?${searchQuery(q, limit, cursor)}`, signal),
   /** The download URL of a document's original file or archive PDF. */
   fileURL: (id: string, kind: "original" | "archive" = "original") => `/api/documents/${encodeURIComponent(id)}/file?kind=${kind}`,
+  /** Queues a document for processing again (Retry); answers the document with its new status. */
+  reprocess: async (id: string): Promise<DocumentSummary> =>
+    (await send<DocumentSummary>("POST", `/api/documents/${encodeURIComponent(id)}/reprocess`, {}))!,
 };

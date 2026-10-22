@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type { DocumentSummary } from "./api";
-import { DocumentsHome, WindowDrop, searchPageSize } from "./Documents";
+import { DocumentsHome, WindowDrop, pollDelay, pollTimer, searchPageSize } from "./Documents";
 import { SNIPPET_START, SNIPPET_STOP } from "./snippet";
 import { FakeXHR, stubXHR } from "./fakeXHR";
 import { t } from "./i18n";
@@ -234,5 +234,113 @@ describe("WindowDrop", () => {
       window.dispatchEvent(e);
     });
     expect(screen.queryByText(t.dropHere)).toBeNull();
+  });
+});
+
+describe("processing status", () => {
+  const withStatus = (id: string, title: string, processing: DocumentSummary["processing"], thumbnailUrl: string | null = null): DocumentSummary => ({
+    ...doc(id, title),
+    processing,
+    thumbnailUrl,
+  });
+  const row = (title: string) => screen.getByText(title).closest("li")!;
+
+  /** The timers the start page set for polling, to fire them by hand. */
+  let timers: { fn: () => void; ms: number; cleared: boolean }[];
+  beforeEach(() => {
+    timers = [];
+    vi.spyOn(pollTimer, "set").mockImplementation((fn, ms) => timers.push({ fn, ms, cleared: false }));
+    vi.spyOn(pollTimer, "clear").mockImplementation((id) => {
+      timers[id - 1]!.cleared = true;
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
+  const live = () => timers.filter((x) => !x.cleared);
+
+  it("shows a badge per state, the error of a failed document and the thumbnail", async () => {
+    docs = [
+      withStatus("1", "Queued doc", { state: "queued", attempts: 0, maxAttempts: 3 }),
+      withStatus("2", "Retried doc", { state: "queued", attempts: 1, maxAttempts: 3, error: "pdfinfo failed with exit status 99.", retryAt: "2026-10-21T10:01:00Z" }),
+      withStatus("3", "Running doc", { state: "running", attempts: 1, maxAttempts: 3 }),
+      withStatus("4", "Failed doc", { state: "failed", attempts: 1, maxAttempts: 3, error: "The PDF cannot be read." }),
+      withStatus("5", "Done doc", { state: "done", attempts: 1, maxAttempts: 3 }, "/api/documents/5/thumbnail?v=0123456789abcdef"),
+    ];
+    await renderHome();
+    await screen.findByText("Done doc");
+    expect(within(row("Queued doc")).getByRole("status").textContent).toBe(t.processingQueued);
+    expect(within(row("Retried doc")).getByRole("status").textContent).toBe(t.processingRetrying);
+    expect(within(row("Running doc")).getByRole("status").textContent).toBe(t.processingRunning);
+    const failed = within(row("Failed doc"));
+    expect(failed.getByText(t.processingFailed)).toBeTruthy();
+    expect(failed.getByText("The PDF cannot be read.")).toBeTruthy();
+    expect(failed.getByRole("button", { name: t.retryDocument("Failed doc") })).toBeTruthy();
+    const done = within(row("Done doc"));
+    expect(done.queryByRole("status")).toBeNull();
+    expect(done.queryByRole("button")).toBeNull();
+    expect(row("Done doc").querySelector("img")?.getAttribute("src")).toBe("/api/documents/5/thumbnail?v=0123456789abcdef");
+    // Without a thumbnail the row has an empty frame, no image.
+    expect(row("Queued doc").querySelector("img")).toBeNull();
+    expect(within(row("Queued doc")).getByTestId("no-thumbnail")).toBeTruthy();
+  });
+
+  it("retries a failed document and shows it queued", async () => {
+    docs = [withStatus("4", "Failed doc", { state: "failed", attempts: 3, maxAttempts: 3, error: "Broken." })];
+    const posts: { url: string; init?: RequestInit }[] = [];
+    const list = globalThis.fetch;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        posts.push({ url, init });
+        return json(202, withStatus("4", "Failed doc", { state: "queued", attempts: 0, maxAttempts: 3 }));
+      }
+      return list(url);
+    });
+    await renderHome();
+    fireEvent.click(await screen.findByRole("button", { name: t.retryDocument("Failed doc") }));
+    await vi.waitFor(() => expect(within(row("Failed doc")).getByRole("status").textContent).toBe(t.processingQueued));
+    expect(posts.map((p) => p.url)).toEqual(["/api/documents/4/reprocess"]);
+    expect(new Headers(posts[0]!.init?.headers).get("Content-Type")).toBe("application/json");
+    expect(screen.queryByText("Broken.")).toBeNull();
+    // Now the list polls.
+    expect(live().map((x) => x.ms)).toEqual([pollDelay]);
+  });
+
+  it("shows why a retry failed", async () => {
+    docs = [withStatus("4", "Failed doc", { state: "failed", attempts: 3, maxAttempts: 3, error: "Broken." })];
+    const list = globalThis.fetch;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) =>
+      init?.method === "POST" ? json(503, { error: "the audit log is unavailable" }) : list(url),
+    );
+    await renderHome();
+    fireEvent.click(await screen.findByRole("button", { name: t.retryDocument("Failed doc") }));
+    expect((await screen.findByRole("alert")).textContent).toBe(t.failed("the audit log is unavailable"));
+    expect(screen.getByText("Broken.")).toBeTruthy();
+  });
+
+  it("loads the list again while documents are processed, and stops when they are done", async () => {
+    docs = [withStatus("1", "Scan", { state: "queued", attempts: 0, maxAttempts: 3 }), withStatus("2", "Old", { state: "done", attempts: 1, maxAttempts: 3 })];
+    await renderHome();
+    await screen.findByText("Scan");
+    expect(listCalls).toBe(1);
+    expect(live().map((x) => x.ms)).toEqual([pollDelay]);
+
+    docs = [withStatus("1", "Scan", { state: "running", attempts: 1, maxAttempts: 3 }), docs[1]!];
+    act(() => live()[0]!.fn());
+    await vi.waitFor(() => expect(within(row("Scan")).getByRole("status").textContent).toBe(t.processingRunning));
+    expect(listCalls).toBe(2);
+    expect(live()).toHaveLength(1);
+
+    docs = [withStatus("1", "Scan", { state: "done", attempts: 1, maxAttempts: 3 }, "/api/documents/1/thumbnail?v=00"), docs[1]!];
+    act(() => live()[0]!.fn());
+    await vi.waitFor(() => expect(row("Scan").querySelector("img")).toBeTruthy());
+    expect(listCalls).toBe(3);
+    expect(within(row("Scan")).queryByRole("status")).toBeNull();
+    expect(live()).toHaveLength(0);
+  });
+
+  it("does not poll when every document is done", async () => {
+    docs = [withStatus("2", "Old", { state: "done", attempts: 1, maxAttempts: 3 }), doc("3", "Without status")];
+    await renderHome();
+    await screen.findByText("Old");
+    expect(timers).toHaveLength(0);
   });
 });

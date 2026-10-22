@@ -27,7 +27,7 @@ change or delete entries.
 | `audit.export` | `audit export` writes the log out. |
 | `document.create` | A user uploads a document in the web UI or with an API key (with the title). |
 | `document.search` | A user searches their documents, in the web UI or with an API key: the first page of each search, with the search text and the filters. Further pages and the plain list of recent documents are not recorded. |
-| `document.reprocess` | `reprocess` queues documents for processing again (with the selection and how many it queued). |
+| `document.reprocess` | `reprocess` queues documents for processing again (with the selection and how many it queued), or a user clicks Retry on a document in the web UI or calls the API with a key (with the document). |
 | `document.import` | `import` added documents: one entry per run that imported something, naming the user who owns them, the path and the counts of imported, duplicate and failed files. |
 
 Each entry has the time, the user (by the name they had then), how they

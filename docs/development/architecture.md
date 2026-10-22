@@ -546,6 +546,24 @@ A queue in PostgreSQL turns stored documents into searchable ones
   decoded HEIC once more. The converted PDF then goes through the PDF
   steps; it is the archive even when OCR finds no text. An image the tools
   cannot read (exit status 1) fails at once.
+- **Thumbnail.** After the pipeline, `pdftoppm -f 1 -l 1 -singlefile
+  -scale-to 512 -jpeg -jpegopt quality=80` renders the first page of the
+  archive (the original PDF, OCRmyPDF's output or the image's PDF) as a
+  JPEG whose longer side is 512 pixels. It must decode as a JPEG of at most
+  512×512 pixels and 2 MiB. It is stored in the blob store before the result
+  commits, like the archive, and `documents.thumbnail_sha256` points to it.
+  A thumbnail that cannot be made is logged (with the tool's standard
+  error) and left out: the result is stored without it, and an earlier
+  thumbnail stays. Only an ended context (shutdown, timeout, lost lease)
+  ends the attempt there.
+- **Status.** The document JSON has `processing`: the state of the
+  document's newest job (`queued`, `running`, `done`, `failed`; `done`
+  when it has none, as done jobs are deleted after a week), `attempts`,
+  `maxAttempts`, and `error` (the job's `last_error`, a fixed message) for
+  a failed job and for a queued one that failed before, which also has
+  `retryAt`. One query per page reads the newest jobs
+  (`LatestDocumentJobs`, `DISTINCT ON`). The start page loads the list
+  again every 5 s while one of its documents is queued or running.
 - **Upgrade.** Migration `00010_requeue_ocr.sql` queues again the
   documents the version before OCR failed for good (scans and images,
   selected by its messages) and those it left with the old owner-password
@@ -640,6 +658,22 @@ another user's document answers `404` and an admin sees all.
   name with the stored type's extension, so `x.html` holding a PDF
   downloads as `x.pdf`. The archive PDF answers `404` until processing
   made one.
+- **`GET /api/documents/{id}/thumbnail`** sends the thumbnail as
+  `image/jpeg`, inline, with `Content-Security-Policy: sandbox`,
+  `Cross-Origin-Resource-Policy: same-origin` and the blob's hash as a
+  strong `ETag` (a matching `If-None-Match` answers `304`). The document
+  JSON has `thumbnailUrl`, this path with `v=` and the first 16 hex digits
+  of the hash, or `null` until processing made one. With the current `v`
+  the answer is `Cache-Control: private, max-age=86400, immutable` (a new
+  thumbnail gets a new URL); without it or with an old one, `private,
+  no-cache`. `404` without a thumbnail.
+- **`POST /api/documents/{id}/reprocess`** (write; a JSON body, which may
+  be `{}`) queues one document of the scope again through
+  `store.Reprocess` and writes `document.reprocess` in the same
+  transaction, with the document as target and `selection: ids`, like
+  `reprocess ID`. Answers: `202` with the document when it was queued,
+  `200` when it was queued or running already, `404` outside the scope,
+  `503` without the audit log.
 
 ## Login
 

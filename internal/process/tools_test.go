@@ -318,6 +318,42 @@ func wantOCR(t *testing.T, res Result, err error) {
 	}
 }
 
+// wantThumbnail renders the thumbnail of the PDF at path with the real
+// pdftoppm and checks that it is a JPEG whose longer side is
+// ThumbnailSize, with the page's aspect ratio (wide over tall).
+func wantThumbnail(t *testing.T, path string, ratio float64) {
+	t.Helper()
+	thumb, err := (&Pipeline{Runner: &ExecRunner{}}).Thumbnail(context.Background(), filepath.Dir(path), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(thumb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	img, err := jpeg.Decode(f)
+	if err != nil {
+		t.Fatalf("thumbnail is no JPEG: %v", err)
+	}
+	b := img.Bounds()
+	if max(b.Dx(), b.Dy()) != ThumbnailSize {
+		t.Fatalf("thumbnail %d×%d", b.Dx(), b.Dy())
+	}
+	if got := float64(b.Dx()) / float64(b.Dy()); got < ratio*0.97 || got > ratio*1.03 {
+		t.Fatalf("thumbnail %d×%d, want a ratio of %.3f", b.Dx(), b.Dy(), ratio)
+	}
+}
+
+// a4 is the aspect ratio of an A4 page.
+const a4 = 595.0 / 842.0
+
+func TestToolsThumbnail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "original")
+	makePDF(t, path, toolsText, "Seite 2")
+	wantThumbnail(t, path, a4)
+}
+
 func TestToolsScanGetsOCR(t *testing.T) {
 	scan := renderScan(t, toolsText)
 	res, err := runTools(t, func(p string) { makeScanPDF(t, p, scan, "") })
@@ -406,6 +442,7 @@ func TestToolsPNG(t *testing.T) {
 		}
 	})
 	wantOCR(t, res, err)
+	wantThumbnail(t, res.Archive, a4)
 	want := float64(scan.Bounds().Dx()) * 72 / defaultImageDPI
 	if w := pageWidth(t, res.Archive); w < want-2 || w > want+2 {
 		t.Fatalf("page width %g pt, want %g", w, want)
@@ -432,6 +469,7 @@ func TestToolsHEIC(t *testing.T) {
 		}
 	})
 	wantOCR(t, res, err)
+	wantThumbnail(t, res.Archive, a4)
 }
 
 func TestToolsDamagedImage(t *testing.T) {
