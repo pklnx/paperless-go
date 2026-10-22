@@ -766,8 +766,15 @@ func TestSearchFilterCopies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	queries := regexp.MustCompile(`(?m)^-- name: SearchDocuments`).FindAllStringIndex(string(src), -1)
+	// The filter block is also in MatchDocumentIDs (the bulk change by
+	// search), which has no snippet.
 	for _, marker := range []string{"filters", "snippet"} {
+		names := `SearchDocuments`
+		want := 5
+		if marker == "filters" {
+			names, want = `(SearchDocuments|MatchDocumentIDs)`, 6
+		}
+		queries := regexp.MustCompile(`(?m)^-- name: `+names).FindAllStringIndex(string(src), -1)
 		var copies []string
 		for _, part := range strings.Split(string(src), "-- "+marker+":begin")[1:] {
 			body, _, ok := strings.Cut(part, "-- "+marker+":end")
@@ -780,8 +787,8 @@ func TestSearchFilterCopies(t *testing.T) {
 			}
 			copies = append(copies, strings.Join(lines, "\n"))
 		}
-		if len(copies) != len(queries) || len(copies) != 5 {
-			t.Fatalf("%d %s copies for %d SearchDocuments queries, want 5", len(copies), marker, len(queries))
+		if len(copies) != len(queries) || len(copies) != want {
+			t.Fatalf("%d %s copies for %d queries, want %d", len(copies), marker, len(queries), want)
 		}
 		for i, c := range copies[1:] {
 			if c != copies[0] {

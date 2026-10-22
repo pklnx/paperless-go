@@ -396,7 +396,12 @@ const maxBody = 64 << 10
 
 // decode reads a JSON body into v and answers 400 if it cannot.
 func (s *Server) decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	dec := json.NewDecoder(io.LimitReader(r.Body, maxBody))
+	return s.decodeLimit(w, r, v, maxBody)
+}
+
+// decodeLimit is decode for a body of up to limit bytes.
+func (s *Server) decodeLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
+	dec := json.NewDecoder(io.LimitReader(r.Body, limit))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		s.fail(w, r, http.StatusBadRequest, "invalid request body: "+err.Error(), nil)

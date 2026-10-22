@@ -120,8 +120,14 @@ func (s *Server) checkColor(w http.ResponseWriter, color string) bool {
 // owner=<user ID> only that user's rows (the pickers for another user's
 // document). A non-admin may name only themselves.
 func (s *Server) listScope(w http.ResponseWriter, r *http.Request) (store.Scope, bool) {
+	return s.ownerScope(w, r, r.URL.Query().Get("owner"))
+}
+
+// ownerScope is listScope for the owner value v; ok is false after
+// answering.
+func (s *Server) ownerScope(w http.ResponseWriter, r *http.Request, v string) (store.Scope, bool) {
 	sc := requestScope(r)
-	switch v := r.URL.Query().Get("owner"); v {
+	switch v {
 	case "":
 		return sc, true
 	case "me":

@@ -77,7 +77,7 @@ the audit log.
 
 | Command | Does |
 |---|---|
-| `audit export --since DATE --format csv\|jsonl [--until DATE] [--user NAME] [--action A]... [--out FILE]` | Writes the entries of a period, oldest first, to stdout or a new file `FILE` (mode `0600`, refused if it exists). `DATE` is `YYYY-MM-DD` (midnight UTC) or RFC 3339; a plain `--until` date includes that day. `--action` takes a group (`login`, `users`, `profile`, `api_keys`, `export`) or an action such as `auth.login`, and repeats. `--user` also finds a removed user's entries, by the name they keep. The export itself is recorded as `audit.export`. In CSV, a cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'` so spreadsheets do not run it as a formula. |
+| `audit export --since DATE --format csv\|jsonl [--until DATE] [--user NAME] [--action A]... [--out FILE]` | Writes the entries of a period, oldest first, to stdout or a new file `FILE` (mode `0600`, refused if it exists). `DATE` is `YYYY-MM-DD` (midnight UTC) or RFC 3339; a plain `--until` date includes that day. `--action` takes a group (`login`, `users`, `profile`, `api_keys`, `export`, `documents`) or an action such as `auth.login`, and repeats. `--user` also finds a removed user's entries, by the name they keep. The export itself is recorded as `audit.export`. In CSV, a cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'` so spreadsheets do not run it as a formula. |
 
 With `./pgo`, `--out` must point into a directory the container can write,
 for example the data directory (`/data/...`); stdout works anywhere:
