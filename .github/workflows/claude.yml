@@ -680,9 +680,13 @@ jobs:
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "::error::The repository secret ANTHROPIC_API_KEY is missing or empty"; exit 1
           fi
+      # On a PR the action runs `git fetch origin <head branch>` before it
+      # sets up its own git credentials, so the checkout must keep its token.
+      # The action then removes the checkout's header and points origin at
+      # its own token (the same GITHUB_TOKEN) before Claude starts.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
+          persist-credentials: true
       - name: Install sandbox tools
         run: *bwrap
       - uses: anthropics/claude-code-action@a5a423f75c251dcbff8a74e99f83b2cb03c72bfa # v1.0.256
