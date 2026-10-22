@@ -8,7 +8,10 @@ decides the details, this page only the direction. Decisions already taken:
 - A server of its own, no live sync with the app. The data model follows the
   app's; import and export use the app's archive folder format.
 - OCR runs locally with OCRmyPDF and Tesseract (German and English). Mistral
-  OCR and classification are optional, with an API key.
+  OCR is optional, with an API key.
+- Classification (title, correspondent, type, tags, date) is optional through
+  an OpenAI-compatible API. An admin sets it up per server; it stays off for
+  a user until that user agrees.
 - Users and login as in mail-archive: several users, admins, password,
   passkeys, TOTP, API keys, audit log.
 - One owner per document; admins see everything. Tags, correspondents,
@@ -25,7 +28,7 @@ decides the details, this page only the direction. Decisions already taken:
 | 5 | Full-text search | PostgreSQL full-text search over title, correspondent, type, tags, ASN and text, with German and English stemming (as in mail-archive). | Search syntax (`tag:`, `type:`, date ranges). |
 | 6 | Documents in the web UI | Sidebar (inbox, favorites, tags, correspondents, types), list, detail with PDF viewer, editing, several documents at once, light and dark mode, German and English, phones. | PDF viewer: the browser's own or pdf.js. |
 | 7 | Automatic assignment | Matching rules (any, all, exact, regex), sender and issue date detection, ASN. | |
-| 8 | Mistral (optional) | Mistral OCR and Mistral Medium for title, correspondent, type, tags and date; the API key encrypted with a secret key (as IMAP passwords in mail-archive). Off by default; documents leave the server only when it is on. | Per user or per server. |
+| 8 | External OCR and classification (optional) | Mistral OCR, and classification of title, correspondent, type, tags and date through an OpenAI-compatible API; API keys encrypted with the secret key. Off by default; documents leave the server only when it is on. | Decided: per server by an admin, off until each user agrees. |
 | 9 | Archive folder import and export | Read and write the app's archive folder format (`Documents/<uuid>.pdf` and `.json`, tags, correspondents, types, saved views, tombstones), so archives move both ways. | One-time import or a recurring exchange. |
 | 10 | Deadlines and notifications | Deadlines on documents, detection, reminders through ntfy, Gotify, Slack or a webhook (mail-archive's notifier). | |
 | 11 | Notes, saved views, trash | Markdown notes, saved views, deleted documents kept 30 days. | |

@@ -61,8 +61,12 @@ services:
       PAPERLESS_GO_OCR_WORKERS: ${PAPERLESS_GO_OCR_WORKERS:-1}
       PAPERLESS_GO_OCR_LANGUAGES: ${PAPERLESS_GO_OCR_LANGUAGES:-deu+eng}
       PAPERLESS_GO_OCR_TIMEOUT: ${PAPERLESS_GO_OCR_TIMEOUT:-30m}
+      # The consume folder: files put into consume/<user>/ are imported for
+      # that user. PAPERLESS_GO_CONSUME_DIR= (empty) in .env turns it off.
+      PAPERLESS_GO_CONSUME_DIR: ${PAPERLESS_GO_CONSUME_DIR-/consume}
     volumes:
       - ${DATA_DIR:-./data}:/data
+      - ${CONSUME_DIR:-./consume}:/consume
     ports:
       # WEB_BIND=0.0.0.0 (or a LAN or Tailscale address) opens it to a network.
       - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:8080"
@@ -85,9 +89,12 @@ services:
       PAPERLESS_GO_OCR_WORKERS: ${PAPERLESS_GO_OCR_WORKERS:-1}
       PAPERLESS_GO_OCR_LANGUAGES: ${PAPERLESS_GO_OCR_LANGUAGES:-deu+eng}
       PAPERLESS_GO_OCR_TIMEOUT: ${PAPERLESS_GO_OCR_TIMEOUT:-30m}
+      # For prepare-data (./pgo migrate), which creates the consume folder.
+      PAPERLESS_GO_CONSUME_DIR: ${PAPERLESS_GO_CONSUME_DIR-/consume}
     volumes:
       # Document files. A bind mount keeps them visible on the host for backups.
       - ${DATA_DIR:-./data}:/data
+      - ${CONSUME_DIR:-./consume}:/consume
 
 volumes:
   pgdata:

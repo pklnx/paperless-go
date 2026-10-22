@@ -105,7 +105,7 @@ func TestPrepareDataDir(t *testing.T) {
 				},
 			}
 			var stdout, stderr bytes.Buffer
-			prepareDataDir(dir, &stdout, &stderr, env)
+			prepareDataDir(dir, dataDirKind, &stdout, &stderr, env)
 
 			if _, err := os.Stat(dir); err != nil {
 				t.Errorf("directory: %v", err)
@@ -137,7 +137,7 @@ func TestPrepareDataDirMkdirFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	prepareDataDir(filepath.Join(file, "data"), &stdout, &stderr, dataDirEnv{isRoot: true})
+	prepareDataDir(filepath.Join(file, "data"), dataDirKind, &stdout, &stderr, dataDirEnv{isRoot: true})
 	if !strings.Contains(stderr.String(), "could not create the data directory") {
 		t.Errorf("stderr = %q", stderr.String())
 	}

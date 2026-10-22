@@ -31,7 +31,7 @@ export COMPOSE_PROJECT_NAME PAPERLESS_GO_IMAGE
 # container instead, reusing the PostgreSQL image (it has a shell).
 in_data() {
 	docker compose --progress quiet run --rm --no-deps -T --entrypoint sh \
-		-v "$work/data:/data" postgres -c "$1"
+		-v "$work/data:/data" -v "$work/consume:/consume" postgres -c "$1"
 }
 
 cleanup() {
@@ -41,7 +41,7 @@ cleanup() {
 		docker compose logs postgres >&2 || true
 		docker compose logs web >&2 || true
 	fi
-	in_data 'rm -rf /data/* /data/.[!.]*' >/dev/null 2>&1 || true
+	in_data 'rm -rf /data/* /data/.[!.]* /consume/* /consume/.[!.]*' >/dev/null 2>&1 || true
 	docker compose --progress quiet down -v >/dev/null 2>&1 || true
 	rm -f .env
 	rm -rf "$work"
@@ -54,6 +54,7 @@ trap cleanup EXIT
 cat > .env <<ENV
 POSTGRES_PASSWORD=smoke-test
 DATA_DIR=$work/data
+CONSUME_DIR=$work/consume
 POSTGRES_PORT=${SMOKE_POSTGRES_PORT:-0}
 WEB_PORT=${SMOKE_WEB_PORT:-0}
 ENV
@@ -82,6 +83,11 @@ if [ "$(uname -s)" = Linux ]; then
 	owner=$(in_data 'stat -c %u:%g /data' | tr -d '\r')
 	if [ "$owner" != 65532:65532 ]; then
 		echo "expected the data directory to belong to 65532:65532, got $owner" >&2
+		exit 1
+	fi
+	owner=$(in_data 'stat -c %u:%g /consume' | tr -d '\r')
+	if [ "$owner" != 65532:65532 ]; then
+		echo "expected the consume folder to belong to 65532:65532, got $owner" >&2
 		exit 1
 	fi
 fi

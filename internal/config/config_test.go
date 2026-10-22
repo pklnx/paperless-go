@@ -199,6 +199,19 @@ func TestLoadRequire2FA(t *testing.T) {
 	}
 }
 
+func TestLoadConsumeDir(t *testing.T) {
+	t.Setenv(EnvDatabaseURL, "postgres://x")
+	t.Setenv(EnvConsumeDir, "")
+	cfg, err := Load()
+	if err != nil || cfg.ConsumeDir != "" {
+		t.Fatalf("unset: %+v, %v; want off", cfg, err)
+	}
+	t.Setenv(EnvConsumeDir, " /consume ")
+	if cfg, err = Load(); err != nil || cfg.ConsumeDir != "/consume" {
+		t.Fatalf("set: %q, %v", cfg.ConsumeDir, err)
+	}
+}
+
 func TestParsePublicURL(t *testing.T) {
 	for _, c := range []struct{ in, origin, rpID string }{
 		{"https://docs.example.ts.net", "https://docs.example.ts.net", "docs.example.ts.net"},
