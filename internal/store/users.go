@@ -196,6 +196,13 @@ type PasswordReset struct {
 	// password alone would not lock the attacker out. The pending audit
 	// entry gets the number removed.
 	DropPasskeys bool
+	// RevokeAPIKeys revokes the user's API keys, for the same reason; the
+	// pending audit entry gets the number revoked. By is the admin who
+	// resets the password, recorded as the revoker (nil for the CLI), and
+	// Now the time of the revocation (zero: time.Now).
+	RevokeAPIKeys bool
+	By            *int64
+	Now           time.Time
 }
 
 // ResetUserPassword stores a new password hash, ends all sessions of the
@@ -215,6 +222,15 @@ func (s *Store) ResetUserPassword(ctx context.Context, id int64, passwordHash st
 			}
 			if e := auditFrom(ctx); e != nil {
 				e.Detail("passkeysRemoved", n)
+			}
+		}
+		if opts.RevokeAPIKeys {
+			now := opts.Now
+			if now.IsZero() {
+				now = time.Now()
+			}
+			if _, err := revokeUserAPIKeys(ctx, q, id, opts.By, now); err != nil {
+				return err
 			}
 		}
 		return q.DeleteUserSessions(ctx, id)
@@ -289,7 +305,15 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 		if c := counts[id]; c.Total() > 0 {
 			return &OwnsRowsError{Counts: c}
 		}
-		// The sessions go with the user (ON DELETE CASCADE).
+		// The sessions, passkeys and API keys go with the user (ON DELETE
+		// CASCADE).
+		if e := auditFrom(ctx); e != nil {
+			n, err := q.CountActiveAPIKeys(ctx, db.CountActiveAPIKeysParams{UserID: id, Now: time.Now()})
+			if err != nil {
+				return err
+			}
+			e.Detail("apiKeysRemoved", n)
+		}
 		return one(q.DeleteUser(ctx, id))
 	})
 	if isRestrictViolation(err) && !errors.Is(err, ErrAuditUnavailable) {

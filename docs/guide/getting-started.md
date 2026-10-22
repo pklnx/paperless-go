@@ -4,10 +4,10 @@ paperless-go runs with Docker Compose: one container for PostgreSQL, one for
 the web server, and a one-shot container for commands.
 
 ::: warning Early development
-There are no documents and no OCR yet: after the login, the web UI shows
-that the server runs. Keep the web UI on `localhost` (the default) until
-API keys and the security review are done. See the
-[roadmap](../development/roadmap).
+Uploads and OCR work; search and the full document views follow. See the
+[roadmap](../development/roadmap). The web UI is published on `localhost`
+by default; to reach it from your network or a VPN, follow
+[Network access](../reference/security#network-access).
 :::
 
 ## Requirements

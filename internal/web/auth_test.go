@@ -298,7 +298,7 @@ func TestRouteTable(t *testing.T) {
 			resp, out = f.do(method, path, map[string]string{})
 		}
 		switch rt.access {
-		case accessSession:
+		case accessSession, accessRead, accessWrite:
 			if resp.StatusCode != 401 || out["error"] != "login required" {
 				t.Errorf("%s: %d %v, want 401 without a session", rt.pattern, resp.StatusCode, out)
 			}
@@ -547,16 +547,30 @@ func TestLoginRateLimitBehindProxy(t *testing.T) {
 
 func TestSecureCookie(t *testing.T) {
 	st := storetest.New(t)
-	s := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{AllowedHosts: []string{"docs.example"}, Hasher: storetest.Hasher})
+	s := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{
+		AllowedHosts: []string{"docs.example"}, Hasher: storetest.Hasher,
+		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+	})
 	storetest.User(t, st, "alice", false)
 	for _, c := range []struct {
 		name   string
+		remote string
 		header string
 		tls    bool
-	}{{"proxy", "https", false}, {"direct tls", "", true}} {
+		secure bool
+	}{
+		{"trusted proxy", "10.1.2.3:4000", "https", false, true},
+		{"loopback proxy", "127.0.0.1:4000", "https", false, true},
+		{"IPv6 loopback proxy", "[::1]:4000", "https", false, true},
+		{"direct tls", "192.0.2.1:1234", "", true, true},
+		// Anybody else could set the header: it does not count.
+		{"untrusted peer", "192.0.2.1:1234", "https", false, false},
+		{"plain http", "10.1.2.3:4000", "", false, false},
+	} {
 		t.Run(c.name, func(t *testing.T) {
 			body := `{"username":"alice","password":"` + storetest.Password + `"}`
 			req := httptest.NewRequest("POST", "https://docs.example/api/session", strings.NewReader(body))
+			req.RemoteAddr = c.remote
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Origin", "https://docs.example")
 			if c.header != "" {
@@ -573,8 +587,12 @@ func TestSecureCookie(t *testing.T) {
 				t.Fatalf("status %d: %s", rec.Code, rec.Body)
 			}
 			cookies := rec.Result().Cookies()
-			if len(cookies) != 1 || cookies[0].Name != secureCookieName || !cookies[0].Secure {
-				t.Fatalf("cookies: %+v", cookies)
+			want := cookieName
+			if c.secure {
+				want = secureCookieName
+			}
+			if len(cookies) != 1 || cookies[0].Name != want || cookies[0].Secure != c.secure {
+				t.Fatalf("cookies: %+v, want %s secure=%v", cookies, want, c.secure)
 			}
 		})
 	}

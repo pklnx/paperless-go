@@ -168,8 +168,8 @@ func newServeCmd() *cobra.Command {
 Everything but the health check and the UI code needs a login; create the
 first admin with "user add NAME --admin". Admins (and everybody with
 ` + config.EnvRequire2FA + `=true) log in with a password and a TOTP code; they
-set it up at their first login. Keep the server on 127.0.0.1 until API keys
-and the security review are done (see the security docs).
+set it up at their first login. Scripts use API keys ("Authorization: Bearer
+pl_…"), created on the profile page, with the scopes read and write.
 
 ` + config.EnvSecretKey + ` is required: it encrypts the TOTP secrets.
 Generate it once with "keygen" and keep it with your backups; without it
@@ -183,7 +183,9 @@ Requests are only accepted with a Host header listed in
 ` + config.EnvAllowedHosts + ` (default: localhost, 127.0.0.1, ::1), which blocks DNS
 rebinding; state-changing requests must come from the same origin. Use HTTPS
 (a reverse proxy or tailscale serve) when the server is reachable from a
-network.
+network, and list the proxy in ` + config.EnvTrustedProxies + `: only then
+X-Forwarded-For and X-Forwarded-Proto count (X-Forwarded-Proto also from
+loopback).
 
 It also processes queued documents in the background (` + config.EnvOCRWorkers + `
 at a time, default 1; 0 turns it off).`,

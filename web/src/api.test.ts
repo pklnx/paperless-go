@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, UNAUTHORIZED_EVENT, ownsData, passkeyApi, profileApi, retryAfter, sessionApi, unknownPasskey, usersApi, type ManagedUser } from "./api";
+import { ApiError, UNAUTHORIZED_EVENT, apiKeyApi, ownsData, passkeyApi, profileApi, retryAfter, sessionApi, unknownPasskey, usersApi, type ManagedUser } from "./api";
 
 const reply = (status: number, body?: unknown) =>
   vi
@@ -122,14 +122,33 @@ describe("users and profile", () => {
     expect(fetch.mock.calls[1]![1]?.method).toBe("DELETE");
   });
 
-  it("resets a password, removing passkeys or not", async () => {
+  it("resets a password, removing passkeys and revoking API keys or not", async () => {
     const fetch = reply(200, { name: "kim", password: "p" });
-    expect(await usersApi.resetPassword("kim", true)).toEqual({ name: "kim", password: "p" });
+    expect(await usersApi.resetPassword("kim", true, true)).toEqual({ name: "kim", password: "p" });
     expect(fetch.mock.calls[0]![0]).toBe("/api/users/kim/password");
-    expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual({ removePasskeys: true });
+    expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual({ removePasskeys: true, revokeApiKeys: true });
     reply(200, { name: "kim", password: "p" });
-    await usersApi.resetPassword("kim", false);
-    expect(JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls.at(-1)![1]?.body))).toEqual({ removePasskeys: false });
+    await usersApi.resetPassword("kim", false, false);
+    expect(JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls.at(-1)![1]?.body))).toEqual({ removePasskeys: false, revokeApiKeys: false });
+  });
+
+  it("creates, lists and revokes API keys", async () => {
+    const fetch = reply(201, { id: 3, name: "scan", key: "pl_x" });
+    const input = { name: "scan", scopes: ["write" as const], expiresInDays: 90, currentPassword: "pw", code: "" };
+    expect((await apiKeyApi.create(input)).key).toBe("pl_x");
+    expect(fetch.mock.calls[0]![0]).toBe("/api/profile/api-keys");
+    expect(fetch.mock.calls[0]![1]?.method).toBe("POST");
+    expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual(input);
+    reply(204);
+    await apiKeyApi.revoke(3);
+    expect(vi.mocked(globalThis.fetch).mock.calls.at(-1)![0]).toBe("/api/profile/api-keys/3");
+    reply(200, { keys: [{ id: 4, user: "kim" }] });
+    expect(await apiKeyApi.listAll()).toEqual([{ id: 4, user: "kim" }]);
+    expect(vi.mocked(globalThis.fetch).mock.calls.at(-1)![0]).toBe("/api/api-keys");
+    reply(204);
+    await apiKeyApi.revokeAny(4);
+    expect(vi.mocked(globalThis.fetch).mock.calls.at(-1)![0]).toBe("/api/api-keys/4");
+    expect(vi.mocked(globalThis.fetch).mock.calls.at(-1)![1]?.method).toBe("DELETE");
   });
 
   it("removes a user's passkeys", async () => {
@@ -168,6 +187,7 @@ describe("users and profile", () => {
       mustChangePassword: false,
       twoFactorEnabled: false,
       passkeys: 0,
+      apiKeys: 0,
       owned: { documents: 0, tags: 0, correspondents: 0, documentTypes: 0, savedViews: 0, ...owned },
       createdAt: "",
       lastLoginAt: null,

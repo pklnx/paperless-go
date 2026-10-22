@@ -12,8 +12,10 @@ type access int
 
 const (
 	accessSession access = iota // a session only; the zero value, so a forgotten field is the strictest
-	accessLogin                 // the login endpoints: no session needed
+	accessLogin                 // the login endpoints: no session needed, refused with a key
 	accessPublic                // no login: the health check and the UI code
+	accessRead                  // a session or an API key with "read"
+	accessWrite                 // a session or an API key with "write"
 )
 
 // body says what a state-changing request to a route may carry. protect
@@ -60,12 +62,17 @@ func (s *Server) routes() []route {
 		h("POST /api/profile/passkeys/finish", s.handleFinishPasskeyRegistration, accessSession),
 		h("DELETE /api/profile/passkeys/{id}", s.handleRemovePasskey, accessSession),
 
+		h("GET /api/profile/api-keys", s.handleListAPIKeys, accessSession),
+		h("POST /api/profile/api-keys", s.handleCreateAPIKey, accessSession),
+		h("DELETE /api/profile/api-keys/{id}", s.handleRevokeOwnAPIKey, accessSession),
+
+		// Users see their own entries, admins everyone's.
 		h("GET /api/audit", s.handleAudit, accessSession),
 
-		{pattern: "POST /api/documents", handler: http.HandlerFunc(s.handleUpload), access: accessSession, body: bodyFile},
-		h("GET /api/documents", s.handleListDocuments, accessSession),
-		h("GET /api/documents/{id}", s.handleGetDocument, accessSession),
-		h("GET /api/documents/{id}/file", s.handleDocumentFile, accessSession),
+		{pattern: "POST /api/documents", handler: http.HandlerFunc(s.handleUpload), access: accessWrite, body: bodyFile},
+		h("GET /api/documents", s.handleListDocuments, accessRead),
+		h("GET /api/documents/{id}", s.handleGetDocument, accessRead),
+		h("GET /api/documents/{id}/file", s.handleDocumentFile, accessRead),
 
 		h("GET /api/users", s.handleListUsers, accessSession),
 		h("POST /api/users", s.handleCreateUser, accessSession),
@@ -74,6 +81,8 @@ func (s *Server) routes() []route {
 		h("POST /api/users/{name}/password", s.handleResetUserPassword, accessSession),
 		h("POST /api/users/{name}/2fa/reset", s.handleResetUserTwoFactor, accessSession),
 		h("DELETE /api/users/{name}/passkeys", s.handleRemoveUserPasskeys, accessSession),
+		h("GET /api/api-keys", s.handleListAllAPIKeys, accessSession),
+		h("DELETE /api/api-keys/{id}", s.handleRevokeAnyAPIKey, accessSession),
 
 		// Every other path under /api/: a JSON 404, after the login.
 		h("/api/", s.handleUnknownAPI, accessSession),

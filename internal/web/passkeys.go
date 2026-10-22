@@ -236,7 +236,7 @@ func (s *Server) handleFinishPasskeyLogin(w http.ResponseWriter, r *http.Request
 		_ = s.store.DeleteSession(r.Context(), auth.HashSessionToken(old))
 	}
 	s.log.Info("login", "user", u.Name, "addr", s.clientIP(r), "passkey", login.PasskeyName)
-	setSessionCookie(w, r, token, auth.MaxSessionAge)
+	s.setSessionCookie(w, r, token, auth.MaxSessionAge)
 	s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(u.Name, u.IsAdmin, u.MustChangePassword, u.TwoFactorEnabled)})
 }
 
