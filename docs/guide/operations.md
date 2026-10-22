@@ -66,6 +66,13 @@ Admins set up two-factor login at their next login (nobody is locked out:
 the password still logs them in, to the setup). Rolling the migration back
 (`migrate down`) turns 2FA off for everybody.
 
+**Consume folder (#4).** Compose now mounts a consume folder
+(`CONSUME_DIR`, default `./consume`) and the web server imports from it.
+Run `./pgo migrate` before `docker compose up -d web`: it creates the folder
+and makes it writable for the container user. Set
+`PAPERLESS_GO_CONSUME_DIR=` (empty) in `.env` to turn it off. See [Consume
+folder](./import#consume-folder).
+
 **Passkeys (#19).** Set `PAPERLESS_GO_PUBLIC_URL` in `.env` to the
 address you open (with HTTPS) to turn passkeys on, then `./pgo migrate`
 and `docker compose up -d web`. Without it nothing changes. Rolling the

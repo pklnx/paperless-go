@@ -1,6 +1,7 @@
 .git
 .github
 data
+consume
 .env
 *.test
 *.out

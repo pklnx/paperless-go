@@ -31,6 +31,7 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 | `internal/config` | Configuration from `PAPERLESS_GO_*` environment variables. |
 | `internal/blobstore` | Content-addressed document files: named by their SHA-256 without extension (`documents/ab/cd/<sha256>`), published and removed durably (see [Blob durability](#blob-durability)). |
 | `internal/ingest` | Imports one file as a document: type detection from the content (PDF, JPEG, PNG, HEIC/HEIF), the size and 50-megapixel limits, then the blob store, the duplicate check and the row (see [Ingest](#ingest)). |
+| `internal/consume` | The consume folder: polls `consume/<user>/`, imports settled files through `internal/ingest`, deletes or moves them (see [Consume folder](#consume-folder)). |
 | `internal/process` | The processing queue's worker: claims jobs, runs the tools (`Runner`) in a work directory, stores text, page count and archive PDF (see [Processing](#processing)). |
 | `internal/store` | PostgreSQL access: migrations (goose, embedded), queries (sqlc, generated into `internal/store/db`). |
 | `internal/store/storetest` | A throwaway, migrated database per test. |
@@ -230,6 +231,59 @@ untouched), calls `Import` per file and writes one `document.import` audit
 entry per run (the importer's per-file transactions have no audit entry of
 their own); `--dry-run` uses `Detect` and `FindDocumentByOriginal` only. `CreateDocument` queues every new document for
 [processing](#processing), which builds the archive PDF.
+
+## Consume folder
+
+`internal/consume` runs in `serve` when `PAPERLESS_GO_CONSUME_DIR` is set
+(Compose: `/consume`, bind-mounted from `CONSUME_DIR`; `prepare-data`
+creates it). One scan every 10 s (the trigger and the clock are injected):
+
+- **Tree.** Everything is reached through an `os.Root` of the consume
+  folder and checked with `Lstat`: only real directories are user folders,
+  only regular files are inputs; symlinks are never followed (skipped, left
+  in place, logged once). A folder or file opened after the check must be
+  the same file (`os.SameFile`), and files are opened with `O_NONBLOCK`, so
+  a FIFO swapped in cannot block the scan.
+- **Users.** Each scan lists the users and creates the missing folders
+  (with the consume folder's permissions). Names are matched exactly; names
+  that are not a single safe component (`.`, `..`, a leading dot) get no
+  folder. Unknown entries, loose files and locked users' folders are left
+  alone with one warning each (a problem that goes away is forgotten).
+- **Settling.** A file is imported when an earlier scan at least 2 s ago saw
+  the same file (identity), size and modification time. Hidden names,
+  `*.part`, `*.tmp`, `~$*`, subfolders and `failed/` are ignored.
+- **Completeness.** A settled PDF also needs `%%EOF` in its last 1 KiB, a
+  JPEG `FF D9` and a PNG its `IEND` chunk in the last 32 bytes (some padding
+  allowed), so a writer that paused for longer than two scans does not get a
+  truncated file imported and deleted. A file without the marker waits and
+  is imported anyway after 10 minutes unchanged (`IncompleteTime`).
+  HEIC/HEIF has no reliable marker and only settles.
+- **Outcomes.** `Imported` and `Duplicate` delete the file, after the
+  committed row, only if `Lstat` still shows the version that was read.
+  A `Duplicate` whose existing document is gone (empty ID) keeps the file
+  for the next scan, which imports it as new.
+  `Refused` moves it to `failed/` under a free name (`name-N.ext`, checked
+  together with its sidecar, with the stem shortened so that the sidecar's
+  name fits in 255 bytes; the check and the rename are not atomic, the
+  consumer is the only expected writer) and writes `<name>.error.txt`. A
+  read error of the file itself leaves it in place (logged once, held like
+  below) and the scan goes on; any other import error (database, blob store, shutdown)
+  stops the scan and leaves the files for the next one. `ErrUnknownUser` (a
+  user removed during the scan) skips the rest of that user's folder.
+  `Run` logs a failing scan once until the error changes.
+  A file that was read but cannot be deleted or moved (a folder that is not
+  writable, `failed/` that is not a folder) is held for an hour unless it
+  changes, so it is not read and stored again at every scan.
+- **Overlap.** `serve` refuses a consume folder that is the data directory,
+  inside it or around it (after resolving symlinks): the consumer would
+  delete document files.
+- **Limit.** A file that changes after it settled but while it is read may
+  be imported in its partial state; it then stays and is imported again as
+  a new document once it settles. The recheck before `Remove` and the
+  `Remove` itself are not atomic.
+- **Audit.** No audit entry: the audit log's actors are `session`,
+  `api_key` and `cli`, none of which fits the server itself. The log has an
+  info line per consumed file.
 
 ## Processing
 

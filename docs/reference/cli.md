@@ -9,7 +9,7 @@ command.
 | `migrate` (`migrate up`) | Applies all pending database migrations. `./pgo migrate` also makes a fresh data directory writable for the container user. |
 | `migrate status` | Lists applied and pending migrations. |
 | `migrate down --yes` | Rolls back the most recent migration. Usually deletes data; for development. |
-| `serve [--listen ADDR]` | Runs the web server (default `127.0.0.1:8080`; `:8080` in Compose). Refuses to start without `PAPERLESS_GO_SECRET_KEY` and while migrations are pending. |
+| `serve [--listen ADDR]` | Runs the web server (default `127.0.0.1:8080`; `:8080` in Compose). Refuses to start without `PAPERLESS_GO_SECRET_KEY` and while migrations are pending. Also processes the queue and, with `PAPERLESS_GO_CONSUME_DIR`, imports the [consume folder](../guide/import#consume-folder). |
 | `process [--until-empty]` | Processes queued documents in the foreground (see [Processing](#processing)); with `--until-empty` it stops when none is due. |
 | `reprocess [--failed \| --all \| ID...]` | Queues documents for processing again. |
 | `keygen` | Prints a new random secret key for `PAPERLESS_GO_SECRET_KEY` (32 bytes, base64). Run it once at the first install; changing the key later breaks every two-factor login. |
