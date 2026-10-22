@@ -145,6 +145,13 @@ check `server_version_num` first. `serve` and
 `process` refuse to start while it is stale. The GIN search index needs no
 rebuild: lexemes compare bytewise.
 
+The database order of names depends on that locale, so the web UI sorts every
+visible name list itself with `web/src/collate.ts`: `Intl.Collator` in the UI
+language, numeric ("2" before "10"), and for strings the collator treats as
+equal, UTF-16 code unit order. The order is the same on every installation.
+Keyset-paged lists keep the server's order, and saved views keep their manual
+order (`sort_index`).
+
 ## Search index
 
 Full-text search (#6) runs in PostgreSQL. Part 1 (`00011_search.sql`) adds

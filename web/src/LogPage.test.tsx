@@ -37,12 +37,12 @@ const entries: AuditEntry[] = [
 
 let urls: string[];
 
-function stubServer(pages: Record<string, { entries: AuditEntry[]; nextCursor?: string }>) {
+function stubServer(pages: Record<string, { entries: AuditEntry[]; nextCursor?: string }>, userNames = ["alice", "bob"]) {
   urls = [];
   vi.stubGlobal("fetch", async (url: string) => {
     urls.push(url);
     const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
-    if (url === "/api/users") return json({ users: [{ name: "alice" }, { name: "bob" }] });
+    if (url === "/api/users") return json({ users: userNames.map((name) => ({ name })) });
     const cursor = new URL(url, "http://x").searchParams.get("cursor") ?? "";
     return json(pages[cursor] ?? { entries: [] });
   });
@@ -68,6 +68,16 @@ describe("LogPage", () => {
     expect(screen.getByText(/· alice/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: t.logMore })).toBeNull();
     expect(urls.some((u) => u.includes("cursor=c1"))).toBe(true);
+  });
+
+  it("lists the people after the fixed entries in collator order", async () => {
+    stubServer({ "": { entries: [] } }, ["b", "a.b", "a"]);
+    render(<LogPage admin />);
+    await vi.waitFor(() => expect(screen.getAllByRole("option", { name: "a.b" })).toHaveLength(1));
+    const who = (screen.getByText(t.logWho).querySelector("select") as HTMLSelectElement).options;
+    const names = Array.from(who, (o) => o.textContent);
+    expect(names.slice(0, 3)).toEqual([t.logEveryone, t.logCommandLine, t.logApiKeys]);
+    expect(names.slice(3)).toEqual(["a", "a.b", "b"]);
   });
 
   it("filters by action and person", async () => {
