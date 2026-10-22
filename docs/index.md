@@ -20,7 +20,7 @@ features:
   - title: Plain files
     details: Documents are stored as PDF files on disk, metadata and the search index in PostgreSQL.
   - title: Text recognition
-    details: Scans and image-only PDFs get a text layer with OCRmyPDF and Tesseract (German and English), on your server. Mistral OCR is optional.
+    details: Scans and image-only PDFs get a text layer with OCRmyPDF and Tesseract (German and English), on your server. Mistral OCR and classification through an OpenAI-compatible API are optional.
   - title: Correspondents, types, tags
     details: The same data model as the Document Archive app, with matching rules for automatic assignment.
   - title: Runs anywhere Docker runs

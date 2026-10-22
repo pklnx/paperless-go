@@ -38,7 +38,7 @@ pull request without tests for the behavior it changes is not ready for
 review.
 
 - Tests never touch real documents, real credentials or the network. External
-  services (Mistral) are stubbed with `httptest` servers.
+  services (Mistral, OpenAI-compatible APIs) are stubbed with `httptest` servers.
 - Tests wait for signals, never for time: no `time.Sleep`, no fixed delays. A
   timeout is only the safety net for a signal that never comes.
 - Test documents are generated or small files in `testdata/`, never real

@@ -30,7 +30,8 @@ follow step by step; see the
 - **Plain files.** Documents are PDF files on disk; metadata and the search
   index live in PostgreSQL.
 - **Text recognition** with OCRmyPDF and Tesseract (German and English) on
-  your server; Mistral OCR and classification optional.
+  your server; Mistral OCR and classification
+  through an OpenAI-compatible API optional.
 - **Correspondents, document types, nested tags, ASN** and matching rules for
   automatic assignment, as in the app.
 - **Full-text search** with German and English stemming.
