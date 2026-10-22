@@ -60,6 +60,11 @@ type Server struct {
 	// client.
 	apiKeyRate *auth.Rate
 	badKeyRate *auth.Rate
+	// unknownKeyAudit allows one audit entry for an unknown API key per
+	// client and window; openLoginLog one log line per client and minute
+	// for the caps on open passkey logins.
+	unknownKeyAudit *auth.Rate
+	openLoginLog    *auth.Rate
 	// blobs holds the document files and importer imports uploads into
 	// it; without blobs the document routes answer 503.
 	blobs    *blobstore.Store
@@ -141,10 +146,15 @@ func New(st *store.Store, log *slog.Logger, opts Options) *Server {
 	apiKeyRate.SetClock(now)
 	badKeyRate := auth.NewRate(badAPIKeyLimit, apiKeyWindow)
 	badKeyRate.SetClock(now)
+	unknownKeyAudit := auth.NewRate(1, apiKeyWindow)
+	unknownKeyAudit.SetClock(now)
+	openLoginLog := auth.NewRate(1, time.Minute)
+	openLoginLog.SetClock(now)
 	s := &Server{
 		store: st, db: pinger, log: log, allowedHosts: hosts, hasher: hasher, now: now, limiter: limiter,
 		trustedProxies: opts.TrustedProxies, sealer: opts.Sealer, secretKey: opts.SecretKey, require2FA: opts.Require2FA,
 		webauthn: wa, publicOrigin: origin, passkeyBegins: passkeyBegins, apiKeyRate: apiKeyRate, badKeyRate: badKeyRate,
+		unknownKeyAudit: unknownKeyAudit, openLoginLog: openLoginLog,
 	}
 	if opts.Blobs != nil && st != nil {
 		maxSize := opts.MaxUploadSize
@@ -219,16 +229,25 @@ func (s *Server) handleUnknownAPI(w http.ResponseWriter, r *http.Request) {
 	s.fail(w, r, http.StatusNotFound, "not found", nil)
 }
 
+// newHTTPServer is the HTTP server for handler. A request has 10 seconds
+// for its headers (at most 64 KiB) and 30 for its body, which is enough for
+// every JSON body (at most maxBody); uploads and downloads set their own
+// hour-long read and write deadlines (transferTimeout).
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+	}
+}
+
 // ListenAndServe serves until ctx is cancelled, then shuts down gracefully.
 func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           s.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       5 * time.Minute, // document uploads
-		WriteTimeout:      5 * time.Minute, // document downloads
-		IdleTimeout:       2 * time.Minute,
-	}
+	srv := newHTTPServer(addr, s.Handler())
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	go s.housekeeping(ctx)

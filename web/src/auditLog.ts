@@ -35,7 +35,8 @@ export function entryDetail(e: AuditEntry, m: Messages = t): string {
   if (e.action === "document.search") return str(d.q) && m.logTriedName(str(d.q));
   if (e.action === "document.consume" || e.action === "document.import") {
     const count = (v: unknown, text: (n: number) => string) => (typeof v === "number" && v > 0 ? text(v) : "");
-    return [count(d.imported, m.logImported), count(d.duplicates, m.logDuplicates), count(d.failed, m.logFailedFiles)].filter(Boolean).join(", ");
+    const counts = [count(d.imported, m.logImported), count(d.duplicates, m.logDuplicates), count(d.failed, m.logFailedFiles)].filter(Boolean).join(", ");
+    return d.interrupted === true ? [counts, m.logInterrupted].filter(Boolean).join(" · ") : counts;
   }
   if (e.action === "user.passkeys_removed" && typeof d.count === "number") return m.passkeyCount(d.count);
   if (e.action === "user.password_reset" && typeof d.passkeysRemoved === "number" && d.passkeysRemoved > 0) return `${m.removePasskeys}: ${d.passkeysRemoved}`;

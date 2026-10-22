@@ -18,9 +18,9 @@ import (
 )
 
 // Uploads and downloads may take longer than the server's read and write
-// timeouts (5 minutes), which are meant for every other request: a
-// 100 MiB file over a slow line needs more. These routes extend their own
-// deadlines.
+// timeouts (30 seconds to read, 5 minutes to write), which are meant for every
+// other request: a 100 MiB file over a slow line needs more. These routes
+// extend both of their own deadlines.
 const transferTimeout = time.Hour
 
 // fileNameHeader carries the uploaded file's name, percent-encoded (a
@@ -468,7 +468,13 @@ func (s *Server) handleDocumentFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = f.Close() }()
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(transferTimeout))
+	// The read deadline too: in HTTP/1, the server's background read of
+	// a request without a body ends at the read deadline and cancels the
+	// request's context, which a long download would otherwise outlive.
+	rc := http.NewResponseController(w)
+	deadline := time.Now().Add(transferTimeout)
+	_ = rc.SetReadDeadline(deadline)
+	_ = rc.SetWriteDeadline(deadline)
 	h := w.Header()
 	h.Set("Content-Type", mimeType)
 	h.Set("Content-Disposition", contentDisposition(name))

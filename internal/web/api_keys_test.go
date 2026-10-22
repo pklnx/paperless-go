@@ -691,9 +691,11 @@ func TestAPIKeyRates(t *testing.T) {
 	// Password logins are not affected.
 	f.as().loginOK("kim", keyPassword)
 
+	// An unknown key is recorded once per client and window (the other
+	// new entry is the password login).
 	entries := newEntries(t, f.st, n)
-	if len(entries) < badAPIKeyLimit {
-		t.Fatalf("%d entries for refused keys", len(entries))
+	if len(entries) != 2 || entries[1].Action != "auth.login" {
+		t.Fatalf("%d new entries, want one for the refused keys and the login", len(entries))
 	}
 	if r := entries[0]; r.Action != "auth.login_failed" || details(t, r)["method"] != "api_key" || details(t, r)["reason"] != "invalid" || r.UserID != nil {
 		t.Errorf("refused key entry %+v %v", r, details(t, r))

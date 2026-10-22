@@ -57,8 +57,12 @@ consume/            CONSUME_DIR in .env, default ./consume
 - **Audit log.** Each look that imported, deleted or moved files in your
   folder adds one entry to your [log](./audit-log), made by the server,
   with how many files it imported, how many duplicates it deleted and how
-  many it moved to `failed/` (no file names). A file that is tried again
-  is counted only once it is deleted or moved.
+  many it moved to `failed/` (no file names). An imported file counts
+  once, when its document is stored, even if the file cannot be deleted. It
+  is then tried again after an hour as a duplicate. A duplicate or a file
+  for `failed/` counts only once it is deleted or moved, so a try that
+  fails again is not counted. An entry says "interrupted" when the scan
+  stopped early.
 
 With Docker Compose the consume folder is on: `./pgo migrate` creates it
 and makes it writable for the container user, UID 65532, which must be able

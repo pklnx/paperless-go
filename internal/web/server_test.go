@@ -2,14 +2,17 @@ package web
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -54,6 +57,52 @@ func TestSecurityHeaders(t *testing.T) {
 		if got := rec.Header().Get(name); got != want {
 			t.Errorf("%s = %q, want %q", name, got, want)
 		}
+	}
+}
+
+// HSTS is sent exactly where the request came over HTTPS.
+func TestStrictTransportSecurity(t *testing.T) {
+	h := New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{
+		Pinger: fakeDB{}, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+	}).Handler()
+	for _, c := range []struct {
+		name   string
+		remote string
+		proto  string
+		tls    bool
+		want   string
+	}{
+		{"direct TLS", "192.0.2.1:1234", "", true, "max-age=31536000"},
+		{"loopback proxy", "127.0.0.1:4000", "https", false, "max-age=31536000"},
+		{"trusted proxy", "10.1.2.3:4000", "https", false, "max-age=31536000"},
+		{"plain HTTP", "192.0.2.1:1234", "", false, ""},
+		{"plain HTTP from a trusted proxy", "10.1.2.3:4000", "http", false, ""},
+		{"untrusted peer claims HTTPS", "192.0.2.1:1234", "https", false, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "http://localhost/healthz", nil)
+			r.RemoteAddr = c.remote
+			if c.proto != "" {
+				r.Header.Set("X-Forwarded-Proto", c.proto)
+			}
+			if c.tls {
+				r.TLS = &tls.ConnectionState{}
+			}
+			rec := serve(h, r)
+			if got := rec.Header().Values("Strict-Transport-Security"); c.want == "" && len(got) != 0 || c.want != "" && (len(got) != 1 || got[0] != c.want) {
+				t.Errorf("Strict-Transport-Security = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// The server's timeouts: ListenAndServe uses newHTTPServer.
+func TestNewHTTPServer(t *testing.T) {
+	h := http.NotFoundHandler()
+	srv := newHTTPServer(":1234", h)
+	if srv.Addr != ":1234" || srv.Handler == nil || srv.ReadHeaderTimeout != 10*time.Second || srv.ReadTimeout != 30*time.Second ||
+		srv.WriteTimeout != 5*time.Minute || srv.IdleTimeout != 2*time.Minute || srv.MaxHeaderBytes != 64<<10 {
+		t.Errorf("server %+v", srv)
 	}
 }
 

@@ -613,3 +613,36 @@ func TestDocumentsWithoutBlobStore(t *testing.T) {
 		t.Fatalf("status %d", rec.Code)
 	}
 }
+
+// deadlineRecorder records the deadlines a handler sets through
+// http.ResponseController.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	read, write time.Time
+}
+
+func (d *deadlineRecorder) SetReadDeadline(t time.Time) error  { d.read = t; return nil }
+func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error { d.write = t; return nil }
+
+// A download extends its read deadline too, not only the write deadline:
+// with HTTP/1 the server's background read ends at the read deadline (30
+// seconds) and cancels the request's context.
+func TestDocumentFileExtendsDeadlines(t *testing.T) {
+	f := newAuthFixture(t)
+	f.addUser("alice", "correct horse battery", false)
+	f.loginOK("alice", "correct horse battery")
+	id := f.uploadOK("a.pdf", pdf("deadline"))
+	r := httptest.NewRequest("GET", "http://127.0.0.1/api/documents/"+id+"/file", nil)
+	r.AddCookie(f.sessionCookie())
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	start := time.Now()
+	f.handler.ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	for name, d := range map[string]time.Time{"read": rec.read, "write": rec.write} {
+		if d.Before(start.Add(transferTimeout)) {
+			t.Errorf("%s deadline %v, want at least %v after the start", name, d.Sub(start), transferTimeout)
+		}
+	}
+}

@@ -62,7 +62,23 @@ const (
 	reasonSecondFactor   = "second_factor"
 	reasonUnknownPasskey = "unknown_passkey"
 	reasonPasskeyInvalid = "passkey_invalid"
+	reasonInvalid        = "invalid"
+	reasonRateLimited    = "rate_limited"
 )
+
+// logRefused writes the one log line of a refused credential, the same for
+// every method, for fail2ban-style tools: "login refused" with method,
+// reason, the client address and, for a known name, the user (only a valid
+// user name, see loggableUserName). Never the password, code or key. A
+// limit's refusals (rate_limited) are logged once per limit key and
+// window, not once per request.
+func (s *Server) logRefused(r *http.Request, method, reason, name string) {
+	args := []any{"method", method, "reason", reason, "addr", s.clientIP(r)}
+	if name != "" {
+		args = append(args, "user", loggableUserName(name))
+	}
+	s.log.Info("login refused", args...)
+}
 
 // auditSecondFactorFailed records a refused password or code when a
 // logged-in user changes their own 2FA (attempted names the change). Best
@@ -74,10 +90,15 @@ func (s *Server) auditSecondFactorFailed(r *http.Request, attempted, reason stri
 	s.auditBestEffort(r, e)
 }
 
-// auditLoginFailed records a refused login. Without a known user, the name
-// is kept only if it is a valid user name (see loggableUserName), so that a
-// password typed into the name field is not stored.
+// auditLoginFailed records a refused login and logs it (logRefused).
+// Without a known user, the name is kept only if it is a valid user name
+// (see loggableUserName), so that a password typed into the name field is
+// not stored.
 func (s *Server) auditLoginFailed(r *http.Request, method, reason, name string, u *store.User) {
+	if u != nil {
+		name = u.Name
+	}
+	s.logRefused(r, method, reason, name)
 	e := s.auditEntry(r, "auth.login_failed")
 	e.Detail("method", method)
 	e.Detail("reason", reason)

@@ -137,7 +137,12 @@ only over HTTPS or on `localhost`, so they do not work this way.
   (the block a host or network usually gets), IPv4 clients per address.
   The counters live in memory and reset when the server restarts. Behind a
   reverse proxy, set `PAPERLESS_GO_TRUSTED_PROXIES` so the limits count per
-  client (see [Trusted proxies](#trusted-proxies)).
+  client (see [Trusted proxies](#trusted-proxies)). Every refused login is
+  logged ([below](#refused-logins-in-the-log)).
+- **Slow clients.** A request has 10 seconds for its headers (at most
+  64 KiB) and 30 seconds for its body; answers have 5 minutes. Uploads and
+  document downloads extend both to an hour for themselves, so a large
+  file over a slow line still works.
 - **Sessions** end after 7 days without use and after 30 days at the latest.
   The cookie is `HttpOnly` and `SameSite=Strict`; over HTTPS (also behind a
   [trusted proxy](#https-behind-a-proxy) that sends `X-Forwarded-Proto:
@@ -286,11 +291,14 @@ only over HTTPS or on `localhost`, so they do not work this way.
   user's keys. Revoked and expired keys answer `401` and stay listed for
   30 days. `./pgo user api-keys NAME` lists a user's keys.
 - **Limits.** Each key may make 600 requests per minute; more than 30
-  invalid keys per client address and minute answer `429` for that client,
+  refused keys per client address and minute answer `429` for that client,
   without touching the password login limits. Keys never appear in logs
-  or in the audit log; a refused key is recorded as `auth.login_failed`
-  with `method: api_key`, its reason (`invalid`, `revoked`, `expired`,
-  `locked`) and, if it exists, its name and owner.
+  or in the audit log. A refused key that exists is recorded each time as
+  `auth.login_failed` with `method: api_key`, its reason (`revoked`,
+  `expired`, `locked`), its name and owner. An unknown key (`invalid`) is
+  recorded only once per client address (IPv6 per `/64`) and minute, so
+  that guessing without a login cannot grow the append-only log without
+  bound; every refused key is logged ([below](#refused-logins-in-the-log)).
 - **No cookie with a key.** A request with a key is decided by the key
   alone: the session cookie is never read, also when the key is invalid.
   A key does not log in or out (`403`).
@@ -315,7 +323,7 @@ The [audit log](../guide/audit-log) records:
 | What | Recorded |
 |---|---|
 | Logins and logouts | The user, client address, user agent, method (`password`, `passkey` with the passkey's name, or `2fa` with the factor `totp` or `recovery_code` and, for a recovery code, how many are left). |
-| Failed logins | The reason (`wrong_password`, `unknown_user`, `locked`, `second_factor`, `unknown_passkey`, `passkey_invalid`; for an API key `invalid`, `revoked`, `expired`, `locked` with the key's name) and the user, if known. For an unknown user the tried name is kept only if it is a valid user name, so a password typed into the name field is not stored. Attempts the login limit refuses are not recorded. |
+| Failed logins | The reason (`wrong_password`, `unknown_user`, `locked`, `second_factor`, `unknown_passkey`, `passkey_invalid`; for an API key `invalid`, `revoked`, `expired`, `locked` with the key's name) and the user, if known. For an unknown user the tried name is kept only if it is a valid user name, so a password typed into the name field is not stored. An unknown API key is recorded once per client address and minute. Attempts the login limit refuses are not recorded. |
 | User changes | Adding, removing, locking, unlocking, promoting and demoting users, password resets and passwords set on the command line: who did it and to whom. |
 | Own login changes | Who changed their password, turned 2FA on or off, created new recovery codes, or added or removed a passkey (with its name), and which factor confirmed it. |
 | Passkey removals | Who removed all of a user's passkeys, in the web UI or with `user remove-passkeys`, and how many; a password reset records how many passkeys it removed. |
@@ -336,6 +344,29 @@ own entries on the Log page, and the changes an admin or the command line
 made to their account, without the admin's address, browser, API key or
 the command's operator; admins see everyone's and can export them with
 `audit export`. Entries are kept for good; there is no retention yet.
+
+### Refused logins in the log
+
+Every refused credential writes one Info line to the server log, the same
+for every method, so that tools like fail2ban can match it:
+
+```text
+level=INFO msg="login refused" method=password reason=wrong_password addr=192.0.2.7 user=alice
+```
+
+- `method`: `password`, `2fa`, `passkey` or `api_key`.
+- `reason`: as in the audit log (`wrong_password`, `unknown_user`,
+  `locked`, `second_factor`, `unknown_passkey`, `passkey_invalid`,
+  `invalid`, `revoked`, `expired`), or `rate_limited` for an attempt a
+  limit refused (`429`).
+- `addr`: the client address, behind a [trusted proxy](#trusted-proxies)
+  the client's own.
+- `user`: the user name, where it is known; a tried name that is not a
+  valid user name is logged as `(invalid name)`.
+
+A limit's refusals are logged once per block, or once per window of the
+limit, and client, not once per request, so a blocked client cannot fill
+the log. Passwords, codes and keys are never logged.
 
 ## Browser protections
 
@@ -385,7 +416,15 @@ check. The `Host` check applies to every request.
 
 The UI is served with a strict Content Security Policy (only same-origin
 scripts, styles and requests, no framing), `X-Content-Type-Options: nosniff`,
-`Referrer-Policy: no-referrer` and `Cross-Origin-Opener-Policy: same-origin`.
+`Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`,
+`Cross-Origin-Resource-Policy: same-origin` and `Permissions-Policy:
+camera=(), microphone=(), geolocation=()`.
+
+Over HTTPS (TLS, or `X-Forwarded-Proto: https` from loopback or a
+[trusted proxy](#trusted-proxies)) every answer carries
+`Strict-Transport-Security: max-age=31536000`, so the browser uses HTTPS
+for the host for a year. It has no `includeSubDomains` or `preload`, since
+other services may share the domain. Over plain HTTP it is not sent.
 
 Document files (`GET /api/documents/{id}/file`) are always sent as a
 download (`Content-Disposition: attachment`) with `nosniff` and
@@ -401,8 +440,8 @@ The server makes no network connections on a user's behalf: no URL or host
 given in a request is ever fetched, and OCR runs locally. Every logged-in
 user and every key with `upload` or `write` can upload files that the server's OCR
 tools (OCRmyPDF, Tesseract, Ghostscript, libheif) parse, with the container
-user's rights, so only give logins and keys to people and scripts you
-trust.
+user's rights (UID 65532; Compose adds `no-new-privileges`), so only give
+logins and keys to people and scripts you trust.
 
 ## Reporting a vulnerability
 
