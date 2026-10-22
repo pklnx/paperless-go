@@ -23,6 +23,9 @@ import (
 //     instead, with one of uploadContentTypes: none of them is
 //     CORS-safelisted either, so a cross-site page cannot send them
 //     without a preflight, and form and text types stay refused.
+//   - Requests with an API key are exempt from both: they carry their
+//     credential in a header a cross-site page cannot set, and never use
+//     the cookie (see bearerKey and authenticate).
 
 // uploadContentTypes are the content types a bodyFile route accepts. The
 // type of the file is detected from its content; the declared one only
@@ -65,9 +68,16 @@ func (s *Server) protect(next http.Handler, bodyOf func(*http.Request) body) htt
 			http.Error(w, "host not allowed", http.StatusForbidden)
 			return
 		}
+		// An API key request carries its credential in a header that a
+		// cross-site page cannot set, never in a cookie (see bearerKey), so
+		// it needs neither Origin nor a particular content type.
+		_, keyRequest := bearerKey(r)
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 		default:
+			if keyRequest {
+				break
+			}
 			if !sameOrigin(r) {
 				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
 				return

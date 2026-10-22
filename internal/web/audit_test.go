@@ -344,7 +344,7 @@ func TestAuditPage(t *testing.T) {
 	}
 
 	// Removing alice keeps her entries, under her name at the time.
-	if err := f.st.DeleteUser(ctx, alice.ID); err != nil {
+	if err := f.st.DeleteUser(ctx, alice.ID, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if rows := auditEntries(t, f.expect("GET", "/api/audit", nil, 200)); len(rows) != 4 || rows[2]["user"] != "alice" {

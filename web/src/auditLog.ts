@@ -2,7 +2,7 @@ import type { AuditEntry, AuditFilter } from "./api";
 import { t, type Messages } from "./i18n";
 
 /** The action groups of the filter, as the API names them. */
-export const auditGroups = ["login", "users", "profile", "export"] as const;
+export const auditGroups = ["login", "users", "profile", "api_keys", "export"] as const;
 
 const isoDay = (d: Date) => d.toISOString().slice(0, 10);
 
@@ -36,6 +36,12 @@ export function entryDetail(e: AuditEntry, m: Messages = t): string {
   if (e.action === "profile.2fa_disable" || e.action === "profile.recovery_codes") return code(d.factor);
   if (e.action === "profile.2fa_failed") return [str(d.attempted) && m.auditAction(str(d.attempted)), code(d.reason)].filter(Boolean).join(", ");
   if (e.action === "user.add" && d.admin === true) return m.auditCode("admin");
+  if (e.action === "api_key.create" && Array.isArray(d.scopes)) return d.scopes.filter((s) => typeof s === "string").join(", ");
+  if (e.action === "api_key.revoke") {
+    const count = typeof d.apiKeysRevoked === "number" ? m.apiKeyCount(d.apiKeysRevoked) : "";
+    return [str(d.owner) && e.user !== d.owner && m.logTriedName(str(d.owner)), count, code(d.reason)].filter(Boolean).join(", ");
+  }
+  if (e.action === "user.password_reset" && typeof d.apiKeysRevoked === "number" && d.apiKeysRevoked > 0) return m.apiKeyCount(d.apiKeysRevoked);
   return "";
 }
 

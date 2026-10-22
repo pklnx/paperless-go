@@ -81,6 +81,18 @@ an admin (Users page or `./pgo user reset-password`) now also removes the
 user's passkeys, unless the admin unticks it or passes `--keep-passkeys`.
 The login limits now count IPv6 clients per `/64`, not per address.
 
+**API keys (#20).** Run `./pgo migrate` before `docker compose up -d web`.
+`X-Forwarded-Proto: https` now counts only from loopback or a trusted
+proxy. Behind a proxy or `tailscale serve` in Docker Compose, requests come
+from the Compose network's gateway, so set `PAPERLESS_GO_TRUSTED_PROXIES`
+in `.env` (for example the Compose network, or `172.16.0.0/12`) to keep the
+`Secure` `__Host-` session cookie; see [Trusted
+proxies](../reference/security#trusted-proxies). Without it the login still
+works, but with a plain cookie (an old `__Host-` cookie is dropped at the
+next login). A password reset by an admin (Users page or `./pgo user
+reset-password`) now also revokes the user's API keys, unless the admin
+unticks it or passes `--keep-api-keys`.
+
 **OCR and images (#5).** Scans (PDFs with pages without text) and photos
 (JPEG, PNG, HEIC) now get a text layer with OCRmyPDF and Tesseract. The
 version before failed them with a message to run `reprocess --failed`; you

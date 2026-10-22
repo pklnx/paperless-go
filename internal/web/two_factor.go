@@ -185,9 +185,7 @@ func (s *Server) startTwoFactorLogin(w http.ResponseWriter, r *http.Request, u *
 	if !s.twoFactorReady(w, r) {
 		return
 	}
-	if old := sessionToken(r); old != "" {
-		_ = s.store.DeleteSession(r.Context(), auth.HashSessionToken(old))
-	}
+	s.deleteOldSessions(r)
 	now := s.now()
 	challenge, err := s.store.CreateTwoFactorChallenge(r.Context(), u.ID, u.TwoFactorVersion, now, now.Add(twoFactorChallengeTTL))
 	if err != nil {
@@ -250,7 +248,7 @@ func (s *Server) handleTwoFactorLogin(w http.ResponseWriter, r *http.Request) {
 	// Only now is the login complete.
 	s.limiter.Succeed(u.Name)
 	s.log.Info("login", "user", user.Name, "addr", s.clientIP(r), "2fa", true)
-	setSessionCookie(w, r, token, auth.MaxSessionAge)
+	s.setSessionCookie(w, r, token, auth.MaxSessionAge)
 	s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(user.Name, user.IsAdmin, user.MustChangePassword, true)})
 }
 

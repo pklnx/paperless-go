@@ -35,6 +35,15 @@ describe("entry texts", () => {
     expect(targetLabel(entry("auth.login"))).toBe("");
   });
 
+  it("shows an API key's scopes, owner and count", () => {
+    const en = messagesFor("en");
+    expect(entryDetail(entry("api_key.create", { details: { scopes: ["read", "write"] } }), en)).toBe("read, write");
+    expect(entryDetail(entry("api_key.revoke", { details: { owner: "alice", reason: "user" } }), en)).toBe("user");
+    expect(entryDetail(entry("api_key.revoke", { user: "root", details: { owner: "alice", reason: "admin" } }), en)).toBe("“alice”, admin");
+    expect(entryDetail(entry("api_key.revoke", { actor: "cli", user: undefined, details: { apiKeysRevoked: 2, reason: "cli" } }), en)).toBe("2 API keys, command line");
+    expect(entryDetail(entry("auth.login_failed", { details: { method: "api_key", reason: "revoked" } }), en)).toBe("API key, revoked");
+  });
+
   it("shows a login's method, reason and tried name, translated", () => {
     const en = messagesFor("en");
     const de = messagesFor("de");
