@@ -18,7 +18,7 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
                                               │                ▲
                                               ▼                │
                                        job queue (PostgreSQL) ──▶ internal/process (OCRmyPDF, Tesseract; Mistral optional)
-                                                                 internal/classify (matching rules, dates, Mistral)
+                                                                 internal/classify (matching rules, dates, OpenAI-compatible API)
 ```
 
 ## Packages

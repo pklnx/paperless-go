@@ -30,8 +30,9 @@ In scope, for example:
   bypassing login, sessions, TOTP, passkeys or API keys, or reaching another
   user's documents)
 - Path traversal or code execution through uploaded files (PDFs, images)
-- Sending document contents to an external service (Mistral) without it
-  being turned on
+- Sending document contents to an external service (Mistral OCR or the
+  OpenAI-compatible classification endpoint) without it being turned on,
+  or for a user who has not agreed
 
 Out of scope:
 
