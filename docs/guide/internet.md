@@ -25,7 +25,7 @@ Each line links to its section. Names like `example.com` stand for yours.
 3. `PAPERLESS_GO_TRUSTED_PROXIES` ([Trusted proxies](#trusted-proxies)).
 4. `PAPERLESS_GO_REQUIRE_2FA=true` ([Logins on the internet](#logins-on-the-internet)).
 5. Passkeys on, with `PAPERLESS_GO_PUBLIC_URL`, and users adding one.
-6. API keys for phones and scripts with only the scope they need, `write`
+6. API keys for phones and scripts with only the scope they need, `upload`
    for an upload-only client, and an expiry ([API keys](#api-keys-for-phones-and-scripts)).
 7. The database port and the consume folder not exposed
    ([What must never be exposed](#what-must-never-be-exposed)).
@@ -279,11 +279,13 @@ restarts.
 ## API keys for phones and scripts
 
 Create one key per device on the profile page, with only the scope it needs
-(`write` uploads documents; `read` lists and downloads), and an expiry. A
+(`upload` adds documents and reads nothing; `read` lists and downloads;
+`write` also changes and deletes), and an expiry. A
 key reaches no login, profile or user management, and a lost phone's key is
 revoked on its own without touching the account. A key still needs the
 proxy: it is sent as `Authorization: Bearer pl_…` over HTTPS. See [API
-keys](../reference/security#api-keys).
+keys](../reference/security#api-keys). For an iPhone that scans and
+uploads, see [Scanning with the iPhone](./iphone).
 
 ## What must never be exposed
 

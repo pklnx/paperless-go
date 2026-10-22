@@ -29,6 +29,7 @@ export default defineConfig({
           { text: "Importing files", link: "/guide/import" },
           { text: "Search", link: "/guide/search" },
           { text: "Audit log", link: "/guide/audit-log" },
+          { text: "Scanning with the iPhone", link: "/guide/iphone" },
           { text: "Running on the internet", link: "/guide/internet" },
         ],
       },
