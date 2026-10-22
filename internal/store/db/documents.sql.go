@@ -30,6 +30,76 @@ func (q *Queries) AddDocumentTags(ctx context.Context, arg AddDocumentTagsParams
 	return err
 }
 
+const bulkAddDocumentTags = `-- name: BulkAddDocumentTags :exec
+INSERT INTO document_tags (owner_id, document_id, tag_id)
+SELECT d.owner_id, d.id, t
+FROM documents d CROSS JOIN unnest($1::uuid[]) AS t
+WHERE d.id = ANY ($2::uuid[])
+ON CONFLICT DO NOTHING
+`
+
+type BulkAddDocumentTagsParams struct {
+	TagIds []pgtype.UUID
+	Ids    []pgtype.UUID
+}
+
+func (q *Queries) BulkAddDocumentTags(ctx context.Context, arg BulkAddDocumentTagsParams) error {
+	_, err := q.db.Exec(ctx, bulkAddDocumentTags, arg.TagIds, arg.Ids)
+	return err
+}
+
+const bulkRemoveDocumentTags = `-- name: BulkRemoveDocumentTags :exec
+DELETE FROM document_tags
+WHERE document_id = ANY ($1::uuid[]) AND tag_id = ANY ($2::uuid[])
+`
+
+type BulkRemoveDocumentTagsParams struct {
+	Ids    []pgtype.UUID
+	TagIds []pgtype.UUID
+}
+
+func (q *Queries) BulkRemoveDocumentTags(ctx context.Context, arg BulkRemoveDocumentTagsParams) error {
+	_, err := q.db.Exec(ctx, bulkRemoveDocumentTags, arg.Ids, arg.TagIds)
+	return err
+}
+
+const bulkUpdateDocuments = `-- name: BulkUpdateDocuments :exec
+UPDATE documents
+SET is_favorite = COALESCE($1::boolean, is_favorite),
+    is_inbox = COALESCE($2::boolean, is_inbox),
+    correspondent_id = CASE WHEN $3::boolean THEN $4::uuid
+                            ELSE correspondent_id END,
+    document_type_id = CASE WHEN $5::boolean THEN $6::uuid
+                            ELSE document_type_id END,
+    modified_at = now()
+WHERE id = ANY ($7::uuid[])
+`
+
+type BulkUpdateDocumentsParams struct {
+	IsFavorite       *bool
+	IsInbox          *bool
+	SetCorrespondent bool
+	CorrespondentID  pgtype.UUID
+	SetDocumentType  bool
+	DocumentTypeID   pgtype.UUID
+	Ids              []pgtype.UUID
+}
+
+// Sets the given columns of the locked documents as PatchDocument does,
+// and touches modified_at of every one of them.
+func (q *Queries) BulkUpdateDocuments(ctx context.Context, arg BulkUpdateDocumentsParams) error {
+	_, err := q.db.Exec(ctx, bulkUpdateDocuments,
+		arg.IsFavorite,
+		arg.IsInbox,
+		arg.SetCorrespondent,
+		arg.CorrespondentID,
+		arg.SetDocumentType,
+		arg.DocumentTypeID,
+		arg.Ids,
+	)
+	return err
+}
+
 const clearDocumentTags = `-- name: ClearDocumentTags :exec
 DELETE FROM document_tags WHERE document_id = $1
 `
@@ -37,6 +107,22 @@ DELETE FROM document_tags WHERE document_id = $1
 func (q *Queries) ClearDocumentTags(ctx context.Context, documentID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, clearDocumentTags, documentID)
 	return err
+}
+
+const countOwnedTags = `-- name: CountOwnedTags :one
+SELECT count(*) FROM tags WHERE owner_id = $1 AND id = ANY ($2::uuid[])
+`
+
+type CountOwnedTagsParams struct {
+	OwnerID int64
+	Ids     []pgtype.UUID
+}
+
+func (q *Queries) CountOwnedTags(ctx context.Context, arg CountOwnedTagsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOwnedTags, arg.OwnerID, arg.Ids)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const createDocument = `-- name: CreateDocument :one
@@ -124,6 +210,27 @@ func (q *Queries) DeleteDocument(ctx context.Context, arg DeleteDocumentParams) 
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const documentByASN = `-- name: DocumentByASN :one
+SELECT id, title FROM documents WHERE owner_id = $1 AND archive_serial_number = $2
+`
+
+type DocumentByASNParams struct {
+	OwnerID             int64
+	ArchiveSerialNumber *int32
+}
+
+type DocumentByASNRow struct {
+	ID    pgtype.UUID
+	Title string
+}
+
+func (q *Queries) DocumentByASN(ctx context.Context, arg DocumentByASNParams) (DocumentByASNRow, error) {
+	row := q.db.QueryRow(ctx, documentByASN, arg.OwnerID, arg.ArchiveSerialNumber)
+	var i DocumentByASNRow
+	err := row.Scan(&i.ID, &i.Title)
+	return i, err
 }
 
 const documentByOriginal = `-- name: DocumentByOriginal :one
@@ -315,7 +422,7 @@ func (q *Queries) ListDocuments(ctx context.Context, owner *int64) ([]ListDocume
 const lockDocument = `-- name: LockDocument :one
 SELECT owner_id FROM documents
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
-FOR UPDATE
+FOR NO KEY UPDATE
 `
 
 type LockDocumentParams struct {
@@ -324,12 +431,110 @@ type LockDocumentParams struct {
 }
 
 // LockDocument locks the document row for a change of its tags and returns
-// its owner.
+// its owner. FOR NO KEY UPDATE: no key column changes, so the foreign-key
+// checks of rows referencing the document (document_tags, jobs; FOR KEY
+// SHARE) need not wait for the change.
 func (q *Queries) LockDocument(ctx context.Context, arg LockDocumentParams) (int64, error) {
 	row := q.db.QueryRow(ctx, lockDocument, arg.ID, arg.Owner)
 	var owner_id int64
 	err := row.Scan(&owner_id)
 	return owner_id, err
+}
+
+const lockDocuments = `-- name: LockDocuments :many
+SELECT id, owner_id FROM documents
+WHERE id = ANY ($1::uuid[]) AND ($2::bigint IS NULL OR owner_id = $2)
+ORDER BY id
+FOR NO KEY UPDATE
+`
+
+type LockDocumentsParams struct {
+	Ids   []pgtype.UUID
+	Owner *int64
+}
+
+type LockDocumentsRow struct {
+	ID      pgtype.UUID
+	OwnerID int64
+}
+
+// LockDocuments locks the documents of ids in the scope, in id order, so
+// two bulk changes over overlapping sets wait for each other instead of
+// deadlocking. It returns the locked ids with their owners. FOR NO KEY
+// UPDATE as in LockDocument.
+func (q *Queries) LockDocuments(ctx context.Context, arg LockDocumentsParams) ([]LockDocumentsRow, error) {
+	rows, err := q.db.Query(ctx, lockDocuments, arg.Ids, arg.Owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockDocumentsRow
+	for rows.Next() {
+		var i LockDocumentsRow
+		if err := rows.Scan(&i.ID, &i.OwnerID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const patchDocument = `-- name: PatchDocument :execrows
+UPDATE documents
+SET title = COALESCE($1::text, title),
+    document_date = COALESCE($2::timestamptz, document_date),
+    notes = COALESCE($3::text, notes),
+    is_favorite = COALESCE($4::boolean, is_favorite),
+    is_inbox = COALESCE($5::boolean, is_inbox),
+    archive_serial_number = CASE WHEN $6::boolean THEN $7::int
+                                 ELSE archive_serial_number END,
+    correspondent_id = CASE WHEN $8::boolean THEN $9::uuid
+                            ELSE correspondent_id END,
+    document_type_id = CASE WHEN $10::boolean THEN $11::uuid
+                            ELSE document_type_id END,
+    modified_at = now()
+WHERE id = $12
+`
+
+type PatchDocumentParams struct {
+	Title               *string
+	DocumentDate        *time.Time
+	Notes               *string
+	IsFavorite          *bool
+	IsInbox             *bool
+	SetAsn              bool
+	ArchiveSerialNumber *int32
+	SetCorrespondent    bool
+	CorrespondentID     pgtype.UUID
+	SetDocumentType     bool
+	DocumentTypeID      pgtype.UUID
+	ID                  pgtype.UUID
+}
+
+// Sets only the given columns: a NULL narg, or a false set_* flag, keeps
+// the stored value. The caller has locked the row (LockDocument).
+func (q *Queries) PatchDocument(ctx context.Context, arg PatchDocumentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, patchDocument,
+		arg.Title,
+		arg.DocumentDate,
+		arg.Notes,
+		arg.IsFavorite,
+		arg.IsInbox,
+		arg.SetAsn,
+		arg.ArchiveSerialNumber,
+		arg.SetCorrespondent,
+		arg.CorrespondentID,
+		arg.SetDocumentType,
+		arg.DocumentTypeID,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const touchDocument = `-- name: TouchDocument :exec

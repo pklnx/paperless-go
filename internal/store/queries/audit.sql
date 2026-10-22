@@ -91,3 +91,14 @@ FROM (
 LEFT JOIN audit_user_agents ua ON ua.id = l.user_agent_id
 ORDER BY l.at DESC, l.id DESC
 LIMIT @lim;
+
+-- name: InsertAuditEntries :exec
+-- Several entries by the same actor and client, one per element of the
+-- arrays (equal lengths): the per-document entries of a bulk change.
+INSERT INTO audit_log (actor, user_id, user_name, api_key_id, api_key_name, action,
+                       target_type, target_id, target_name, client_ip, user_agent_id, details)
+SELECT @actor, sqlc.narg(user_id), sqlc.narg(user_name), sqlc.narg(api_key_id), sqlc.narg(api_key_name), e.action,
+       (sqlc.arg(target_types)::text[])[e.n], (sqlc.arg(target_ids)::text[])[e.n],
+       NULLIF((sqlc.arg(target_names)::text[])[e.n], ''), sqlc.narg(client_ip), sqlc.narg(user_agent_id),
+       (sqlc.arg(details)::jsonb[])[e.n]
+FROM unnest(sqlc.arg(actions)::text[]) WITH ORDINALITY AS e (action, n);

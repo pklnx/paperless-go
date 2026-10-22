@@ -134,6 +134,51 @@ func (q *Queries) ExportAuditEntries(ctx context.Context, arg ExportAuditEntries
 	return items, nil
 }
 
+const insertAuditEntries = `-- name: InsertAuditEntries :exec
+INSERT INTO audit_log (actor, user_id, user_name, api_key_id, api_key_name, action,
+                       target_type, target_id, target_name, client_ip, user_agent_id, details)
+SELECT $1, $2, $3, $4, $5, e.action,
+       ($6::text[])[e.n], ($7::text[])[e.n],
+       NULLIF(($8::text[])[e.n], ''), $9, $10,
+       ($11::jsonb[])[e.n]
+FROM unnest($12::text[]) WITH ORDINALITY AS e (action, n)
+`
+
+type InsertAuditEntriesParams struct {
+	Actor       string
+	UserID      *int64
+	UserName    *string
+	ApiKeyID    *int64
+	ApiKeyName  *string
+	TargetTypes []string
+	TargetIds   []string
+	TargetNames []string
+	ClientIp    *netip.Addr
+	UserAgentID *int64
+	Details     [][]byte
+	Actions     []string
+}
+
+// Several entries by the same actor and client, one per element of the
+// arrays (equal lengths): the per-document entries of a bulk change.
+func (q *Queries) InsertAuditEntries(ctx context.Context, arg InsertAuditEntriesParams) error {
+	_, err := q.db.Exec(ctx, insertAuditEntries,
+		arg.Actor,
+		arg.UserID,
+		arg.UserName,
+		arg.ApiKeyID,
+		arg.ApiKeyName,
+		arg.TargetTypes,
+		arg.TargetIds,
+		arg.TargetNames,
+		arg.ClientIp,
+		arg.UserAgentID,
+		arg.Details,
+		arg.Actions,
+	)
+	return err
+}
+
 const insertAuditEntry = `-- name: InsertAuditEntry :exec
 INSERT INTO audit_log (actor, user_id, user_name, api_key_id, api_key_name, action,
                        target_type, target_id, target_name, client_ip, user_agent_id, details)

@@ -66,9 +66,18 @@ func (s *Server) twoFactorReady(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // blocked answers 429 if failed attempts for name or the client address are
-// over the limit.
-func (s *Server) blocked(w http.ResponseWriter, r *http.Request, name string) bool {
-	wait := s.limiter.Blocked(name, s.clientAddr(r))
+// over the limit. For a login (method set), the first refusal of a block
+// is logged (logRefused).
+func (s *Server) blocked(w http.ResponseWriter, r *http.Request, name, method string) bool {
+	var wait time.Duration
+	if method == "" {
+		wait = s.limiter.Blocked(name, s.clientAddr(r))
+	} else {
+		var first bool
+		if wait, first = s.limiter.BlockedFirst(name, s.clientAddr(r)); wait > 0 && first {
+			s.logRefused(r, method, reasonRateLimited, name)
+		}
+	}
 	if wait <= 0 {
 		return false
 	}
@@ -155,7 +164,7 @@ func (s *Server) handleConfirmTwoFactor(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	sess := currentSession(r)
-	if s.blocked(w, r, sess.UserName) {
+	if s.blocked(w, r, sess.UserName, "") {
 		return
 	}
 	codes, err := auth.GenerateRecoveryCodes()
@@ -218,7 +227,7 @@ func (s *Server) handleTwoFactorLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	addr := s.clientAddr(r)
-	if s.blocked(w, r, u.Name) {
+	if s.blocked(w, r, u.Name, "2fa") {
 		return
 	}
 	token, hash, err := auth.NewSessionToken()
@@ -234,7 +243,6 @@ func (s *Server) handleTwoFactorLogin(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, store.ErrTwoFactorInvalid):
 		s.limiter.Fail(u.Name, addr)
-		s.log.Info("login failed: second factor", "user", u.Name, "addr", s.clientIP(r))
 		s.auditLoginFailed(r, "2fa", reasonSecondFactor, u.Name, u)
 		s.fail(w, r, http.StatusUnauthorized, errInvalidSecondFactor, nil)
 		return
@@ -285,7 +293,7 @@ func (s *Server) handleDisableTwoFactor(w http.ResponseWriter, r *http.Request) 
 	if !s.decode(w, r, &in) {
 		return
 	}
-	if s.blocked(w, r, sess.UserName) {
+	if s.blocked(w, r, sess.UserName, "") {
 		return
 	}
 	u, err := s.store.GetUserByID(r.Context(), sess.UserID)
@@ -326,7 +334,7 @@ func (s *Server) handleRegenerateRecoveryCodes(w http.ResponseWriter, r *http.Re
 		return
 	}
 	sess := currentSession(r)
-	if s.blocked(w, r, sess.UserName) {
+	if s.blocked(w, r, sess.UserName, "") {
 		return
 	}
 	codes, err := auth.GenerateRecoveryCodes()

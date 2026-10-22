@@ -18,9 +18,9 @@ import (
 )
 
 // Uploads and downloads may take longer than the server's read and write
-// timeouts (5 minutes), which are meant for every other request: a
-// 100 MiB file over a slow line needs more. These routes extend their own
-// deadlines.
+// timeouts (30 seconds to read, 5 minutes to write), which are meant for every
+// other request: a 100 MiB file over a slow line needs more. These routes
+// extend both of their own deadlines.
 const transferTimeout = time.Hour
 
 // fileNameHeader carries the uploaded file's name, percent-encoded (a
@@ -30,7 +30,11 @@ const fileNameHeader = "X-File-Name"
 // documentJSON is a document as the API lists it. The extracted text is
 // only in documentDetailJSON: it can be large.
 type documentJSON struct {
-	ID                  string    `json:"id"`
+	ID      string `json:"id"`
+	OwnerID int64  `json:"ownerId"`
+	// OwnerName is the owner's user name, only for admins (who may see
+	// other users' documents).
+	OwnerName           string    `json:"ownerName,omitempty"`
 	Title               string    `json:"title"`
 	DocumentDate        time.Time `json:"documentDate"`
 	CreatedAt           time.Time `json:"createdAt"`
@@ -120,13 +124,33 @@ func toDocumentJSON(d *store.Document, job *store.Job) documentJSON {
 		tags = []string{}
 	}
 	return documentJSON{
-		ID: d.ID, Title: d.Title, DocumentDate: d.DocumentDate, CreatedAt: d.CreatedAt, ModifiedAt: d.ModifiedAt,
+		ID: d.ID, OwnerID: d.OwnerID, Title: d.Title, DocumentDate: d.DocumentDate, CreatedAt: d.CreatedAt, ModifiedAt: d.ModifiedAt,
 		Notes: d.Notes, IsFavorite: d.IsFavorite, IsInbox: d.IsInbox, ArchiveSerialNumber: d.ArchiveSerialNumber,
 		PageCount: d.PageCount, Source: d.Source, OriginalFileName: d.OriginalFileName, OriginalSize: d.OriginalSize,
 		OriginalMIME: d.OriginalMIME, HasArchive: d.ArchiveSHA256 != nil, ArchiveSize: d.ArchiveSize,
 		ProcessingNote: d.ProcessingNote, Processing: toProcessingJSON(job), ThumbnailURL: thumbnailURL(d),
 		CorrespondentID: d.CorrespondentID, DocumentTypeID: d.DocumentTypeID, TagIDs: tags,
 	}
+}
+
+// fillOwnerNames sets the owner names of docs for an admin; for anybody
+// else it does nothing.
+func (s *Server) fillOwnerNames(r *http.Request, docs ...*documentJSON) error {
+	if !requestScope(r).All || len(docs) == 0 {
+		return nil
+	}
+	users, err := s.store.ListUsers(r.Context())
+	if err != nil {
+		return err
+	}
+	names := make(map[int64]string, len(users))
+	for _, u := range users {
+		names[u.ID] = u.Name
+	}
+	for _, d := range docs {
+		d.OwnerName = names[d.OwnerID]
+	}
+	return nil
 }
 
 // latestJobs reads the processing status of docs.
@@ -184,8 +208,10 @@ type listError string
 func (e listError) Error() string { return string(e) }
 
 // listQuery reads the parameters of GET /api/documents into a query. It
-// reports whether the request is a search (text, a filter or an ID
-// parameter, on the first page): only these are audited.
+// reports whether the request is a search: q with free text or search
+// syntax, on the first page. Only these are audited; the filter
+// parameters (tag, correspondent, type, inbox, favorite) are browsing,
+// like paging through the plain list.
 func listQuery(v url.Values) (q search.Query, isSearch bool, err error) {
 	q.Limit = documentListDefault
 	if s := v.Get("limit"); s != "" {
@@ -239,12 +265,15 @@ func listQuery(v url.Values) (q search.Query, isSearch bool, err error) {
 		}
 		*p.dst = ids
 	}
-	switch v.Get("inbox") {
-	case "":
-	case "true", "false":
-		q.Filters = append(q.Filters, search.Filter{Field: search.FieldIs, Negated: v.Get("inbox") == "false", Values: []string{search.IsInbox}})
-	default:
-		return q, false, listError("inbox must be true or false")
+	typed := len(q.Text) > 0 || len(q.Filters) > 0
+	for _, p := range []struct{ name, value string }{{"inbox", search.IsInbox}, {"favorite", search.IsFavorite}} {
+		switch v.Get(p.name) {
+		case "":
+		case "true", "false":
+			q.Filters = append(q.Filters, search.Filter{Field: search.FieldIs, Negated: v.Get(p.name) == "false", Values: []string{p.value}})
+		default:
+			return q, false, listError(p.name + " must be true or false")
+		}
 	}
 	if err := q.CheckLimits(); err != nil {
 		return q, false, listError("query too long")
@@ -253,14 +282,12 @@ func listQuery(v url.Values) (q search.Query, isSearch bool, err error) {
 	if len(q.Cursor) > maxCursorLen {
 		return q, false, listError("invalid cursor")
 	}
-	isSearch = q.Cursor == "" && (len(q.Text) > 0 || len(q.Filters) > 0 ||
-		len(q.TagIDs) > 0 || len(q.CorrespondentIDs) > 0 || len(q.TypeIDs) > 0)
-	return q, isSearch, nil
+	return q, q.Cursor == "" && typed, nil
 }
 
 // searchAuditParams are the parameters a document.search entry records:
 // the query as typed and the filters, not the paging and sort options.
-var searchAuditParams = []string{"q", "tag", "correspondent", "type", "inbox"}
+var searchAuditParams = []string{"q", "tag", "correspondent", "type", "inbox", "favorite", "owner"}
 
 // searchEntry is the audit entry of the first page of a search.
 func (s *Server) searchEntry(r *http.Request) *store.AuditEntry {
@@ -281,12 +308,14 @@ func (s *Server) searchEntry(r *http.Request) *store.AuditEntry {
 // handleListDocuments lists and searches the scope's documents, without
 // their text: by default the newest added first, with free text the best
 // match first, each with a snippet. Parameters: q (the search syntax),
-// tag, correspondent and type (UUIDs, repeatable, any of them), inbox,
-// sort (relevance, added, date), order (desc, asc), tz (an IANA zone for
-// the days of date filters, default UTC), limit (1 to 100, default 100)
-// and cursor (nextCursor of the previous page). Invalid input answers 400
-// with fixed wording. The first page of a search writes document.search;
-// without the audit log it answers 503.
+// tag, correspondent and type (UUIDs, repeatable, any of them), inbox and
+// favorite (true, false), owner (me, or for an admin a user ID; see
+// listScope), sort (relevance, added, date), order (desc, asc), tz (an
+// IANA zone for the days of date filters, default UTC), limit (1 to 100,
+// default 100) and cursor (nextCursor of the previous page). Invalid
+// input answers 400 with fixed wording. The first page of a typed search
+// (q with free text or syntax) writes document.search; without the audit
+// log it answers 503.
 func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 	if !s.documentsAvailable(w, r) {
 		return
@@ -296,7 +325,11 @@ func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
-	page, err := s.store.SearchDocuments(r.Context(), requestScope(r), q)
+	sc, ok := s.listScope(w, r)
+	if !ok {
+		return
+	}
+	page, err := s.store.SearchDocuments(r.Context(), sc, q)
 	if err != nil {
 		s.failSearch(w, r, err)
 		return
@@ -323,6 +356,14 @@ func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 			snippet := h.Snippet
 			out.Documents[i].Snippet = &snippet
 		}
+	}
+	refs := make([]*documentJSON, len(out.Documents))
+	for i := range out.Documents {
+		refs[i] = &out.Documents[i].documentJSON
+	}
+	if err := s.fillOwnerNames(r, refs...); err != nil {
+		s.failStore(w, r, err)
+		return
 	}
 	s.writeJSON(w, http.StatusOK, out)
 }
@@ -355,7 +396,12 @@ func (s *Server) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 		s.failStore(w, r, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, documentDetailJSON{documentJSON: toDocumentJSON(d, jobs[d.ID]), ExtractedText: d.ExtractedText, TextSource: d.TextSource})
+	out := documentDetailJSON{documentJSON: toDocumentJSON(d, jobs[d.ID]), ExtractedText: d.ExtractedText, TextSource: d.TextSource}
+	if err := s.fillOwnerNames(r, &out.documentJSON); err != nil {
+		s.failStore(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, out)
 }
 
 // handleReprocess queues one document of the scope for processing again
@@ -391,7 +437,12 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 	if n > 0 {
 		status = http.StatusAccepted
 	}
-	s.writeJSON(w, status, toDocumentJSON(d, jobs[d.ID]))
+	out := toDocumentJSON(d, jobs[d.ID])
+	if err := s.fillOwnerNames(r, &out); err != nil {
+		s.failStore(w, r, err)
+		return
+	}
+	s.writeJSON(w, status, out)
 }
 
 // handleThumbnail sends a document's thumbnail, a JPEG of its first page
@@ -468,7 +519,13 @@ func (s *Server) handleDocumentFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = f.Close() }()
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(transferTimeout))
+	// The read deadline too: in HTTP/1, the server's background read of
+	// a request without a body ends at the read deadline and cancels the
+	// request's context, which a long download would otherwise outlive.
+	rc := http.NewResponseController(w)
+	deadline := time.Now().Add(transferTimeout)
+	_ = rc.SetReadDeadline(deadline)
+	_ = rc.SetWriteDeadline(deadline)
 	h := w.Header()
 	h.Set("Content-Type", mimeType)
 	h.Set("Content-Disposition", contentDisposition(name))
@@ -670,6 +727,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	case ingest.Imported:
 		w.Header().Set("Location", "/api/documents/"+res.Document.ID)
 		out := toDocumentJSON(res.Document, nil)
+		if requestScope(r).All {
+			out.OwnerName = currentSession(r).UserName
+		}
 		// The document is stored; a status that cannot be read is left
 		// out rather than failing the upload.
 		if jobs, err := s.latestJobs(r, res.Document); err != nil {

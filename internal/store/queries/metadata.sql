@@ -31,7 +31,7 @@ RETURNING id, owner_id, name;
 -- name: LockCorrespondent :one
 SELECT * FROM correspondents
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
-FOR UPDATE;
+FOR NO KEY UPDATE;
 
 -- name: CreateDocumentType :one
 INSERT INTO document_types (owner_id, name, symbol, match_text, match_mode)
@@ -63,7 +63,7 @@ RETURNING id, owner_id, name;
 -- name: LockDocumentType :one
 SELECT * FROM document_types
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
-FOR UPDATE;
+FOR NO KEY UPDATE;
 
 -- name: CreateTag :one
 INSERT INTO tags (owner_id, name, color_hex, symbol, parent_id, match_text, match_mode)
@@ -96,7 +96,7 @@ RETURNING id, owner_id, name;
 -- name: LockTag :one
 SELECT * FROM tags
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
-FOR UPDATE;
+FOR NO KEY UPDATE;
 
 -- TagRootNameConflict finds a child of the tag that would collide with a
 -- root tag of the same name once the tag is deleted and the child becomes

@@ -26,6 +26,9 @@ type failures struct {
 	times        []time.Time // within failureWindow
 	blockedUntil time.Time
 	blocks       int
+	// reported is the blockedUntil of the last block whose first refusal
+	// was reported (BlockedFirst), so a caller logs one line per block.
+	reported time.Time
 }
 
 func (f *failures) prune(now time.Time) {
@@ -86,6 +89,36 @@ func (l *Limiter) Blocked(user, addr string) time.Duration {
 		}
 	}
 	return wait
+}
+
+// BlockedFirst is Blocked that also reports whether this is the first
+// refused attempt of a block: true once per block of the name and once per
+// block of the address.
+func (l *Limiter) BlockedFirst(user, addr string) (time.Duration, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return blockedFirst(l.now(), l.users[user], l.addrs[addr])
+}
+
+// BlockedAddrFirst is BlockedFirst for a login without a user name.
+func (l *Limiter) BlockedAddrFirst(addr string) (time.Duration, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return blockedFirst(l.now(), l.addrs[addr])
+}
+
+func blockedFirst(now time.Time, fs ...*failures) (wait time.Duration, first bool) {
+	for _, f := range fs {
+		if f == nil || !f.blockedUntil.After(now) {
+			continue
+		}
+		wait = max(wait, f.blockedUntil.Sub(now))
+		if !f.reported.Equal(f.blockedUntil) {
+			f.reported = f.blockedUntil
+			first = true
+		}
+	}
+	return wait, first
 }
 
 // Fail records a failed login.

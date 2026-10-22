@@ -30,6 +30,7 @@ export default defineConfig({
           { text: "Documents", link: "/guide/documents" },
           { text: "Search", link: "/guide/search" },
           { text: "Audit log", link: "/guide/audit-log" },
+          { text: "Running on the internet", link: "/guide/internet" },
         ],
       },
       {

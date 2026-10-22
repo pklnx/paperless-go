@@ -26,13 +26,15 @@ change or delete entries.
 | `api_key.revoke` | A user revokes one of their keys, an admin any key (with its owner), or `user revoke-api-keys` all of a user's keys (with how many). |
 | `audit.export` | `audit export` writes the log out. |
 | `document.create` | A user uploads a document in the web UI or with an API key (with the title). |
-| `document.search` | A user searches their documents, in the web UI or with an API key: the first page of each search, with the search text and the filters. Further pages and the plain list of recent documents are not recorded. |
+| `document.search` | A user searches their documents, in the web UI or with an API key: the first page of each typed search, with the search text and the filters. Choosing a tag, correspondent, type, the inbox or the favourites in the sidebar is browsing and is not recorded, nor are further pages and the plain list of recent documents. |
+| `document.update` | A user changes a document in the web UI or with an API key, with the names of the changed fields (such as `title`, `notes`, `tagIds`), never their values. An admin's change of another user's document records that user's ID (`ownerId`). A change of several documents at once writes one per document. |
+| `document.bulk_update` | A user changes several documents at once: the number of documents, their IDs, the names of the changed fields, and for "all matches of this search" the search. The per-document entries carry the same `bulkRun` ID. |
 | `document.reprocess` | `reprocess` queues documents for processing again (with the selection and how many it queued), or a user clicks Retry on a document in the web UI or calls the API with a key (with the document). |
 | `tag.create`, `tag.update`, `tag.delete` | A user creates, changes or deletes a tag in the web UI or with an API key, with its name; a change records the old name on a rename and the names of the changed fields (`name`, `color`, `parentId`), never their values. An admin's change of another user's tag records that user's ID (`ownerId`). |
 | `correspondent.create`, `correspondent.update`, `correspondent.delete` | Likewise for a correspondent. |
 | `document_type.create`, `document_type.update`, `document_type.delete` | Likewise for a document type. |
-| `document.import` | `import` added documents: one entry per run that imported something, naming the user who owns them, the path and the counts of imported, duplicate and failed files. |
-| `document.consume` | The [consume folder](./import#consume-folder) changed a user's folder: one entry per scan and user that imported, deleted or moved files, made by the server, naming the user and with the counts: files imported, duplicates deleted, files moved to `failed/`, and `interrupted` when the scan stopped early (the server stopped, or the database was down). File names are only in the server log. If the entry cannot be written, the files are handled anyway and the counts go into the user's next entry. |
+| `document.import` | `import` added documents: one entry per run that imported something, naming the user who owns them, the path and the counts of imported, duplicate and failed files, and "interrupted" on the Log page when the run stopped early. |
+| `document.consume` | The [consume folder](./import#consume-folder) changed a user's folder: one entry per scan and user that imported, deleted or moved files, made by the server, naming the user and with the counts: files imported, duplicates deleted, files moved to `failed/`, and `interrupted` when the scan stopped early (the server stopped, or the database was down); the Log page shows it as "interrupted" ("abgebrochen") after the counts, to admins and to the user. File names are only in the server log. If the entry cannot be written, the files are handled anyway and the counts go into the user's next entry. |
 
 Each entry has the time, the user (by the name they had then), how they
 acted (a session, an API key with its name, the command line, or the
@@ -40,7 +42,7 @@ server on its own, as for the consume folder), the
 client address and browser in the web UI, the user an admin action was about, and
 details such as a failed login's reason. Passwords, TOTP secrets and codes
 and API keys are never recorded. Reads are not recorded, except searches
-(`document.search`): a search with words can say what someone looked for.
+(`document.search`): a typed search can say what someone looked for.
 Commands record the command, the operating system user and the operator
 `./pgo` passes (the user on the host); neither is verified, because whoever
 can run commands holds the database password.

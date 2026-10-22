@@ -93,8 +93,8 @@ describe("entry texts", () => {
     const en = messagesFor("en");
     const de = messagesFor("de");
     const consume = entry("document.consume", { actor: "system", user: undefined, details: { imported: 2, duplicates: 1, failed: 0, interrupted: true } });
-    expect(entryDetail(consume, en)).toBe("2 files imported, 1 duplicate");
-    expect(entryDetail(consume, de)).toBe("2 Dateien importiert, 1 Duplikat");
+    expect(entryDetail(consume, en)).toBe("2 files imported, 1 duplicate · interrupted");
+    expect(entryDetail(consume, de)).toBe("2 Dateien importiert, 1 Duplikat · abgebrochen");
     const one = entry("document.consume", { actor: "system", details: { imported: 1, duplicates: 2, failed: 3 } });
     expect(entryDetail(one, en)).toBe("1 file imported, 2 duplicates, 3 files failed");
     expect(entryDetail(one, de)).toBe("1 Datei importiert, 2 Duplikate, 3 Dateien fehlgeschlagen");
@@ -102,6 +102,18 @@ describe("entry texts", () => {
       "3 files imported, 1 file failed",
     );
     expect(entryDetail(entry("document.consume", { details: {} }), en)).toBe("");
+    const none = (interrupted: unknown) => entry("document.consume", { details: { imported: 0, duplicates: 0, failed: 0, interrupted } });
+    expect(entryDetail(none(true), en)).toBe("interrupted");
+    expect(entryDetail(none(true), de)).toBe("abgebrochen");
+    for (const v of [false, undefined, "yes", 1]) {
+      expect(entryDetail(none(v), en)).toBe("");
+      expect(entryDetail(entry("document.consume", { details: { imported: 1, interrupted: v } }), en)).toBe("1 file imported");
+    }
+    const cli = entry("document.import", { actor: "cli", details: { path: "/srv/x", imported: 3, duplicates: 0, failed: 1, interrupted: true } });
+    expect(entryDetail(cli, en)).toBe("3 files imported, 1 file failed · interrupted");
+    expect(entryDetail(cli, de)).toBe("3 Dateien importiert, 1 Datei fehlgeschlagen · abgebrochen");
+    expect(en.auditAction("document.import")).toBe("Imported");
+    expect(de.auditAction("document.import")).toBe("Importiert");
     expect(en.auditAction("document.consume")).toBe("Imported from the consume folder");
     expect(de.auditAction("document.consume")).toBe("Aus dem Eingangsordner importiert");
   });

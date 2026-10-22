@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { auditGroups } from "./auditLog";
 import { detectLang, languages, messagesFor } from "./i18n";
 
 describe("detectLang", () => {
@@ -37,6 +38,13 @@ describe("messages", () => {
     expect(messagesFor("de").logOwnNote).toContain("Eingangsordner");
     expect(messagesFor("en").logByAdmin("root")).toBe("by root");
     expect(messagesFor("de").logByAdmin("root")).toBe("von root");
+  });
+  it("names every log filter group and the document edits in both languages", () => {
+    for (const l of languages) {
+      const m = messagesFor(l);
+      for (const g of auditGroups) expect(m.logGroup(g), `${l}.${g}`).not.toBe(g);
+      for (const a of ["document.update", "document.bulk_update"]) expect(m.auditAction(a), `${l}.${a}`).not.toBe(a);
+    }
   });
   it("names each language in itself", () => {
     expect(messagesFor("de").languageName).toBe("Deutsch");

@@ -12,6 +12,129 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const matchDocumentIDs = `-- name: MatchDocumentIDs :many
+SELECT d.id, d.owner_id, count(*) OVER ()::bigint AS total
+FROM documents d
+WHERE
+      -- filters:begin (keep all copies equal; TestSearchFilterCopies checks)
+      ($1::bigint IS NULL OR d.owner_id = $1)
+      AND ($2::tsquery IS NULL OR (d.search_text || d.search_links) @@ $2::tsquery)
+      -- Tags: a tag of each of the tag_group_count groups (tag_groups[i]
+      -- is the group of tag_ids[i]), and none of not_tag_ids.
+      AND ($3::int = 0 OR $3::int = (
+           SELECT count(DISTINCT ($4::int[])[g.n]) FROM document_tags dt
+           JOIN unnest($5::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
+           WHERE dt.document_id = d.id))
+      AND (coalesce(cardinality($6::uuid[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM document_tags dt
+           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($6::uuid[])))
+      AND ($7::uuid[] IS NULL OR d.correspondent_id = ANY ($7::uuid[]))
+      AND (coalesce(cardinality($8::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
+           OR NOT d.correspondent_id = ANY ($8::uuid[]))
+      AND ($9::uuid[] IS NULL OR d.document_type_id = ANY ($9::uuid[]))
+      AND (coalesce(cardinality($10::uuid[]), 0) = 0 OR d.document_type_id IS NULL
+           OR NOT d.document_type_id = ANY ($10::uuid[]))
+      AND ($11::int[] IS NULL OR d.archive_serial_number = ANY ($11::int[]))
+      AND (coalesce(cardinality($12::int[]), 0) = 0 OR d.archive_serial_number IS NULL
+           OR NOT d.archive_serial_number = ANY ($12::int[]))
+      -- Dates: within [from, to), and outside each excluded range
+      -- [not_*_from[i], not_*_to[i]).
+      AND ($13::timestamptz IS NULL OR d.document_date >= $13::timestamptz)
+      AND ($14::timestamptz IS NULL OR d.document_date < $14::timestamptz)
+      AND (coalesce(cardinality($15::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($15::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.document_date >= r.lo AND d.document_date < ($16::timestamptz[])[r.n]))
+      AND ($17::timestamptz IS NULL OR d.created_at >= $17::timestamptz)
+      AND ($18::timestamptz IS NULL OR d.created_at < $18::timestamptz)
+      AND (coalesce(cardinality($19::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($19::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.created_at >= r.lo AND d.created_at < ($20::timestamptz[])[r.n]))
+      AND ($21::boolean IS NULL OR d.is_inbox = $21::boolean)
+      AND ($22::boolean IS NULL OR d.is_favorite = $22::boolean)
+      -- filters:end
+ORDER BY d.id
+LIMIT $23
+`
+
+type MatchDocumentIDsParams struct {
+	Owner             *int64
+	Query             interface{}
+	TagGroupCount     int32
+	TagGroups         []int32
+	TagIds            []pgtype.UUID
+	NotTagIds         []pgtype.UUID
+	Correspondents    []pgtype.UUID
+	NotCorrespondents []pgtype.UUID
+	Types             []pgtype.UUID
+	NotTypes          []pgtype.UUID
+	Asns              []int32
+	NotAsns           []int32
+	DateFrom          *time.Time
+	DateTo            *time.Time
+	NotDateFrom       []time.Time
+	NotDateTo         []time.Time
+	AddedFrom         *time.Time
+	AddedTo           *time.Time
+	NotAddedFrom      []time.Time
+	NotAddedTo        []time.Time
+	Inbox             *bool
+	Favorite          *bool
+	Lim               int32
+}
+
+type MatchDocumentIDsRow struct {
+	ID      pgtype.UUID
+	OwnerID int64
+	Total   int64
+}
+
+// The ids of the documents a bulk change by search covers (store.
+// BulkUpdateDocuments): every match of the filters, in id order, at most
+// lim, each with the number of all matches and their owners.
+func (q *Queries) MatchDocumentIDs(ctx context.Context, arg MatchDocumentIDsParams) ([]MatchDocumentIDsRow, error) {
+	rows, err := q.db.Query(ctx, matchDocumentIDs,
+		arg.Owner,
+		arg.Query,
+		arg.TagGroupCount,
+		arg.TagGroups,
+		arg.TagIds,
+		arg.NotTagIds,
+		arg.Correspondents,
+		arg.NotCorrespondents,
+		arg.Types,
+		arg.NotTypes,
+		arg.Asns,
+		arg.NotAsns,
+		arg.DateFrom,
+		arg.DateTo,
+		arg.NotDateFrom,
+		arg.NotDateTo,
+		arg.AddedFrom,
+		arg.AddedTo,
+		arg.NotAddedFrom,
+		arg.NotAddedTo,
+		arg.Inbox,
+		arg.Favorite,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MatchDocumentIDsRow
+	for rows.Next() {
+		var i MatchDocumentIDsRow
+		if err := rows.Scan(&i.ID, &i.OwnerID, &i.Total); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const searchDocumentsAddedAsc = `-- name: SearchDocumentsAddedAsc :many
 SELECT x.id, x.owner_id, x.title, x.document_date, x.created_at, x.modified_at, x.notes, x.is_favorite,
        x.is_inbox, x.archive_serial_number, x.page_count, ''::text AS extracted_text, x.text_source, x.source,

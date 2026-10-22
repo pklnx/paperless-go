@@ -272,8 +272,8 @@ func TestListDocumentsUnchanged(t *testing.T) {
 	}
 	want := []string{
 		"archiveSerialNumber", "archiveSize", "correspondentId", "createdAt", "documentDate", "documentTypeId", "hasArchive", "id",
-		"isFavorite", "isInbox", "modifiedAt", "notes", "originalFileName", "originalMime", "originalSize", "pageCount",
-		"processing", "processingNote", "source", "tagIds", "thumbnailUrl", "title",
+		"isFavorite", "isInbox", "modifiedAt", "notes", "originalFileName", "originalMime", "originalSize", "ownerId",
+		"pageCount", "processing", "processingNote", "source", "tagIds", "thumbnailUrl", "title",
 	}
 	for _, d := range listed(t, out) {
 		var keys []string
@@ -287,9 +287,9 @@ func TestListDocumentsUnchanged(t *testing.T) {
 	}
 }
 
-// The first page of a search writes document.search with the query and
-// the filters; further pages, plain lists and refused searches write
-// nothing.
+// The first page of a typed search (q) writes document.search with the
+// query and the filters; filter parameters alone (browsing the sidebar),
+// further pages, plain lists and refused searches write nothing.
 func TestSearchAudit(t *testing.T) {
 	f := newSearchFixture(t)
 	tagID := "00000000-0000-0000-0000-000000000001"
@@ -299,8 +299,11 @@ func TestSearchAudit(t *testing.T) {
 		details map[string]any // nil: no entry
 	}{
 		{searchPath("q", "rechnung tag:Steuer", "sort", "added", "tz", "Europe/Berlin", "limit", "5"), map[string]any{"q": "rechnung tag:Steuer"}},
-		{searchPath("tag", tagID, "tag", tagID, "inbox", "false"), map[string]any{"tag": []any{tagID, tagID}, "inbox": "false"}},
-		{searchPath("correspondent", tagID, "type", tagID), map[string]any{"correspondent": []any{tagID}, "type": []any{tagID}}},
+		{searchPath("q", "strom", "tag", tagID, "tag", tagID, "inbox", "false", "favorite", "true"),
+			map[string]any{"q": "strom", "tag": []any{tagID, tagID}, "inbox": "false", "favorite": "true"}},
+		{searchPath("tag", tagID, "tag", tagID, "inbox", "false"), nil},
+		{searchPath("correspondent", tagID, "type", tagID), nil},
+		{searchPath("favorite", "true", "owner", "me"), nil},
 		{"/api/documents", nil},
 		{searchPath("limit", "5", "sort", "date", "order", "asc"), nil},
 		{searchPath("q", "   "), nil},

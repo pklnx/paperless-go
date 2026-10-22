@@ -18,6 +18,7 @@ func TestHandler(t *testing.T) {
 	if rec.Header().Get("X-Frame-Options") != "DENY" {
 		t.Error("missing X-Frame-Options")
 	}
+	checkPolicies(t, rec)
 	// Without a UI build (plain `go test`), a hint page is served instead.
 	switch rec.Code {
 	case http.StatusOK:
@@ -36,5 +37,19 @@ func TestHandler(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/assets/does-not-exist.js", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("missing asset: status %d", rec.Code)
+	}
+	checkPolicies(t, rec)
+}
+
+// checkPolicies checks the headers every UI answer carries, also assets.
+func checkPolicies(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	for name, want := range map[string]string{
+		"Permissions-Policy":           "camera=(), microphone=(), geolocation=()",
+		"Cross-Origin-Resource-Policy": "same-origin",
+	} {
+		if got := rec.Header().Get(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
 	}
 }
