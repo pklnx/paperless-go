@@ -12,5 +12,5 @@
   { "name": "needs-plan",    "color": "c2e0c6", "description": "Claude GitHub Action writes the implementation plan" },
   { "name": "plan-review",   "color": "d4c5f9", "description": "Claude GitHub Action reviews the posted plan independently" },
   { "name": "second-review", "color": "fef2c0", "description": "Claude GitHub Action reviews the pull request as second reviewer" },
-  { "name": "security",      "color": "b60205", "description": "Security problem; the repository is private" }
+  { "name": "security",      "color": "b60205", "description": "Security hardening (never an undisclosed vulnerability)" }
 ]

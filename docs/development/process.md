@@ -12,8 +12,9 @@ Every change starts as a GitHub issue:
   (steps and version for bugs, problem and "done when" for features).
 - Findings from test reports become issues, one per topic, with a link to
   the report.
-- Security problems are issues with the label `security` (the repository
-  is private; see `SECURITY.md`).
+- Vulnerabilities are reported privately through GitHub private
+  vulnerability reporting, never as a public issue (see `SECURITY.md`).
+  The label `security` marks public hardening work only.
 
 ## 2. Plan
 
@@ -65,6 +66,13 @@ reopened or marked ready for review, and on the push that brings the first
 migration change into a pull request (not on other pushes; the check reads
 at most 300 files of the earlier state, so a very large pull request may get
 one review more). The Action only comments; it never pushes.
+
+Pull requests from forks never get the Action's second review, not even
+with the label or a migration, and `@claude` does not answer on them: their
+runs get no secrets, and the Action never runs fork code with secrets. They
+are reviewed in a Claude session; if one needs a second review, the
+maintainer moves it onto a branch in this repository. GitHub also asks the
+maintainer to approve workflow runs of outside contributors.
 
 Go toolchain bumps change the `toolchain` line in `go.mod` and the `golang` tag
 in the `Dockerfile` together, in one pull request: the image build fails when

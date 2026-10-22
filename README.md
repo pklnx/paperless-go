@@ -41,20 +41,16 @@ and the full document UI follow step by step; see the
 
 ## Quick start
 
-The repository and its images on `ghcr.io` are private. Downloads need the
-[GitHub CLI](https://cli.github.com/) signed in to an account with access,
-with the `read:packages` scope for the images:
+Download the Docker Compose bundle of the latest release, check it and
+extract it. The first `./pgo` command pulls the images from `ghcr.io`
+without a sign-in, as does `docker pull ghcr.io/pklnx/paperless-go:latest`
+without `docker login` (this needs the package to be public).
 
 ```sh
-gh auth login
-gh auth refresh -s read:packages
-gh auth token | docker login ghcr.io -u "$(gh api user -q .login)" --password-stdin
-```
-
-Then:
-
-```sh
-gh release download --repo pklnx/paperless-go --pattern paperless-go.tar.gz --clobber && tar -xzf paperless-go.tar.gz
+curl -fLO https://github.com/pklnx/paperless-go/releases/latest/download/paperless-go.tar.gz
+curl -fLO https://github.com/pklnx/paperless-go/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS   # macOS: shasum -a 256 -c SHA256SUMS
+tar -xzf paperless-go.tar.gz
 cd paperless-go
 cp .env.example .env    # set POSTGRES_PASSWORD
 ./pgo keygen            # set PAPERLESS_GO_SECRET_KEY in .env to its output
@@ -72,6 +68,7 @@ More in the [getting started guide](https://pklnx.github.io/paperless-go/guide/g
 
 ## Development
 
+Contributions are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 See [Contributing](https://pklnx.github.io/paperless-go/development/) for
 the toolchain, tests, migrations and the documentation workflow. The
 documentation sources are in [`docs/`](docs/).
