@@ -30,7 +30,12 @@ consume/            CONSUME_DIR in .env, default ./consume
   starts with a dot gets no folder.
 - **When.** The server looks every 10 seconds. A file is imported once its
   size and modification time have not changed for two looks at least 2
-  seconds apart, so a file that is still being copied waits.
+  seconds apart, so a file that is still being copied waits. A PDF, JPEG or
+  PNG must also be complete: a PDF needs `%%EOF` in its last kilobyte, a
+  JPEG its end-of-image marker and a PNG its `IEND` chunk at the end. A file
+  without it waits, in case its writer only paused, and is imported anyway
+  once it has not changed for 10 minutes (some real files lack the marker).
+  HEIC/HEIF has no such marker and is imported once it settles.
 - **Which files.** PDF, JPEG, PNG and HEIC/HEIF directly in your folder;
   the type is decided from the content. Not touched: hidden files (starting
   with a dot), `*.part`, `*.tmp`, `~$*` (Office lock files), subfolders,
@@ -46,7 +51,8 @@ consume/            CONSUME_DIR in .env, default ./consume
   file and put it back into your folder to try again.
 - **Errors that are not the file's** (the database is down, the server
   stops) leave the file where it is; the next look tries again. A file that
-  cannot be deleted or moved (the folder is not writable for the server) is
+  cannot be read, deleted or moved (for example, the folder is not writable
+  for the server) stays where it is with one warning in the log and is
   tried again after an hour, or as soon as it changes.
 
 With Docker Compose the consume folder is on: `./pgo migrate` creates it
@@ -58,6 +64,13 @@ you use:
 ```sh
 sudo chmod -R a+rwX consume
 ```
+
+The server must also be able to read each file: a file you save with mode
+`0600` (readable only by you) cannot be read by UID 65532 and stays where it
+is, with one warning in the log. Save files readable for others, or give
+them to the server's group. The consume folder must not be the data
+directory or lie inside it (or the other way round): `serve` refuses to
+start then.
 
 New user folders get the permissions of the consume folder. To turn the
 consume folder off, set `PAPERLESS_GO_CONSUME_DIR=` (empty) in `.env`.

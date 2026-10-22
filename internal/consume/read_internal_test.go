@@ -1,12 +1,16 @@
 package consume
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,13 +48,16 @@ func TestUnreadableFileDoesNotStopTheScan(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(p, []byte("%PDF-1.7\n"), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte("%PDF-1.7\n%%EOF\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	im := &readingImporter{}
-	c := New(dir, staticUsers{{ID: 1, Name: "anna"}}, im, Options{Now: func() time.Time { return now }})
+	var logs bytes.Buffer
+	c := New(dir, staticUsers{{ID: 1, Name: "anna"}}, im, Options{
+		Now: func() time.Time { return now }, Log: slog.New(slog.NewTextHandler(&logs, nil)),
+	})
 	c.open = func(r *os.Root, name string) (file, error) {
 		f, err := openInput(r, name)
 		if err != nil {
@@ -63,13 +70,25 @@ func TestUnreadableFileDoesNotStopTheScan(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = now.Add(DefaultSettle)
-	for range 2 {
+	for range 3 {
 		if _, err := c.Scan(ctx); err != nil {
 			t.Fatalf("scan: %v, want the read error handled per file", err)
 		}
+		now = now.Add(DefaultSettle)
 	}
-	if want := []string{"a.pdf", "b.pdf", "a.pdf", "b.pdf"}; len(im.calls) != len(want) {
+	// Both are tried, then held instead of read at every scan.
+	if want := []string{"a.pdf", "b.pdf"}; !slices.Equal(im.calls, want) {
 		t.Fatalf("imports: %q, want %q", im.calls, want)
+	}
+	if n := strings.Count(logs.String(), "cannot read the file"); n != 2 {
+		t.Errorf("%d warnings, want one per file:\n%s", n, logs.String())
+	}
+	now = now.Add(HoldTime)
+	if _, err := c.Scan(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a.pdf", "b.pdf", "a.pdf", "b.pdf"}; !slices.Equal(im.calls, want) {
+		t.Fatalf("imports after the hold time: %q, want %q", im.calls, want)
 	}
 	for _, name := range []string{"a.pdf", "b.pdf"} {
 		if _, err := os.Lstat(filepath.Join(dir, "anna", name)); err != nil {
@@ -103,7 +122,7 @@ func holdEnv(t *testing.T, res ingest.Result) (c *Consumer, im *countingImporter
 	if err := os.Mkdir(userDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(userDir, "a.pdf"), []byte("%PDF-1.7\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(userDir, "a.pdf"), []byte("%PDF-1.7\n%%EOF\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t0 := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
@@ -160,7 +179,7 @@ func TestHeldFileChangedIsReadAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	scanN(t, c, now, 2)
-	if err := os.WriteFile(filepath.Join(userDir, "a.pdf"), []byte("%PDF-1.7\nnew version\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(userDir, "a.pdf"), []byte("%PDF-1.7\nnew version\n%%EOF\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	scanN(t, c, now, 2)
@@ -175,7 +194,7 @@ func TestConsumedFileThatCannotBeDeletedIsHeld(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can delete from a read-only folder")
 	}
-	c, im, now, userDir := holdEnv(t, ingest.Result{Outcome: ingest.Duplicate})
+	c, im, now, userDir := holdEnv(t, duplicate)
 	if err := os.Chmod(userDir, 0o555); err != nil {
 		t.Fatal(err)
 	}

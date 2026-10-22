@@ -82,3 +82,39 @@ func TestPrepareConsumeDir(t *testing.T) {
 		t.Errorf("stderr = %q, want %q", stderr.String(), want)
 	}
 }
+
+func TestConsumeDirMustNotOverlapDataDir(t *testing.T) {
+	base := t.TempDir()
+	data := filepath.Join(base, "data")
+	if err := os.Mkdir(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(data, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		consume string
+		ok      bool
+	}{
+		{data, false},
+		{filepath.Join(data, "consume"), false}, // inside, not created yet
+		{base, false},                           // around it
+		{link, false},                           // the data directory through a link
+		{filepath.Join(link, "documents", "x"), false}, // inside through a link
+		{data + "/../data/", false},
+		{filepath.Join(base, "consume"), true},
+		{filepath.Join(base, "data2"), true},
+	} {
+		err := checkSeparate(tt.consume, data)
+		if (err == nil) != tt.ok {
+			t.Errorf("checkSeparate(%q) = %v, want ok %v", tt.consume, err, tt.ok)
+		}
+	}
+	// newConsumer, and so serve, refuses to start.
+	st := storetest.New(t)
+	a := &app{cfg: &config.Config{DataDir: data, ConsumeDir: filepath.Join(link, "consume"), MaxUploadSize: 1 << 20}, store: st}
+	if _, err := newConsumer(a, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), config.EnvConsumeDir) {
+		t.Fatalf("newConsumer = %v, want an error naming %s", err, config.EnvConsumeDir)
+	}
+}

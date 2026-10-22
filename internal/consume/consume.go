@@ -20,6 +20,7 @@
 package consume
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pklnx/paperless-go/internal/ingest"
 	"github.com/pklnx/paperless-go/internal/store"
@@ -62,6 +64,14 @@ const maxSuffix = 9999
 // file would be read and stored again at every scan.
 const HoldTime = time.Hour
 
+// IncompleteTime is how long a PDF, JPEG or PNG without its end marker
+// waits, unchanged, before it is imported anyway: the writer may only
+// have paused, but some real files lack the marker.
+const IncompleteTime = 10 * time.Minute
+
+// maxNameBytes is the longest file name most file systems allow.
+const maxNameBytes = 255
+
 // Users is the part of *store.Store the consumer uses.
 type Users interface {
 	ListUsers(ctx context.Context) ([]*store.User, error)
@@ -91,6 +101,8 @@ type Consumer struct {
 	now    func() time.Time
 	settle time.Duration
 	open   func(r *os.Root, name string) (file, error)
+	// openRoot opens a user's folder; tests replace it.
+	openRoot func(r *os.Root, name string) (*os.Root, error)
 
 	// seen is the last observation of each candidate file.
 	seen map[fileKey]observation
@@ -104,6 +116,7 @@ type Consumer struct {
 	warned  map[string]int
 	scanNo  int
 	rootErr string
+	scanErr string // the last error of Run's scans, logged once
 }
 
 type fileKey struct {
@@ -123,6 +136,7 @@ type observation struct {
 // file is an opened input; *os.File implements it.
 type file interface {
 	io.Reader
+	io.ReaderAt
 	Stat() (fs.FileInfo, error)
 	Close() error
 }
@@ -131,11 +145,12 @@ type file interface {
 func New(dir string, users Users, im Importer, opts Options) *Consumer {
 	c := &Consumer{
 		dir: dir, users: users, im: im, log: opts.Log, now: opts.Now, settle: opts.Settle,
-		open:    openInput,
-		seen:    make(map[fileKey]observation),
-		visited: make(map[fileKey]bool),
-		partial: make(map[int64]bool),
-		warned:  make(map[string]int),
+		open:     openInput,
+		openRoot: func(r *os.Root, name string) (*os.Root, error) { return r.OpenRoot(name) },
+		seen:     make(map[fileKey]observation),
+		visited:  make(map[fileKey]bool),
+		partial:  make(map[int64]bool),
+		warned:   make(map[string]int),
 	}
 	if c.log == nil {
 		c.log = slog.New(slog.DiscardHandler)
@@ -153,8 +168,18 @@ func New(dir string, users Users, im Importer, opts Options) *Consumer {
 // only the scan it happened in; the next tick scans again.
 func (c *Consumer) Run(ctx context.Context, tick <-chan time.Time) {
 	for {
-		if _, err := c.Scan(ctx); err != nil && ctx.Err() == nil {
-			c.log.Warn("consume folder: scan stopped, the files stay for the next scan", "err", err)
+		_, err := c.Scan(ctx)
+		switch {
+		case ctx.Err() != nil:
+		case err != nil:
+			// Logged once per kind of failure, not at every tick.
+			if msg := err.Error(); msg != c.scanErr {
+				c.scanErr = msg
+				c.log.Warn("consume folder: scan stopped, the files stay for the next scan", "err", err)
+			}
+		case c.scanErr != "":
+			c.scanErr = ""
+			c.log.Info("consume folder: scans work again")
 		}
 		select {
 		case <-ctx.Done():
@@ -331,7 +356,7 @@ func (c *Consumer) scanUser(ctx context.Context, root *os.Root, u *store.User, s
 		c.warnOnce("folder:"+u.Name, "consume folder: the user's entry is not a folder; skipped", "user", u.Name)
 		return nil
 	}
-	ur, err := root.OpenRoot(u.Name)
+	ur, err := c.openRoot(root, u.Name)
 	if err != nil {
 		c.warnOnce("folder:"+u.Name, "consume folder: cannot open the user's folder", "user", u.Name, "err", err)
 		return nil
@@ -462,14 +487,26 @@ func (c *Consumer) consume(ctx context.Context, ur *os.Root, u *store.User, key 
 		delete(c.seen, key)
 		return nil //nolint:nilerr // the file's own problem, not a transient error of the scan
 	}
+	ok, err := complete(f, fi.Size())
+	if err != nil {
+		_ = f.Close()
+		c.readError(u, key, fi, err)
+		return nil
+	}
+	if !ok && c.now().Sub(c.seen[key].at) < IncompleteTime {
+		// Probably still being written by a writer that paused: wait.
+		_ = f.Close()
+		st.Waiting++
+		c.log.Debug("consume folder: the file has no end marker yet; waiting", "user", u.Name, "file", name)
+		return nil
+	}
 	body := &readErrReader{r: f}
 	res, err := c.im.Import(ctx, ingest.Request{OwnerID: u.ID, FileName: name, Body: body})
 	_ = f.Close()
 	if err != nil {
 		if body.err != nil {
 			// The file could not be read; the others may well be.
-			c.warnOnce(c.fileWarnKey("read", key), "consume folder: cannot read the file; left in place",
-				"user", u.Name, "file", name, "err", body.err)
+			c.readError(u, key, fi, body.err)
 			return nil //nolint:nilerr // the file's own problem, not a transient error of the scan
 		}
 		return err
@@ -480,6 +517,13 @@ func (c *Consumer) consume(ctx context.Context, ur *os.Root, u *store.User, key 
 		c.log.Info("consume folder: imported", "user", u.Name, "file", name, "document", res.Document.ID)
 		c.remove(ur, u, key, fi)
 	case ingest.Duplicate:
+		if res.Existing.ID == "" {
+			// The colliding document is gone: nothing holds this file
+			// now. The next scan imports it as a new document.
+			c.log.Info("consume folder: the duplicate's document no longer exists; left for the next scan",
+				"user", u.Name, "file", name)
+			return nil
+		}
 		st.Duplicates++
 		c.log.Info("consume folder: duplicate, the user already has this file", "user", u.Name, "file", name,
 			"document", res.Existing.ID)
@@ -492,6 +536,59 @@ func (c *Consumer) consume(ctx context.Context, ur *os.Root, u *store.User, key 
 		return fmt.Errorf("unexpected import outcome %v", res.Outcome)
 	}
 	return nil
+}
+
+// readError holds a file that could not be read: it is read again after
+// HoldTime or when it changes, not at every scan.
+func (c *Consumer) readError(u *store.User, key fileKey, fi fs.FileInfo, err error) {
+	c.warnOnce(c.fileWarnKey("read", key), "consume folder: cannot read the file; left in place, trying again in an hour",
+		"user", u.Name, "file", key.name, "err", err)
+	c.hold(key, fi)
+}
+
+// Kinds of file the completeness check knows.
+var (
+	pdfEnd  = []byte("%%EOF")
+	jpegEnd = []byte{0xFF, 0xD9}
+	pngEnd  = []byte{'I', 'E', 'N', 'D', 0xAE, 0x42, 0x60, 0x82}
+	pngSig  = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'}
+)
+
+// Where the end markers must be: %%EOF within the last 1 KiB of a PDF,
+// the JPEG end of image and the PNG IEND chunk within the last bytes
+// (a few bytes of padding after them are allowed).
+const (
+	pdfTail   = 1024
+	imageTail = 32
+)
+
+// complete reports whether a PDF, JPEG or PNG has its end marker, so a
+// file whose writer paused is not taken for a finished one. Other types
+// (HEIC/HEIF has no reliable marker, unsupported files are refused
+// anyway) are always complete.
+func complete(f io.ReaderAt, size int64) (bool, error) {
+	head := make([]byte, min(size, 1024))
+	if _, err := f.ReadAt(head, 0); err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	var marker []byte
+	tail := int64(imageTail)
+	switch {
+	case bytes.Contains(head, []byte("%PDF-")):
+		marker, tail = pdfEnd, pdfTail
+	case bytes.HasPrefix(head, []byte{0xFF, 0xD8, 0xFF}):
+		marker = jpegEnd
+	case bytes.HasPrefix(head, pngSig):
+		marker = pngEnd
+	default:
+		return true, nil
+	}
+	tail = min(tail, size)
+	end := make([]byte, tail)
+	if _, err := f.ReadAt(end, size-tail); err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	return bytes.Contains(end, marker), nil
 }
 
 // remove deletes a consumed file if it is still the version that was read.
@@ -584,16 +681,31 @@ func (c *Consumer) failedDir(ur *os.Root, u *store.User) bool {
 func freeName(ur *os.Root, name string) (string, bool) {
 	ext := path.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
+	if len(ext) > maxNameBytes/2 {
+		stem, ext = name, ""
+	}
 	for n := 0; n <= maxSuffix; n++ {
-		target := name
+		suffix := ""
 		if n > 0 {
-			target = stem + "-" + strconv.Itoa(n) + ext
+			suffix = "-" + strconv.Itoa(n)
 		}
+		// The sidecar's name must fit too: shorten the stem, keep the
+		// extension.
+		target := cutBytes(stem, maxNameBytes-len(ErrorSuffix)-len(suffix)-len(ext)) + suffix + ext
 		if !exists(ur, path.Join(FailedDir, target)) && !exists(ur, path.Join(FailedDir, target+ErrorSuffix)) {
 			return target, true
 		}
 	}
 	return "", false
+}
+
+// cutBytes cuts s to at most n bytes on a character boundary.
+func cutBytes(s string, n int) string {
+	for len(s) > n {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+	}
+	return s
 }
 
 func exists(r *os.Root, name string) bool {

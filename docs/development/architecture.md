@@ -249,21 +249,35 @@ creates it). One scan every 10 s (the trigger and the clock are injected):
 - **Settling.** A file is imported when an earlier scan at least 2 s ago saw
   the same file (identity), size and modification time. Hidden names,
   `*.part`, `*.tmp`, `~$*`, subfolders and `failed/` are ignored.
+- **Completeness.** A settled PDF also needs `%%EOF` in its last 1 KiB, a
+  JPEG `FF D9` and a PNG its `IEND` chunk in the last 32 bytes (some padding
+  allowed), so a writer that paused for longer than two scans does not get a
+  truncated file imported and deleted. A file without the marker waits and
+  is imported anyway after 10 minutes unchanged (`IncompleteTime`).
+  HEIC/HEIF has no reliable marker and only settles.
 - **Outcomes.** `Imported` and `Duplicate` delete the file, after the
   committed row, only if `Lstat` still shows the version that was read.
+  A `Duplicate` whose existing document is gone (empty ID) keeps the file
+  for the next scan, which imports it as new.
   `Refused` moves it to `failed/` under a free name (`name-N.ext`, checked
-  together with its sidecar; the check and the rename are not atomic, the
+  together with its sidecar, with the stem shortened so that the sidecar's
+  name fits in 255 bytes; the check and the rename are not atomic, the
   consumer is the only expected writer) and writes `<name>.error.txt`. A
-  read error of the file itself leaves it in place (logged once) and the
-  scan goes on; any other import error (database, blob store, shutdown)
+  read error of the file itself leaves it in place (logged once, held like
+  below) and the scan goes on; any other import error (database, blob store, shutdown)
   stops the scan and leaves the files for the next one. `ErrUnknownUser` (a
   user removed during the scan) skips the rest of that user's folder.
+  `Run` logs a failing scan once until the error changes.
   A file that was read but cannot be deleted or moved (a folder that is not
   writable, `failed/` that is not a folder) is held for an hour unless it
   changes, so it is not read and stored again at every scan.
+- **Overlap.** `serve` refuses a consume folder that is the data directory,
+  inside it or around it (after resolving symlinks): the consumer would
+  delete document files.
 - **Limit.** A file that changes after it settled but while it is read may
   be imported in its partial state; it then stays and is imported again as
-  a new document once it settles.
+  a new document once it settles. The recheck before `Remove` and the
+  `Remove` itself are not atomic.
 - **Audit.** No audit entry: the audit log's actors are `session`,
   `api_key` and `cli`, none of which fits the server itself. The log has an
   info line per consumed file.

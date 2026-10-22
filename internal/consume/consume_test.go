@@ -403,7 +403,7 @@ func TestRefusedFilesMoveToFailed(t *testing.T) {
 	e.write("anna/failed/memo.txt", []byte("left by the user"))
 	e.write("anna/memo.txt", []byte("memo"))
 	// Too large for the 1 MiB limit.
-	e.write("anna/big.pdf", append(pdf(""), make([]byte, 1<<20)...))
+	e.write("anna/big.pdf", append(append(pdf(""), make([]byte, 1<<20)...), pdf("")...))
 	if st := e.settle(); st.Failed != 3 {
 		t.Fatalf("stats: %+v, want 3 failed", st)
 	}
