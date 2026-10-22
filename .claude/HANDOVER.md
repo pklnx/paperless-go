@@ -3,13 +3,13 @@
 State of the work for the next session. Update before a session ends.
 
 ## Open PRs
-- #47 consume folder (#31, part 4 of #4): both reviews approve; the data-loss fixes (duplicate without a document keeps the file, completeness check before import) are under re-review. Needs a merge of main after #46 before it can merge.
 - API keys and security docs (#20, part 5 of #3): being implemented (migration 00009).
+- OCR and image to PDF (#35, part 3 of #5): being implemented; requeues the scans and images part 2 failed.
 
 ## Next tickets
 - #3 users and login: parts 1–4 merged (#29, #38, #40, #45); #20 is the last part.
-- #4 upload and import: parts 1–3 and 5 merged (#41, #43, #44, #46); #31 (consume folder) in review.
-- #5 processing and OCR: parts 1–2 merged (#37, #42); next #35 (OCR, image to PDF; see its comments: requeue the jobs part 2 failed, `heif-dec`, `libheif-plugin-x265` in `toolstest`), then part 4 (thumbnails).
+- #4 upload and import: done (#41, #43, #44, #46, #47).
+- #5 processing and OCR: parts 1–2 merged (#37, #42); #35 (OCR, image to PDF) in progress, then part 4 (thumbnails).
 - #39 (admin changes in the user's own log), #48 (passkey ceremony caps), #49 (`system` audit actor): need plans.
 - Backlog: #6 to #12 (roadmap steps 5 to 11), #21 (transfer a user's data).
 
@@ -26,7 +26,7 @@ State of the work for the next session. Update before a session ends.
 - Planners create sub-issues when a plan has parts. 2-3 agents may run at a time. Work only on paperless-go.
 
 ## Done (2026-10-21/22)
-- #1 foundation; #22–#25 document model (#2); #29 users and sessions (#16); #37 Debian image with OCR tools (#33); #38 audit log (#17); #40 TOTP and secret key (#18, `breaking`); #41 store hardening (#27); #42 processing queue (#34); #43 ingest (#28); #44 CLI import (#30); #45 passkeys (#19); #46 upload API and UI (#32).
+- #1 foundation; #22–#25 document model (#2); #29 users and sessions (#16); #37 Debian image with OCR tools (#33); #38 audit log (#17); #40 TOTP and secret key (#18, `breaking`); #41 store hardening (#27); #42 processing queue (#34); #43 ingest (#28); #44 CLI import (#30); #45 passkeys (#19); #46 upload API and UI (#32); #47 consume folder (#31).
 
 ## Manual checks for the maintainer
 - Ruleset for `main` with the required checks (test, lint, vulncheck, docker, compose, web; `toolstest` recommended).
