@@ -107,13 +107,13 @@ describe("LogPage", () => {
     expect(urls.some((u) => u.includes("actor=system"))).toBe(false);
   });
 
-  const consumeEntry = (byOther: boolean): AuditEntry => ({
+  const consumeEntry = (byOther: boolean, interrupted = false): AuditEntry => ({
     id: 9,
     at: "2026-10-22T10:00:00Z",
     actor: "system",
     action: "document.consume",
     target: { type: "user", id: "2", name: "alice" },
-    details: { imported: 2, duplicates: 1, failed: 0 },
+    details: { imported: 2, duplicates: 1, failed: 0, ...(interrupted ? { interrupted: true } : {}) },
     ...(byOther ? { byOther: true } : {}),
   });
 
@@ -125,6 +125,22 @@ describe("LogPage", () => {
     expect(screen.getByText(/· alice/)).toBeTruthy();
     expect(screen.getByText(`${t.logImported(2)}, ${t.logDuplicates(1)}`)).toBeTruthy();
     expect(screen.queryByText(new RegExp(t.logByServer))).toBeNull();
+  });
+
+  it("shows an interrupted scan to the admin and to the user, and no hint otherwise", async () => {
+    const hint = `${t.logImported(2)}, ${t.logDuplicates(1)} · ${t.logInterrupted}`;
+    stubServer({ "": { entries: [consumeEntry(false, true)] } });
+    const admin = render(<LogPage admin />);
+    expect(await screen.findByText(hint)).toBeTruthy();
+    admin.unmount();
+    stubServer({ "": { entries: [consumeEntry(true, true)] } });
+    const owner = render(<LogPage admin={false} />);
+    expect(await screen.findByText(hint)).toBeTruthy();
+    owner.unmount();
+    stubServer({ "": { entries: [consumeEntry(true)] } });
+    render(<LogPage admin={false} />);
+    expect(await screen.findByText(`${t.logImported(2)}, ${t.logDuplicates(1)}`)).toBeTruthy();
+    expect(screen.queryByText(new RegExp(t.logInterrupted))).toBeNull();
   });
 
   it("tells a user the server imported files into their account", async () => {
