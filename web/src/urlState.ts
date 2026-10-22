@@ -108,29 +108,70 @@ export function documentQuery(s: ViewState, ownOnly: boolean): DocumentQuery {
   };
 }
 
+/**
+ * Asked before the state changes: by update, and on the back and forward
+ * buttons. False keeps the current state. The open document's form sets
+ * one while it has unsaved changes.
+ */
+export type NavigationGuard = (next: ViewState) => boolean;
+let guard: NavigationGuard | null = null;
+
+/** Sets the guard (null removes it); returns a function that removes this guard again. */
+export function setNavigationGuard(g: NavigationGuard | null): () => void {
+  guard = g;
+  return () => {
+    if (guard === g) guard = null;
+  };
+}
+
 const listeners = new Set<() => void>();
+const currentUrl = () => window.location.pathname + window.location.search;
+/** The URL the listeners last saw: where a refused back or forward returns to. */
+let shownUrl = "";
+
+// One popstate listener for all subscribers, so the guard runs once and
+// before any of them sees the new state. A refused back or forward puts
+// the shown URL back as a new entry (popstate cannot be cancelled).
+function onPopState() {
+  if (guard && !guard(parseState(window.location.search))) {
+    window.history.pushState(null, "", shownUrl);
+    return;
+  }
+  shownUrl = currentUrl();
+  listeners.forEach((fn) => fn());
+}
+
 function subscribe(fn: () => void) {
+  if (listeners.size === 0) {
+    shownUrl = currentUrl();
+    window.addEventListener("popstate", onPopState);
+  }
   listeners.add(fn);
-  window.addEventListener("popstate", fn);
   return () => {
     listeners.delete(fn);
-    window.removeEventListener("popstate", fn);
+    if (listeners.size === 0) window.removeEventListener("popstate", onPopState);
   };
 }
 const getSearch = () => window.location.search;
 
 export type UpdateState = (patch: Partial<ViewState>, opts?: { replace?: boolean }) => void;
 
-/** The state of the URL, and a function that changes it: a new history entry unless replace. */
+/**
+ * The state of the URL, and a function that changes it: a new history
+ * entry unless replace. The navigation guard may refuse the change.
+ */
 export function useViewState(): [ViewState, UpdateState] {
   const search = useSyncExternalStore(subscribe, getSearch);
   const state = parseState(search);
   const update = useCallback<UpdateState>((patch, opts) => {
-    const next = formatState({ ...parseState(window.location.search), ...patch });
+    const nextState = { ...parseState(window.location.search), ...patch };
+    const next = formatState(nextState);
     if (next === window.location.search) return;
+    if (guard && !guard(nextState)) return;
     const url = window.location.pathname + next;
     if (opts?.replace) window.history.replaceState(null, "", url);
     else window.history.pushState(null, "", url);
+    shownUrl = url;
     listeners.forEach((fn) => fn());
   }, []);
   return [state, update];

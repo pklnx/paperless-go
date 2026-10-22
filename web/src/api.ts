@@ -350,6 +350,39 @@ export interface Processing {
 /** Whether processing of d has not finished yet (queued or running). */
 export const processingPending = (d: DocumentSummary) => d.processing?.state === "queued" || d.processing?.state === "running";
 
+/** A document as GET /api/documents/{id} and the PATCH answer it: the list's fields and the rest. */
+export interface DocumentDetail extends DocumentSummary {
+  ownerId: number;
+  modifiedAt: string;
+  notes: string;
+  isFavorite: boolean;
+  isInbox: boolean;
+  archiveSerialNumber: number | null;
+  pageCount: number;
+  archiveSize: number | null;
+  /** What processing noted (fixed texts of the server), or "". */
+  processingNote: string;
+  correspondentId: string | null;
+  documentTypeId: string | null;
+  tagIds: string[];
+}
+
+/**
+ * The fields PATCH /api/documents/{id} changes: only those sent. null
+ * clears the ASN, the correspondent and the type; tagIds replaces the tags.
+ */
+export interface DocumentPatch {
+  title?: string;
+  documentDate?: string;
+  notes?: string;
+  isFavorite?: boolean;
+  isInbox?: boolean;
+  archiveSerialNumber?: number | null;
+  correspondentId?: string | null;
+  documentTypeId?: string | null;
+  tagIds?: string[];
+}
+
 /** A page of GET /api/documents; nextCursor is missing on the last page. */
 export interface DocumentPage {
   documents: DocumentSummary[];
@@ -440,6 +473,11 @@ export const documentsApi = {
     getJSON<DocumentPage>(`/api/documents?${documentListQuery(dq, limit, cursor)}`, signal),
   /** The counts of the sidebar: all, inbox and favourites. */
   counts: (ownOnly: boolean, signal?: AbortSignal) => getJSON<DocumentCounts>(`/api/documents/counts${ownerQuery(ownOnly)}`, signal),
+  /** One document with every field. */
+  get: (id: string, signal?: AbortSignal) => getJSON<DocumentDetail>(`/api/documents/${encodeURIComponent(id)}`, signal),
+  /** Changes the fields of patch; answers the document as it is now. */
+  patch: async (id: string, patch: DocumentPatch): Promise<DocumentDetail> =>
+    (await send<DocumentDetail>("PATCH", `/api/documents/${encodeURIComponent(id)}`, patch))!,
   /** The download URL of a document's original file or archive PDF. */
   fileURL: (id: string, kind: "original" | "archive" = "original") => `/api/documents/${encodeURIComponent(id)}/file?kind=${kind}`,
   /** Queues a document for processing again (Retry); answers the document with its new status. */
@@ -474,15 +512,27 @@ export interface Metadata {
   documentTypes: NamedRow[];
 }
 
+/** The kinds of metadata rows, as their API paths name them. */
+export type MetadataKind = "tags" | "correspondents" | "document-types";
+
+async function loadMetadata(o: string, signal?: AbortSignal): Promise<Metadata> {
+  const [tags, correspondents, types] = await Promise.all([
+    getJSON<{ tags: Tag[] }>(`/api/tags${o}`, signal),
+    getJSON<{ correspondents: NamedRow[] }>(`/api/correspondents${o}`, signal),
+    getJSON<{ documentTypes: NamedRow[] }>(`/api/document-types${o}`, signal),
+  ]);
+  return { tags: tags.tags, correspondents: correspondents.correspondents, documentTypes: types.documentTypes };
+}
+
 export const metadataApi = {
   /** Tags, correspondents and document types with their counts, in one go. */
-  load: async (ownOnly: boolean, signal?: AbortSignal): Promise<Metadata> => {
-    const o = ownerQuery(ownOnly);
-    const [tags, correspondents, types] = await Promise.all([
-      getJSON<{ tags: Tag[] }>(`/api/tags${o}`, signal),
-      getJSON<{ correspondents: NamedRow[] }>(`/api/correspondents${o}`, signal),
-      getJSON<{ documentTypes: NamedRow[] }>(`/api/document-types${o}`, signal),
-    ]);
-    return { tags: tags.tags, correspondents: correspondents.correspondents, documentTypes: types.documentTypes };
-  },
+  load: (ownOnly: boolean, signal?: AbortSignal): Promise<Metadata> => loadMetadata(ownerQuery(ownOnly), signal),
+  /** The rows of one user, for an admin: a document's own metadata (owner=<id>). */
+  loadFor: (ownerId: number, signal?: AbortSignal): Promise<Metadata> => loadMetadata(`?owner=${encodeURIComponent(String(ownerId))}`, signal),
+  /**
+   * Creates a row named name. ownerId makes it another user's row (admins
+   * only): an admin's new tag for a user's document must be that user's.
+   */
+  create: async <K extends MetadataKind>(kind: K, name: string, ownerId?: number): Promise<K extends "tags" ? Tag : NamedRow> =>
+    (await send<K extends "tags" ? Tag : NamedRow>("POST", `/api/${kind}`, ownerId === undefined ? { name } : { name, ownerId }))!,
 };

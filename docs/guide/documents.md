@@ -42,6 +42,42 @@ What the list shows is part of the page's address, so the browser's back
 button returns to the previous list, and a bookmark or a reload opens the
 same list again.
 
+## A document
+
+The title of a row opens the document: on a large screen as a page over
+the list, on a phone as a sheet. The page's address names the document, so
+Back closes it again and a reload or a bookmark opens it.
+
+On the left is the document itself: the archive PDF (with the recognized
+text) once processing made it, else the uploaded PDF. "Fit width", − and +
+zoom; the counter shows the page you are on. The text of the pages can be
+selected and found with the browser's search. A JPEG or PNG that is not
+processed yet shows as an image; a HEIC photo shows once its PDF is ready.
+
+On the right is the form: title, document date, archive serial number,
+correspondent, document type, tags, notes, inbox and favourite. The
+correspondent, type and tag fields search as you type; a name that does not
+exist yet can be created right there ("Create …").
+
+- **Save** stores the changes. Only the fields you changed are sent.
+- **Done** saves, takes the document out of the inbox and, in the inbox,
+  opens the next document. Elsewhere it closes the document.
+- An archive serial number that another document has is refused; the
+  message links to that document.
+- Leaving a document with unsaved changes (another document, Back, closing
+  the tab) asks first.
+
+Below the form are the file's name, type, size, pages and date added, the
+downloads of the original and the archive PDF, and Retry when processing
+failed.
+
+The arrow keys (outside a field) or a swipe go to the previous or next
+document of the list; Escape closes the document.
+
+An admin can open and change other users' documents. Their tags,
+correspondents and types are the owner's, and new ones created there
+belong to the owner. Each change is in the audit log.
+
 ## Admins
 
 An admin sees their own documents, their own tags, correspondents and

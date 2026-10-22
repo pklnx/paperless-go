@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { act, renderHook } from "@testing-library/react";
-import { activeFilter, documentQuery, filterPatch, formatState, parseState, useViewState, type ViewState } from "./urlState";
+import { act, cleanup, renderHook } from "@testing-library/react";
+import { activeFilter, documentQuery, filterPatch, formatState, parseState, setNavigationGuard, useViewState, type ViewState } from "./urlState";
 
 const empty = parseState("");
 
@@ -48,7 +48,11 @@ describe("documentQuery", () => {
 });
 
 describe("useViewState", () => {
-  afterEach(() => window.history.replaceState(null, "", "/"));
+  afterEach(() => {
+    // Unmounted, so the next test's hook is the only subscriber.
+    cleanup();
+    window.history.replaceState(null, "", "/");
+  });
 
   it("pushes a history entry per change, replaces on request, and follows popstate", () => {
     window.history.replaceState(null, "", "/");
@@ -70,5 +74,42 @@ describe("useViewState", () => {
       window.dispatchEvent(new PopStateEvent("popstate"));
     });
     expect(result.current[0]).toEqual({ ...empty, inbox: "1" });
+  });
+
+  it("asks the navigation guard before a change and on Back, and keeps the state when it refuses", () => {
+    window.history.replaceState(null, "", "/?doc=d1");
+    const { result } = renderHook(() => useViewState());
+    let allow = false;
+    const asked: ViewState[] = [];
+    const remove = setNavigationGuard((next) => {
+      asked.push(next);
+      return allow;
+    });
+    try {
+      act(() => result.current[1]({ doc: "d2" }));
+      expect(asked.at(-1)?.doc).toBe("d2");
+      expect(window.location.search).toBe("?doc=d1");
+
+      // Back (here: the URL changed under the app, then popstate), refused:
+      // the shown URL comes back and the state stays.
+      act(() => {
+        window.history.replaceState(null, "", "/?inbox=1");
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      expect(asked.at(-1)?.inbox).toBe("1");
+      expect(window.location.search).toBe("?doc=d1");
+      expect(result.current[0].doc).toBe("d1");
+
+      allow = true;
+      act(() => result.current[1]({ doc: "d2" }));
+      expect(window.location.search).toBe("?doc=d2");
+    } finally {
+      remove();
+    }
+    // Removed: nothing is asked any more.
+    const n = asked.length;
+    act(() => result.current[1]({ doc: "" }));
+    expect(asked).toHaveLength(n);
+    expect(window.location.search).toBe("");
   });
 });

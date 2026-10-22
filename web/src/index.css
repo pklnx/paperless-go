@@ -88,6 +88,10 @@ body {
   outline: 2px solid var(--color-focus);
   outline-offset: 2px;
 }
+/* A heading that takes the focus when a view opens (the document detail) is no control. */
+h2[tabindex="-1"]:focus-visible {
+  outline: none;
+}
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
@@ -160,5 +164,68 @@ dialog.sheet[open]::backdrop {
   *::backdrop {
     animation: none !important;
     transition: none !important;
+  }
+}
+
+/* The PDF viewer's text layer (pdf.js TextLayer, after its pdf_viewer.css):
+   transparent text over the drawn page, for selecting and finding text.
+   The layer's element sets --total-scale-factor and the rounding steps. */
+.textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  line-height: 1;
+  text-align: initial;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 0;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+
+  :is(span, br) {
+    color: transparent;
+    position: absolute;
+    white-space: pre;
+    cursor: text;
+    transform-origin: 0% 0%;
+    user-select: text;
+  }
+
+  > :not(.markedContent),
+  .markedContent span:not(.markedContent) {
+    z-index: 1;
+    --font-height: 0;
+    font-size: calc(var(--text-scale-factor) * var(--font-height));
+    --scale-x: 1;
+    --rotate: 0deg;
+    transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+  }
+
+  .markedContent {
+    display: contents;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, AccentColor, transparent 50%);
+    color: transparent;
+  }
+
+  /* pdf.js appends this to end a selection cleanly. */
+  .endOfContent {
+    display: block;
+    position: absolute;
+    inset: 100% 0 0;
+    z-index: 0;
+    cursor: default;
+    user-select: none;
+  }
+
+  &.selecting .endOfContent {
+    top: 0;
   }
 }
