@@ -468,3 +468,49 @@ CROSS JOIN LATERAL (
     OFFSET 0) si
 -- snippet:end
 ORDER BY x.document_date, x.id DESC;
+
+-- name: MatchDocumentIDs :many
+-- The ids of the documents a bulk change by search covers (store.
+-- BulkUpdateDocuments): every match of the filters, in id order, at most
+-- lim, each with the number of all matches and their owners.
+SELECT d.id, d.owner_id, count(*) OVER ()::bigint AS total
+FROM documents d
+WHERE
+      -- filters:begin (keep all copies equal; TestSearchFilterCopies checks)
+      (sqlc.narg(owner)::bigint IS NULL OR d.owner_id = sqlc.narg(owner))
+      AND (sqlc.narg(query)::tsquery IS NULL OR (d.search_text || d.search_links) @@ sqlc.narg(query)::tsquery)
+      -- Tags: a tag of each of the tag_group_count groups (tag_groups[i]
+      -- is the group of tag_ids[i]), and none of not_tag_ids.
+      AND (sqlc.arg(tag_group_count)::int = 0 OR sqlc.arg(tag_group_count)::int = (
+           SELECT count(DISTINCT (sqlc.arg(tag_groups)::int[])[g.n]) FROM document_tags dt
+           JOIN unnest(sqlc.arg(tag_ids)::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
+           WHERE dt.document_id = d.id))
+      AND (coalesce(cardinality(sqlc.arg(not_tag_ids)::uuid[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM document_tags dt
+           WHERE dt.document_id = d.id AND dt.tag_id = ANY (sqlc.arg(not_tag_ids)::uuid[])))
+      AND (sqlc.narg(correspondents)::uuid[] IS NULL OR d.correspondent_id = ANY (sqlc.narg(correspondents)::uuid[]))
+      AND (coalesce(cardinality(sqlc.arg(not_correspondents)::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
+           OR NOT d.correspondent_id = ANY (sqlc.arg(not_correspondents)::uuid[]))
+      AND (sqlc.narg(types)::uuid[] IS NULL OR d.document_type_id = ANY (sqlc.narg(types)::uuid[]))
+      AND (coalesce(cardinality(sqlc.arg(not_types)::uuid[]), 0) = 0 OR d.document_type_id IS NULL
+           OR NOT d.document_type_id = ANY (sqlc.arg(not_types)::uuid[]))
+      AND (sqlc.narg(asns)::int[] IS NULL OR d.archive_serial_number = ANY (sqlc.narg(asns)::int[]))
+      AND (coalesce(cardinality(sqlc.arg(not_asns)::int[]), 0) = 0 OR d.archive_serial_number IS NULL
+           OR NOT d.archive_serial_number = ANY (sqlc.arg(not_asns)::int[]))
+      -- Dates: within [from, to), and outside each excluded range
+      -- [not_*_from[i], not_*_to[i]).
+      AND (sqlc.narg(date_from)::timestamptz IS NULL OR d.document_date >= sqlc.narg(date_from)::timestamptz)
+      AND (sqlc.narg(date_to)::timestamptz IS NULL OR d.document_date < sqlc.narg(date_to)::timestamptz)
+      AND (coalesce(cardinality(sqlc.arg(not_date_from)::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest(sqlc.arg(not_date_from)::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.document_date >= r.lo AND d.document_date < (sqlc.arg(not_date_to)::timestamptz[])[r.n]))
+      AND (sqlc.narg(added_from)::timestamptz IS NULL OR d.created_at >= sqlc.narg(added_from)::timestamptz)
+      AND (sqlc.narg(added_to)::timestamptz IS NULL OR d.created_at < sqlc.narg(added_to)::timestamptz)
+      AND (coalesce(cardinality(sqlc.arg(not_added_from)::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest(sqlc.arg(not_added_from)::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.created_at >= r.lo AND d.created_at < (sqlc.arg(not_added_to)::timestamptz[])[r.n]))
+      AND (sqlc.narg(inbox)::boolean IS NULL OR d.is_inbox = sqlc.narg(inbox)::boolean)
+      AND (sqlc.narg(favorite)::boolean IS NULL OR d.is_favorite = sqlc.narg(favorite)::boolean)
+      -- filters:end
+ORDER BY d.id
+LIMIT sqlc.arg(lim);
