@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/pklnx/paperless-go/internal/store"
@@ -92,11 +93,15 @@ func (o *optional[T]) UnmarshalJSON(b []byte) error {
 	return json.Unmarshal(b, &o.Value)
 }
 
-// cleanName trims a name and checks it; ok is false after answering 400.
+// cleanName checks a name and trims it; ok is false after answering 400.
+// A name must not contain control characters (Unicode Cc, also NUL, which
+// PostgreSQL refuses). They are checked before trimming, so a leading or
+// trailing newline or tab is refused, not trimmed away.
 func (s *Server) cleanName(w http.ResponseWriter, name string) (string, bool) {
+	hasControl := strings.ContainsFunc(name, unicode.IsControl)
 	name = strings.TrimSpace(name)
-	if name == "" || utf8.RuneCountInString(name) > maxMetadataName {
-		s.refuseMetadata(w, http.StatusBadRequest, codeInvalidName, "invalid name: 1 to 128 characters")
+	if hasControl || name == "" || utf8.RuneCountInString(name) > maxMetadataName {
+		s.refuseMetadata(w, http.StatusBadRequest, codeInvalidName, "invalid name: 1 to 128 characters, no control characters")
 		return "", false
 	}
 	return name, true

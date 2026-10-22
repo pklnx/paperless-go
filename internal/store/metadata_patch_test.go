@@ -160,7 +160,7 @@ func TestConcurrentPatchesBothSurvive(t *testing.T) {
 	for {
 		var waiting bool
 		err := watch.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE%')`).Scan(&waiting)
+			WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%-- name: LockTag%')`).Scan(&waiting)
 		if err == nil && waiting {
 			break
 		}
@@ -182,6 +182,101 @@ func TestConcurrentPatchesBothSurvive(t *testing.T) {
 	got, err := st.GetTag(ctx, alice, tag.ID)
 	if err != nil || got.Name != "New" || got.ColorHex != "#00FF00" {
 		t.Fatalf("after both patches: %+v, %v; want name New and colour #00FF00", got, err)
+	}
+}
+
+// Opposite moves (X under Y while Y goes under X) give one success and one
+// tag_cycle, not a deadlock. With FOR UPDATE in LockTag, A's foreign-key
+// check on Y (FOR KEY SHARE) waited for B's row lock while A held the
+// owner's cycle-check advisory lock that B then waited for: PostgreSQL
+// aborted one of them (ErrRetry, 503).
+func TestOppositeTagMovesGiveCycle(t *testing.T) {
+	st, url := storetest.NewWithURL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	x := mustTag(t, st, alice, "X", nil)
+	y := mustTag(t, st, alice, "Y", nil)
+	watch := connect(t, url)
+
+	move := func(id, parent string, locked, release chan struct{}, done chan<- error) {
+		e := &store.AuditEntry{Actor: store.ActorCLI, Action: "tag.update"}
+		e.SetTarget(store.TargetTag, "", "")
+		held := store.WithAfterLock(store.WithAudit(ctx, e), func() {
+			close(locked)
+			select { // a failing test cancels ctx, so the pool can close
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+		_, err := st.PatchTag(held, alice, id, store.TagPatch{SetParent: true, ParentID: &parent})
+		done <- err
+	}
+	lockedA, releaseA, doneA := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	lockedB, releaseB, doneB := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go move(x.ID, y.ID, lockedA, releaseA, doneA)
+	go move(y.ID, x.ID, lockedB, releaseB, doneB)
+	for _, l := range []struct {
+		name   string
+		locked chan struct{}
+		done   chan error
+	}{{"A", lockedA, doneA}, {"B", lockedB, doneB}} {
+		select {
+		case <-l.locked:
+		case err := <-l.done:
+			t.Fatalf("move %s finished before it locked: %v", l.name, err)
+		case <-ctx.Done():
+			t.Fatalf("move %s never locked its row", l.name)
+		}
+	}
+
+	// Release A; it either finishes or waits for a lock in UpdateTag (Y's
+	// row, the old lock mode).
+	close(releaseA)
+	var errA error
+	finishedA := false
+	for !finishedA {
+		select {
+		case errA = <-doneA:
+			finishedA = true
+			continue
+		case err := <-doneB:
+			t.Fatalf("move B finished before it was released: %v", err)
+		case <-ctx.Done():
+			t.Fatal("move A neither finished nor waited for a lock")
+		default:
+		}
+		var waiting bool
+		err := watch.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%-- name: UpdateTag%')`).Scan(&waiting)
+		if err == nil && waiting {
+			break
+		}
+	}
+	close(releaseB)
+	if !finishedA {
+		errA = <-doneA
+	}
+	errB := <-doneB
+	if errA != nil {
+		t.Errorf("move A: %v, want success", errA)
+	}
+	if !errors.Is(errB, store.ErrTagCycle) {
+		t.Errorf("move B: %v, want ErrTagCycle", errB)
+	}
+	if gx, err := st.GetTag(ctx, alice, x.ID); err != nil || gx.ParentID == nil || *gx.ParentID != y.ID {
+		t.Errorf("X after the moves: %+v, %v; want parent Y", gx, err)
+	}
+	if gy, err := st.GetTag(ctx, alice, y.ID); err != nil || gy.ParentID != nil {
+		t.Errorf("Y after the moves: %+v, %v; want a root", gy, err)
+	}
+	var entries []string
+	rows, err := watch.Query(ctx, `SELECT target_id FROM audit_log WHERE action = 'tag.update'`)
+	if err == nil {
+		entries, err = pgx.CollectRows(rows, pgx.RowTo[string])
+	}
+	if err != nil || len(entries) != 1 || entries[0] != x.ID {
+		t.Errorf("audit entries of the moves: %v, %v; want only X's", entries, err)
 	}
 }
 
