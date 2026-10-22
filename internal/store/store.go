@@ -26,8 +26,10 @@ var migrationsFS embed.FS
 type Store struct {
 	pool *pgxpool.Pool
 	q    *db.Queries
-	// sq runs the search queries as unnamed statements (search.go).
-	sq *db.Queries
+	// sq runs the search queries as unnamed statements (search.go);
+	// searchDB wraps a transaction the same way.
+	sq       *db.Queries
+	searchDB func(db.DBTX) db.DBTX
 	// userAgents caches the IDs of audit log user agents.
 	userAgents userAgentCache
 }
@@ -42,7 +44,9 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("connect to database: %w", err)
 	}
-	return &Store{pool: pool, q: db.New(pool), sq: db.New(unnamedStatements{pool})}, nil
+	s := &Store{pool: pool, q: db.New(pool), searchDB: func(d db.DBTX) db.DBTX { return unnamedStatements{d} }}
+	s.sq = db.New(s.searchDB(pool))
+	return s, nil
 }
 
 // Close releases all connections.

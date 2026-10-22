@@ -105,6 +105,14 @@ func TestSearchBench(t *testing.T) {
 		}
 	})
 	explain := func(name string) {
+		// The store runs the relevance query with sequential scans off.
+		seqscan := "on"
+		if strings.Contains(last.sql, "name: SearchDocumentsRelevance") {
+			seqscan = "off"
+		}
+		if _, err := conn.Exec(ctx, "SET enable_seqscan = "+seqscan); err != nil {
+			t.Fatal(err)
+		}
 		rows, err := conn.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS) "+last.sql, append([]any{pgx.QueryExecModeCacheDescribe}, last.args...)...)
 		if err != nil {
 			t.Fatal(err)

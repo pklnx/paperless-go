@@ -13,7 +13,8 @@ import (
 // to rec before running it, so a test can EXPLAIN exactly what the store
 // runs.
 func RecordSearchSQL(s *Store, rec func(sql string, args []any)) {
-	s.sq = db.New(recorder{unnamedStatements{s.pool}, rec})
+	s.searchDB = func(d db.DBTX) db.DBTX { return recorder{unnamedStatements{d}, rec} }
+	s.sq = db.New(s.searchDB(s.pool))
 }
 
 type recorder struct {

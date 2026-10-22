@@ -174,14 +174,28 @@ func (s *Store) SearchDocuments(ctx context.Context, sc Scope, q search.Query) (
 	var rows []db.SearchDocumentsAddedDescRow
 	switch {
 	case sort == search.SortRelevance:
-		r, err := s.sq.SearchDocumentsRelevance(ctx, db.SearchDocumentsRelevanceParams{
-			Query: args.Query, Owner: args.Owner, TagGroupCount: args.TagGroupCount, TagGroups: args.TagGroups,
-			TagIds: args.TagIds, NotTagIds: args.NotTagIds, Correspondents: args.Correspondents,
-			NotCorrespondents: args.NotCorrespondents, Types: args.Types, NotTypes: args.NotTypes, Asns: args.Asns,
-			NotAsns: args.NotAsns, DateFrom: args.DateFrom, DateTo: args.DateTo, NotDateFrom: args.NotDateFrom,
-			NotDateTo: args.NotDateTo, AddedFrom: args.AddedFrom, AddedTo: args.AddedTo,
-			NotAddedFrom: args.NotAddedFrom, NotAddedTo: args.NotAddedTo, Inbox: args.Inbox,
-			Favorite: args.Favorite, CursorRank: cursorRank, CursorID: args.CursorID, Lim: args.Lim,
+		// Ranking reads the vector of every match. PostgreSQL's estimate
+		// of a broad term often picks a sequential scan, which also reads
+		// (detoasts) the vectors of all the rows that do not match; the
+		// bitmap scan of documents_search_idx reads only the matches.
+		// Measured on 100 000 documents with a term in half of them
+		// (searchbench): 2.0 s instead of 4.1 s on PostgreSQL 16.
+		var r []db.SearchDocumentsRelevanceRow
+		err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+				return err
+			}
+			var err error
+			r, err = db.New(s.searchDB(tx)).SearchDocumentsRelevance(ctx, db.SearchDocumentsRelevanceParams{
+				Query: args.Query, Owner: args.Owner, TagGroupCount: args.TagGroupCount, TagGroups: args.TagGroups,
+				TagIds: args.TagIds, NotTagIds: args.NotTagIds, Correspondents: args.Correspondents,
+				NotCorrespondents: args.NotCorrespondents, Types: args.Types, NotTypes: args.NotTypes, Asns: args.Asns,
+				NotAsns: args.NotAsns, DateFrom: args.DateFrom, DateTo: args.DateTo, NotDateFrom: args.NotDateFrom,
+				NotDateTo: args.NotDateTo, AddedFrom: args.AddedFrom, AddedTo: args.AddedTo,
+				NotAddedFrom: args.NotAddedFrom, NotAddedTo: args.NotAddedTo, Inbox: args.Inbox,
+				Favorite: args.Favorite, CursorRank: cursorRank, CursorID: args.CursorID, Lim: args.Lim,
+			})
+			return err
 		})
 		err = convertRows(&rows, r, err, func(x db.SearchDocumentsRelevanceRow) db.SearchDocumentsAddedDescRow {
 			return db.SearchDocumentsAddedDescRow(x)

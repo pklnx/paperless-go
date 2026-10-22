@@ -241,7 +241,13 @@ index. A prepared statement may switch to a generic plan after five runs,
 which cannot do either.
 
 Relevance is `ts_rank_cd('{0.1,0.2,0.4,1.0}', search_text ||
-search_links, q, 1)`. Paging is by keyset over `(key, id)`: newest first
+search_links, q, 1)`, computed for every match. It runs in a read-only
+transaction with `SET LOCAL enable_seqscan = off`: for a broad term
+PostgreSQL tends to pick a sequential scan, which also detoasts the
+vectors of every row that does not match, while the bitmap scan of
+`documents_search_idx` reads only the matches. The benchmark
+(`go test -tags searchbench -run TestSearchBench ./internal/store/`, 100 000
+documents) has the numbers. Paging is by keyset over `(key, id)`: newest first
 breaks ties by ascending ID, matching `documents_owner_created_idx` and
 `documents_owner_date_idx`; oldest first walks them backwards. The cursor
 is base64url JSON with the sort, the direction, the key (Unix microseconds,
