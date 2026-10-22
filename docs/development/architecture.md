@@ -621,7 +621,11 @@ exempt, see [Login](#login)): `bodyJSON`, the zero value, takes
 raw file with a type from `uploadContentTypes` and never a form or text.
 Then `authenticate` checks the login (see [Login](#login)). Unknown
 `/api/` paths answer `404` in JSON after the login. `/healthz` pings the
-database and answers `503` when it does not answer.
+database and answers `503` when it does not answer. A request has 30 s to
+be read (`ReadTimeout`); upload and download extend both deadlines to an
+hour, so for every other handler the request context is cancelled after
+30 s, since in HTTP/1 the background read of a request ends at the read
+deadline.
 
 ## Documents API
 

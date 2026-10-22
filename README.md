@@ -69,6 +69,8 @@ Create the first admin with `./pgo user add NAME --admin`, then open
 first login. The web UI is only reachable from your own computer; to use it
 from your network or a VPN, put HTTPS in front as described in
 [Security](https://pklnx.github.io/paperless-go/reference/security#network-access).
+For a public address, read [Running on the
+internet](https://pklnx.github.io/paperless-go/guide/internet) first.
 
 More in the [getting started guide](https://pklnx.github.io/paperless-go/guide/getting-started).
 
