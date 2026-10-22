@@ -15,6 +15,8 @@ by default; to reach it from your network or a VPN, follow
 - Docker with a current Docker Compose plugin. Images are published for
   `linux/amd64` and `linux/arm64`, so Apple Silicon Macs and a Raspberry Pi
   with a 64-bit system run them natively.
+- Compose brings PostgreSQL 18. With your own PostgreSQL server instead,
+  it must be PostgreSQL 17 or newer.
 
 ## Install
 

@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -55,4 +57,12 @@ func (r recorder) Query(ctx context.Context, sql string, args ...any) (pgx.Rows,
 func (r recorder) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	r.rec(sql, args)
 	return r.DBTX.QueryRow(ctx, sql, args...)
+}
+
+// SetReindexLockTimeout shortens the lock timeout of the index rebuild for
+// the test.
+func SetReindexLockTimeout(t *testing.T, d time.Duration) {
+	old := reindexLockTimeout
+	reindexLockTimeout = d
+	t.Cleanup(func() { reindexLockTimeout = old })
 }
