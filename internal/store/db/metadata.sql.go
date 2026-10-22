@@ -589,7 +589,7 @@ func (q *Queries) ListTagsWithCounts(ctx context.Context, owner *int64) ([]ListT
 const lockCorrespondent = `-- name: LockCorrespondent :one
 SELECT id, owner_id, name, match_text, match_mode, created_at, modified_at FROM correspondents
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
-FOR UPDATE
+FOR NO KEY UPDATE
 `
 
 type LockCorrespondentParams struct {
@@ -616,7 +616,7 @@ func (q *Queries) LockCorrespondent(ctx context.Context, arg LockCorrespondentPa
 const lockDocumentType = `-- name: LockDocumentType :one
 SELECT id, owner_id, name, symbol, match_text, match_mode, created_at, modified_at FROM document_types
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
-FOR UPDATE
+FOR NO KEY UPDATE
 `
 
 type LockDocumentTypeParams struct {
@@ -644,7 +644,7 @@ func (q *Queries) LockDocumentType(ctx context.Context, arg LockDocumentTypePara
 const lockTag = `-- name: LockTag :one
 SELECT id, owner_id, name, color_hex, symbol, parent_id, match_text, match_mode, created_at, modified_at FROM tags
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
-FOR UPDATE
+FOR NO KEY UPDATE
 `
 
 type LockTagParams struct {

@@ -135,6 +135,60 @@ func TestMetadataNamesAndColors(t *testing.T) {
 	}
 }
 
+// Names with control characters (Unicode Cc: NUL, newline, tab, DEL, C1)
+// are refused with invalid_name on create and rename of every kind, also
+// at the start or end where trimming would have removed them, and nothing
+// is written. NUL used to reach PostgreSQL and answer 500.
+func TestMetadataNameControlCharacters(t *testing.T) {
+	f := newAuthFixture(t)
+	f.addUser("alice", metaPassword, false)
+	a := f.as()
+	a.loginOK("alice", metaPassword)
+
+	kinds := []struct{ path, key string }{
+		{"/api/tags", "tags"}, {"/api/correspondents", "correspondents"}, {"/api/document-types", "documentTypes"},
+	}
+	ids := map[string]string{}
+	for _, k := range kinds {
+		ids[k.path] = a.expect("POST", k.path, map[string]any{"name": "Keep"}, 201)["id"].(string)
+	}
+	n := len(auditLog(t, f.st))
+
+	refuse := func(path string, names []string) {
+		t.Helper()
+		for _, name := range names {
+			for _, req := range []struct{ method, path string }{{"POST", path}, {"PATCH", path + "/" + ids[path]}} {
+				out := a.expect(req.method, req.path, map[string]any{"name": name}, 400)
+				if out["code"] != "invalid_name" {
+					t.Errorf("%s %s %q: code %v, want invalid_name", req.method, req.path, name, out["code"])
+				}
+			}
+		}
+	}
+	refuse("/api/tags", []string{"a\x00b", "a\nb", "Tax\n", "\tTax", "a\rb", "a\u007fb", "a\u0085b", "\x00"})
+	refuse("/api/correspondents", []string{"a\x00b", "a\nb", "Tax\n"})
+	refuse("/api/document-types", []string{"a\x00b", "a\nb", "\tTax"})
+
+	for _, k := range kinds {
+		if rows := metaRows(t, a.expect("GET", k.path, nil, 200), k.key); len(rows) != 1 || rows["Keep"] == nil {
+			t.Errorf("%s after refused names: %v", k.key, rows)
+		}
+	}
+	if got := newEntries(t, f.st, n); len(got) != 0 {
+		t.Errorf("refused names wrote audit entries: %+v", got)
+	}
+
+	// Other characters, inner spaces and outer spaces are still fine.
+	for _, k := range kinds {
+		if got := a.expect("POST", k.path, map[string]any{"name": "  Straße & Co ✓  "}, 201); got["name"] != "Straße & Co ✓" {
+			t.Errorf("%s: created %v", k.path, got)
+		}
+		if got := a.expect("PATCH", k.path+"/"+ids[k.path], map[string]any{"name": "Neue Bank AG"}, 200); got["name"] != "Neue Bank AG" {
+			t.Errorf("%s: renamed %v", k.path, got)
+		}
+	}
+}
+
 func TestMetadataTagErrors(t *testing.T) {
 	f := newAuthFixture(t)
 	f.addUser("alice", metaPassword, false)
@@ -380,6 +434,8 @@ func TestMetadataAudit(t *testing.T) {
 
 	// Without the audit log: 503, and nothing changes.
 	keep := a.expect("POST", "/api/tags", map[string]any{"name": "Keep"}, 201)["id"].(string)
+	keepC := a.expect("POST", "/api/correspondents", map[string]any{"name": "Keep"}, 201)["id"].(string)
+	keepD := a.expect("POST", "/api/document-types", map[string]any{"name": "Keep"}, 201)["id"].(string)
 	breakAudit(t, f.dbURL)
 	for _, req := range []struct {
 		method, path string
@@ -389,15 +445,23 @@ func TestMetadataAudit(t *testing.T) {
 		{"PATCH", "/api/tags/" + keep, map[string]any{"name": "Changed"}},
 		{"DELETE", "/api/tags/" + keep, nil},
 		{"POST", "/api/correspondents", map[string]any{"name": "New"}},
+		{"PATCH", "/api/correspondents/" + keepC, map[string]any{"name": "Changed"}},
+		{"DELETE", "/api/correspondents/" + keepC, nil},
 		{"POST", "/api/document-types", map[string]any{"name": "New"}},
+		{"PATCH", "/api/document-types/" + keepD, map[string]any{"name": "Changed"}},
+		{"DELETE", "/api/document-types/" + keepD, nil},
 	} {
 		a.expect(req.method, req.path, req.body, 503)
 	}
 	if tags := metaRows(t, a.expect("GET", "/api/tags", nil, 200), "tags"); len(tags) != 1 || tags["Keep"] == nil {
 		t.Errorf("tags after refused changes: %v", tags)
 	}
-	if rows := metaRows(t, a.expect("GET", "/api/correspondents", nil, 200), "correspondents"); len(rows) != 0 {
-		t.Errorf("correspondents after refused changes: %v", rows)
+	for _, kind := range []struct{ path, key, id string }{
+		{"/api/correspondents", "correspondents", keepC}, {"/api/document-types", "documentTypes", keepD},
+	} {
+		if rows := metaRows(t, a.expect("GET", kind.path, nil, 200), kind.key); len(rows) != 1 || rows["Keep"] == nil || rows["Keep"]["id"] != kind.id {
+			t.Errorf("%s after refused changes: %v", kind.key, rows)
+		}
 	}
 }
 
