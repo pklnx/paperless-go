@@ -3,16 +3,15 @@
 State of the work for the next session. Update before a session ends.
 
 ## Open PRs
-- None.
+- #109 (#105, detail view: late save, `expectedModifiedAt` precondition, monotonic `modified_at`): review A approved. Being updated: merge main (with #111) — conflicts in `internal/store/documents_edit.go` (`ErrMatchChanged` + `ErrDocumentChanged`), `internal/web/documents_edit.go` (`codeMatchChanged` + `codeDocChanged`; both branches declare `var changed` in `failDocument`, rename one), `web/src/BulkBar.test.tsx`; every `server.user = {…}` that #111 added needs `id`; plus review A's two missing tests (arrow-key/swipe guard with `confirm` true; A → B → A). Then review B.
+- #100 (#92, iPhone guide): approved; waits for the maintainer's device checks listed in the PR body (raw bytes vs multipart is the key one). Don't merge before.
 
 ## Next tickets
-- #3 users and login: done (#29, #38, #40, #45, #51).
-- #4 upload and import: done (#41, #43, #44, #46, #47).
-- #5 processing and OCR: parts 1–3 merged (#37, #42, #55); part 4 is #36 (thumbnails).
-- #6 full-text search: done (#58, #64, #67). Follow-ups: #56 (compound words), #68 (UI sort with `Intl.Collator`), and the follow-ups in the #67 decision comment.
-- #39 done (#60).
-- #48 (passkey ceremony caps), #49 (`system` audit actor): need plans.
-- Backlog: #7 to #12 (roadmap steps 6 to 11), #21 (transfer a user's data).
+- Order (decided on #102): #111 (#106, merged) → #109 (#105) → #107 (merged as #112) → #108 (issue, no PR yet). `before` numbers in #112's body.
+- #108 (#102 part 2, per-owner write lock): plan + plan review (9 must-dos) on #102; build after #109; re-measure before/after on one host with the script; acceptance in the #102 decisions (≥ half S2 throughput, same-owner upload waits ≤ one bulk, 0 deadlocks).
+- #56 (compound words): plan after #7 (now done) when a ticket slot is free.
+- Backlog (step numbers as in #100's roadmap, valid once #100 merges; main and the bodies of #8–#12 still use the old numbers): roadmap 9 archive import/export (#10), 10 automatic assignment (#8), 11 external OCR/classification (#9), 12 deadlines (#11), 13 notes/saved views/trash (#12), 14 native iPhone app in its own repository (later); #21 (transfer a user's data); #102's follow-ups.
+- No release: the maintainer said "noch nicht" (2026-10-22); ask before running the release workflow.
 
 ## Maintainer decisions (2026-10-21)
 - Owner per document; tags, correspondents, document types and saved views per owner.
@@ -33,6 +32,20 @@ State of the work for the next session. Update before a session ends.
 - The repository is public (#61); no release yet (#63).
 - No Claude GitHub Action any more (#65): plans, plan reviews and reviews run in Claude sessions on the subscription. Risky PRs get a second, independent session reviewer; `second-review` is a marker. The Action ran Claude Code on the API key, and the plan's API credits do not cover Claude Code.
 - PostgreSQL: Debian image `postgres:18` (musl ranked full-text search about 4× slower); minimum PostgreSQL 17; existing databases keep their sort order, new ones use builtin `C.UTF-8` (#66).
+
+## Maintainer decisions (2026-10-22, evening)
+- #7 web UI: no delete before the trash (#12); admins see their own documents with an "Everyone's documents" switch and may edit others' (audited, field names only); `document.search` only for typed queries; bulk also over "all matches" with a dry-run count and confirmation; pdf.js.
+- #49 server audit entries: summary per scan; "interrupted" hint shown; late entries keep the write time (both chat decisions, recorded in #85's body).
+- Metadata names refuse control characters (#84).
+- iPhone (#87): Apple's scanner + Shortcut upload; instructions plus an optional iCloud link; scope `upload` (reads nothing; `write` implies it); scans land in the inbox, title = file name; an upload-only key's duplicate answer is `{"duplicate": true}` only (chat decision, recorded on PR #96). A native app comes later in its own repository; pklnx/document-archive stays as it is.
+- Public internet (#88): keep the per-name block (passkeys still work); one audit row per address and window for unknown keys; fail2ban and Caddy only documented.
+- Locking: after four rounds of deadlock holes, rebuild on a per-owner advisory lock (#102); serialisation cost accepted within the limits above.
+- #105: on a conflicting save, reload and keep the user's edits on top; #106: several owners are explained before sending.
+- Model use (chat): Fable for large plans, Opus for routine plans, building and reviews.
+
+## Done (2026-10-22, evening)
+- #81 (#49), #82 (#75), #83/#89/#86/#104/#101 (#7 parts 1–5, #7 closed), #90 (#84), #95 (#85), #96 (#91), #97/#98 (#88 closed), #103 (#99), #110 (test fix), #111 (#106), #112 (#107).
+- Earlier that day, after #69: #70 thumbnails (#36), #72 UI collation (#68), #73 passkey caps (#48), #74 thumbnail timeout (#71).
 
 ## Done (2026-10-22)
 - #51 API keys (#20); #55 OCR and images (#35); #57, #59, #62 Action fixes, then #65 removed the Action; #58, #64, #67 search (#52–#54); #66 PostgreSQL Debian image, index rebuild on collation change, minimum PostgreSQL 17; #60 admin changes in the user's log (#39); #61 public repository; #63 no-release note.
