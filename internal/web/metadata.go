@@ -187,6 +187,8 @@ type tagJSON struct {
 	// SubtreeCount is the number of distinct documents of the tag and its
 	// sub-tags: what the list shows when filtered by the tag.
 	SubtreeCount *int64 `json:"subtreeCount,omitempty"`
+	// OwnerName is the owner's name, in an admin's lists only.
+	OwnerName string `json:"ownerName,omitempty"`
 }
 
 func toTagJSON(t *store.Tag) tagJSON {
@@ -206,10 +208,16 @@ func (s *Server) handleListTags(w http.ResponseWriter, r *http.Request) {
 		s.failStore(w, r, err)
 		return
 	}
+	names, err := s.ownerNames(r)
+	if err != nil {
+		s.failStore(w, r, err)
+		return
+	}
 	out := make([]tagJSON, len(rows))
 	for i, row := range rows {
 		out[i] = toTagJSON(row.Tag)
 		out[i].DocumentCount, out[i].SubtreeCount = &row.DocumentCount, &row.SubtreeCount
+		out[i].OwnerName = names[row.OwnerID]
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"tags": out})
 }
@@ -312,6 +320,8 @@ type namedJSON struct {
 	CreatedAt     time.Time `json:"createdAt"`
 	ModifiedAt    time.Time `json:"modifiedAt"`
 	DocumentCount *int64    `json:"documentCount,omitempty"`
+	// OwnerName is the owner's name, in an admin's lists only.
+	OwnerName string `json:"ownerName,omitempty"`
 }
 
 func toCorrespondentJSON(c *store.Correspondent) namedJSON {
@@ -359,10 +369,16 @@ func (s *Server) handleListCorrespondents(w http.ResponseWriter, r *http.Request
 		s.failStore(w, r, err)
 		return
 	}
+	names, err := s.ownerNames(r)
+	if err != nil {
+		s.failStore(w, r, err)
+		return
+	}
 	out := make([]namedJSON, len(rows))
 	for i, row := range rows {
 		out[i] = toCorrespondentJSON(row.Correspondent)
 		out[i].DocumentCount = &row.DocumentCount
+		out[i].OwnerName = names[row.OwnerID]
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"correspondents": out})
 }
@@ -423,10 +439,16 @@ func (s *Server) handleListDocumentTypes(w http.ResponseWriter, r *http.Request)
 		s.failStore(w, r, err)
 		return
 	}
+	names, err := s.ownerNames(r)
+	if err != nil {
+		s.failStore(w, r, err)
+		return
+	}
 	out := make([]namedJSON, len(rows))
 	for i, row := range rows {
 		out[i] = toDocumentTypeJSON(row.DocumentType)
 		out[i].DocumentCount = &row.DocumentCount
+		out[i].OwnerName = names[row.OwnerID]
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"documentTypes": out})
 }
