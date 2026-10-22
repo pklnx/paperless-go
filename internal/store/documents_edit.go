@@ -41,7 +41,27 @@ var (
 	// ErrTooMany means a bulk change covers more documents than allowed.
 	// The error is a *TooManyError.
 	ErrTooMany = errors.New("store: too many documents")
+
+	// ErrDocumentChanged means a document's modified_at is no longer the
+	// one a change expected: it was changed meanwhile. The error is a
+	// *DocumentChangedError.
+	ErrDocumentChanged = errors.New("store: the document was changed meanwhile")
 )
+
+// DocumentChangedError is returned by PatchDocument when the document's
+// modified_at differs from DocumentPatch.ExpectedModifiedAt.
+// errors.Is(err, ErrDocumentChanged) holds.
+type DocumentChangedError struct {
+	// ModifiedAt is the document's current modified_at.
+	ModifiedAt time.Time
+}
+
+func (e *DocumentChangedError) Error() string {
+	return "store: the document was changed meanwhile (modified " + e.ModifiedAt.Format(time.RFC3339Nano) + ")"
+}
+
+// Is makes errors.Is(err, ErrDocumentChanged) true.
+func (e *DocumentChangedError) Is(target error) bool { return target == ErrDocumentChanged }
 
 // TooManyError is a bulk change over more documents than Limit.
 // errors.Is(err, ErrTooMany) holds.
@@ -93,6 +113,14 @@ type DocumentPatch struct {
 
 	SetTags bool
 	TagIDs  []string
+
+	// ExpectedModifiedAt, when set, is a precondition and no field to
+	// change: the document's modified_at must still be this instant (the
+	// value a read returned), or nothing changes and PatchDocument
+	// returns a *DocumentChangedError. modified_at advances strictly on
+	// every write of these fields and of the tags, so an equal value
+	// means the document is unchanged since that read.
+	ExpectedModifiedAt *time.Time
 }
 
 // Fields names the fields p changes, in the API's spelling, for the audit
@@ -149,7 +177,7 @@ func (p DocumentPatch) validate() error {
 
 // PatchDocument changes only the fields set in p, in one transaction: it
 // locks the document, updates the given columns (the search index follows
-// through its triggers), replaces the tags with SetTags and touches
+// through its triggers), replaces the tags with SetTags and advances
 // modified_at. The columns processing writes (text, archive, thumbnail)
 // are never touched, and processing never writes these. The audit entry
 // of ctx gets the document as its target and, for an admin's change of
@@ -158,8 +186,11 @@ func (p DocumentPatch) validate() error {
 // Errors: ErrNotFound outside the scope; ErrOwnerMismatch for a link to a
 // row that is not the document owner's (also in an admin's scope); an
 // *ASNTakenError (ErrASNTaken) for an archive serial number another
-// document of the owner has; a *ValidationError (ErrInvalid) for refused
-// text or nothing to change. The key shares of the rows it links are
+// document of the owner has; a *DocumentChangedError (ErrDocumentChanged)
+// when p.ExpectedModifiedAt is set and the document's modified_at is
+// another (checked after the lock, after ErrNotFound, before any write);
+// a *ValidationError (ErrInvalid) for refused text or nothing to change.
+// The key shares of the rows it links are
 // taken before the document's lock (lockLinkTargets). A deadlock with a
 // concurrent change is retried (see retryDeadlock), then ErrRetry.
 func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p DocumentPatch) (*Document, error) {
@@ -192,11 +223,15 @@ func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p Docume
 			if err := lockLinkTargets(ctx, q, linkTags, p.SetCorrespondent, corr, p.SetDocumentType, typ); err != nil {
 				return err
 			}
-			var err error
-			if owner, err = q.LockDocument(ctx, db.LockDocumentParams{ID: u, Owner: sc.owner()}); err != nil {
+			locked, err := q.LockDocument(ctx, db.LockDocumentParams{ID: u, Owner: sc.owner()})
+			if err != nil {
 				return err
 			}
+			owner = locked.OwnerID
 			afterLock(ctx)
+			if p.ExpectedModifiedAt != nil && !locked.ModifiedAt.Equal(*p.ExpectedModifiedAt) {
+				return &DocumentChangedError{ModifiedAt: locked.ModifiedAt}
+			}
 			n, err := q.PatchDocument(ctx, db.PatchDocumentParams{
 				ID: u, Title: p.Title, DocumentDate: p.DocumentDate, Notes: p.Notes,
 				IsFavorite: p.IsFavorite, IsInbox: p.IsInbox,
@@ -409,7 +444,7 @@ func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelectio
 // no longer matches is left alone (one that matches only now is not
 // added). It checks them, removes and adds the
 // tags (adding a tag a document has, or removing one it lacks, is no
-// error), sets the fields and touches modified_at of every one.
+// error), sets the fields and advances modified_at of every one.
 //
 // The audit entry of ctx is the summary: the store adds count and ids; the caller
 // sets the rest. With it, each document gets an entry of its own

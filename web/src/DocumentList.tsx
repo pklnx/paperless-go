@@ -331,7 +331,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
               key={d.id}
               doc={d}
               metadata={metadata}
-              owner={everyone && d.ownerName && d.ownerName !== user.name ? d.ownerName : ""}
+              owner={everyone && d.ownerName && d.ownerId !== user.id ? d.ownerName : ""}
               onChange={replaceDoc}
               href={formatState({ ...state, doc: d.id }) || "?"}
               onOpen={() => openDoc(d.id)}

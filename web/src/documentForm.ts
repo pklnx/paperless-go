@@ -107,3 +107,30 @@ export function isDirty(d: DocumentDetail, form: DocumentForm): boolean {
   const r = patchFrom(d, form);
   return "invalid" in r || Object.keys(r.patch).length > 0;
 }
+
+/**
+ * The user's edits on top of a document that changed meanwhile (a save
+ * refused with document_changed): every field of form that differs from
+ * the document it was edited from (old) keeps the user's value, every
+ * other field takes newDoc's. Tags are merged as a diff: the tags the user
+ * added are added to newDoc's, the ones they removed are removed, so a tag
+ * another change added stays. The result is not saved; the user checks it
+ * and saves again, with newDoc as the base.
+ */
+export function rebaseForm(old: DocumentDetail, form: DocumentForm, newDoc: DocumentDetail): DocumentForm {
+  const base = formFrom(old);
+  const out = formFrom(newDoc);
+  const scalars = ["title", "date", "asn", "correspondentId", "documentTypeId", "notes", "isInbox", "isFavorite"] as const;
+  const keep = <K extends (typeof scalars)[number]>(k: K) => {
+    if (form[k] !== base[k]) out[k] = form[k];
+  };
+  scalars.forEach(keep);
+  const before = new Set(base.tagIds);
+  const now = new Set(form.tagIds);
+  const removed = new Set(base.tagIds.filter((id) => !now.has(id)));
+  const added = form.tagIds.filter((id) => !before.has(id));
+  const tags = out.tagIds.filter((id) => !removed.has(id));
+  for (const id of added) if (!tags.includes(id)) tags.push(id);
+  out.tagIds = tags;
+  return out;
+}

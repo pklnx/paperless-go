@@ -98,7 +98,7 @@ describe("metadata page", () => {
   });
 
   it("offers as parents only the same owner's tags, never the tag itself or its sub-tags", async () => {
-    server.user = { name: "root", admin: true };
+    server.user = { id: 1, name: "root", admin: true };
     server.tags = [tag("t1", "Steuer"), tag("t2", "2024", "t1"), tag("t3", "Q1", "t2"), tag("t4", "Arzt"), tag("t5", "Bobs", null, { ownerId: 2 })];
     await open("?view=metadata&all=1");
     fireEvent.click(page().getByRole("button", { name: t.editEntry("2024") }));
@@ -214,7 +214,7 @@ describe("metadata page", () => {
   });
 
   it("uses the admin's own names unless Everyone's documents is on", async () => {
-    server.user = { name: "root", admin: true };
+    server.user = { id: 1, name: "root", admin: true };
     await open();
     expect(requests.filter((r) => r.path === "/api/tags").at(-1)!.url).toBe("/api/tags?owner=me");
     cleanup();

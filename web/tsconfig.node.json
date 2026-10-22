@@ -1,6 +1,7 @@
 {
-  // vite.config.ts runs in Node: Node's types, and only there (the UI's
-  // code in src/ is checked without them, as the browser has no Node APIs).
+  // vite.config.ts and scripts/ run in Node: Node's types, and only there
+  // (the UI's code in src/ is checked without them, as the browser has no
+  // Node APIs).
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2022"],
@@ -13,5 +14,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["vite.config.ts"]
+  "include": ["vite.config.ts", "scripts"]
 }

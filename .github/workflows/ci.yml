@@ -156,4 +156,7 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      # The built output has no eval( or new Function( (the CSP has no
+      # 'unsafe-eval'); a missing or incomplete build fails too.
+      - run: pnpm check:dist
       - run: pnpm audit --prod

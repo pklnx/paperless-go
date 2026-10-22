@@ -282,6 +282,8 @@ func (s *Server) authenticate(mux *http.ServeMux, accessOf map[string]access) ht
 }
 
 type userJSON struct {
+	// ID is the user's ID, as documents' ownerId.
+	ID    int64  `json:"id"`
 	Name  string `json:"name"`
 	Admin bool   `json:"admin"`
 	// MustChangePassword: the user logged in with a generated password and
@@ -293,8 +295,8 @@ type userJSON struct {
 	TwoFactorRequired bool `json:"twoFactorRequired"`
 }
 
-func (s *Server) userJSON(name string, admin, mustChange, twoFactor bool) userJSON {
-	return userJSON{Name: name, Admin: admin, MustChangePassword: mustChange, TwoFactorEnabled: twoFactor, TwoFactorRequired: s.twoFactorRequired(admin)}
+func (s *Server) userJSON(id int64, name string, admin, mustChange, twoFactor bool) userJSON {
+	return userJSON{ID: id, Name: name, Admin: admin, MustChangePassword: mustChange, TwoFactorEnabled: twoFactor, TwoFactorRequired: s.twoFactorRequired(admin)}
 }
 
 type sessionJSON struct {
@@ -317,7 +319,7 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if sess != nil {
-		s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(sess.UserName, sess.IsAdmin, sess.MustChangePassword, sess.TwoFactorEnabled)})
+		s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(sess.UserID, sess.UserName, sess.IsAdmin, sess.MustChangePassword, sess.TwoFactorEnabled)})
 		return
 	}
 	n, err := s.store.CountUsers(r.Context())
@@ -436,7 +438,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("login", "user", u.Name, "addr", s.clientIP(r))
 	s.setSessionCookie(w, r, token, auth.MaxSessionAge)
-	s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(u.Name, u.IsAdmin, u.MustChangePassword, false)})
+	s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(u.ID, u.Name, u.IsAdmin, u.MustChangePassword, false)})
 }
 
 // handleLogout ends the session. A logout never fails because of the audit

@@ -43,7 +43,7 @@ describe("ProfilePage", () => {
         ? new Response(JSON.stringify({ enabled: false, required: false, admin: false, setupPending: false, recoveryCodesLeft: 0 }), { status: 200 })
         : new Response(null, { status: 204 }),
     );
-    render(<ProfilePage user={{ name: "kim", admin: false, mustChangePassword: false, twoFactorEnabled: false, twoFactorRequired: false }} />);
+    render(<ProfilePage user={{ id: 7, name: "kim", admin: false, mustChangePassword: false, twoFactorEnabled: false, twoFactorRequired: false }} />);
     expect(screen.getByText(t.loggedInAs("kim"))).toBeTruthy();
     fill("old passphrase", "a long passphrase");
     expect((await screen.findByRole("status")).textContent).toBe(t.passwordChanged);

@@ -39,7 +39,7 @@ export const named = (id: string, name: string, documentCount = 1, ownerId = 1):
 export type Reply = { status?: number; body?: unknown };
 
 export interface Server {
-  user: { name: string; admin: boolean };
+  user: { id: number; name: string; admin: boolean };
   tags: Tag[];
   correspondents: NamedRow[];
   types: NamedRow[];
@@ -72,7 +72,7 @@ export function stubServer(): { server: Server; requests: Request[] } {
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
   const requests: Request[] = [];
   const server: Server = {
-    user: { name: "alice", admin: false },
+    user: { id: 1, name: "alice", admin: false },
     tags: [],
     correspondents: [],
     types: [],

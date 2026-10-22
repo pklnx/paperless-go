@@ -166,7 +166,7 @@ describe("selection", () => {
   });
 
   it("offers only the owner's names when an admin selected another user's documents", async () => {
-    server.user = { name: "root", admin: true };
+    server.user = { id: 1, name: "root", admin: true };
     window.history.replaceState(null, "", "/?all=1");
     server.documents = () => page([doc("1", "Bobs", { ownerId: 2, ownerName: "bob" }), doc("2", "Mine", { ownerId: 1, ownerName: "root" })]);
     server.tags = [tag("t1", "Root tag", null, { ownerId: 1 }), tag("t2", "Bob tag", null, { ownerId: 2 })];
@@ -262,7 +262,7 @@ describe("selection next to the detail link", () => {
 
 describe("errors", () => {
   it("explains several owners and keeps the selection", async () => {
-    server.user = { name: "root", admin: true };
+    server.user = { id: 1, name: "root", admin: true };
     window.history.replaceState(null, "", "/?all=1");
     server.documents = () => page([doc("1", "Bobs", { ownerId: 2 }), doc("2", "Mine", { ownerId: 1 })]);
     server.correspondents = [named("c1", "Amt")];
@@ -354,7 +354,7 @@ describe("all matches of a search", () => {
   const twoPages = () => (p: URLSearchParams) => (p.get("cursor") ? page([doc("3", "Doc 3")]) : page([doc("1", "Doc 1"), doc("2", "Doc 2")], "c1"));
 
   it("counts the matches, asks with the count, and sends the search, owner=me for an admin without the switch", async () => {
-    server.user = { name: "root", admin: true };
+    server.user = { id: 1, name: "root", admin: true };
     server.tags = [tag("t1", "Steuer")];
     window.history.replaceState(null, "", "/?tag=t1&q=Rechnung");
     server.documents = twoPages();
@@ -393,7 +393,7 @@ describe("all matches of a search", () => {
   });
 
   it("offers one owner's names when all matches belong to that owner", async () => {
-    server.user = { name: "root", admin: true };
+    server.user = { id: 1, name: "root", admin: true };
     window.history.replaceState(null, "", "/?all=1");
     server.documents = (p) => (p.get("cursor") ? page([doc("3", "B3", { ownerId: 2 })]) : page([doc("1", "B1", { ownerId: 2 }), doc("2", "B2", { ownerId: 2 })], "c1"));
     server.tags = [tag("t1", "Root tag", null, { ownerId: 1 }), tag("t2", "Bob tag", null, { ownerId: 2 })];
@@ -421,7 +421,7 @@ describe("all matches of a search", () => {
   });
 
   it("sends no owner with Everyone's documents on, and none for a user", async () => {
-    server.user = { name: "root", admin: true };
+    server.user = { id: 1, name: "root", admin: true };
     window.history.replaceState(null, "", "/?all=1&inbox=1");
     server.documents = twoPages();
     server.bulk = () => ({ body: { matched: 3, owners: 2, limit: 5000 } });

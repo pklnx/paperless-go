@@ -374,13 +374,16 @@ func TestLoginLogout(t *testing.T) {
 	if c == nil || !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Secure || c.MaxAge != int(auth.MaxSessionAge.Seconds()) {
 		t.Fatalf("cookie: %+v", c)
 	}
+	u, _ := f.st.GetUserByName(context.Background(), "alice")
 	out := f.expect("GET", "/api/session", nil, 200)
-	if user, _ := out["user"].(map[string]any); user["name"] != "alice" || user["admin"] != true || user["mustChangePassword"] != false {
+	// id is the user's ID, as documents' ownerId (the UI compares owners by
+	// ID, not by name).
+	if user, _ := out["user"].(map[string]any); user["name"] != "alice" || user["admin"] != true || user["mustChangePassword"] != false ||
+		user["id"] != float64(u.ID) {
 		t.Fatalf("session: %v", out)
 	}
 	f.expect("GET", "/api/users", nil, 200)
 
-	u, _ := f.st.GetUserByName(context.Background(), "alice")
 	if u.LastLoginAt == nil || !u.LastLoginAt.Equal(f.clock.Now().Truncate(time.Microsecond)) {
 		t.Errorf("last login: %v", u.LastLoginAt)
 	}

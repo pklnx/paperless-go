@@ -300,7 +300,7 @@ func (s *Server) handleFinishPasskeyLogin(w http.ResponseWriter, r *http.Request
 	s.deleteOldSessions(r)
 	s.log.Info("login", "user", u.Name, "addr", s.clientIP(r), "passkey", login.PasskeyName)
 	s.setSessionCookie(w, r, token, auth.MaxSessionAge)
-	s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(u.Name, u.IsAdmin, u.MustChangePassword, u.TwoFactorEnabled)})
+	s.writeJSON(w, http.StatusOK, sessionJSON{User: s.userJSON(u.ID, u.Name, u.IsAdmin, u.MustChangePassword, u.TwoFactorEnabled)})
 }
 
 type passkeyJSON struct {

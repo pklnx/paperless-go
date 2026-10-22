@@ -35,17 +35,20 @@ const (
 	codeTooMany         = "too_many_documents"
 	codeSeveralOwners   = "several_owners"
 	codeTagAddRemove    = "tag_add_and_remove"
+	codeDocChanged      = "document_changed"
 )
 
 // documentError is a refused document change: a fixed message and a code,
-// with the document holding a taken ASN, or the count and limit of a
-// selection that is too large.
+// with the document holding a taken ASN, the count and limit of a
+// selection that is too large, or the current modifiedAt of a document
+// changed meanwhile.
 type documentError struct {
-	Error      string `json:"error"`
-	Code       string `json:"code"`
-	DocumentID string `json:"documentId,omitempty"`
-	Matched    int    `json:"matched,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
+	Error      string     `json:"error"`
+	Code       string     `json:"code"`
+	DocumentID string     `json:"documentId,omitempty"`
+	Matched    int        `json:"matched,omitempty"`
+	Limit      int        `json:"limit,omitempty"`
+	ModifiedAt *time.Time `json:"modifiedAt,omitempty"`
 }
 
 // refuseDocument answers 400 with code and msg.
@@ -58,7 +61,12 @@ func (s *Server) failDocument(w http.ResponseWriter, r *http.Request, err error)
 	var taken *store.ASNTakenError
 	var tooMany *store.TooManyError
 	var ve *store.ValidationError
+	var changed *store.DocumentChangedError
 	switch {
+	case errors.As(err, &changed):
+		s.writeJSON(w, http.StatusConflict, documentError{
+			Error: "the document was changed meanwhile", Code: codeDocChanged, ModifiedAt: &changed.ModifiedAt,
+		})
 	case errors.As(err, &taken):
 		s.writeJSON(w, http.StatusConflict, documentError{
 			Error: "another document has this archive serial number", Code: codeASNTaken, DocumentID: taken.DocumentID,
@@ -91,7 +99,10 @@ func (s *Server) failDocument(w http.ResponseWriter, r *http.Request, err error)
 // documentPatchJSON is the body of PATCH /api/documents/{id}: every field
 // is optional, and only the fields sent change. null clears
 // archiveSerialNumber, correspondentId and documentTypeId; tagIds replaces
-// the tags. null for any other field is refused.
+// the tags. null for any other field is refused. expectedModifiedAt is no
+// field to change but a precondition: the modifiedAt exactly as GET or the
+// last PATCH answered it (RFC 3339); when the document's modifiedAt is
+// another, nothing changes and the answer is 409 document_changed.
 type documentPatchJSON struct {
 	Title               optional[string]    `json:"title"`
 	DocumentDate        optional[time.Time] `json:"documentDate"`
@@ -102,6 +113,7 @@ type documentPatchJSON struct {
 	CorrespondentID     optional[string]    `json:"correspondentId"`
 	DocumentTypeID      optional[string]    `json:"documentTypeId"`
 	TagIDs              optional[[]string]  `json:"tagIds"`
+	ExpectedModifiedAt  optional[time.Time] `json:"expectedModifiedAt"`
 }
 
 // patch turns the body into a store patch; the name of a refused field is
@@ -115,6 +127,7 @@ func (in documentPatchJSON) patch() (store.DocumentPatch, string) {
 		{"title", in.Title.Set, in.Title.Null}, {"documentDate", in.DocumentDate.Set, in.DocumentDate.Null},
 		{"notes", in.Notes.Set, in.Notes.Null}, {"isFavorite", in.IsFavorite.Set, in.IsFavorite.Null},
 		{"isInbox", in.IsInbox.Set, in.IsInbox.Null}, {"tagIds", in.TagIDs.Set, in.TagIDs.Null},
+		{"expectedModifiedAt", in.ExpectedModifiedAt.Set, in.ExpectedModifiedAt.Null},
 	} {
 		if f.set && f.null {
 			return p, f.name
@@ -159,6 +172,9 @@ func (in documentPatchJSON) patch() (store.DocumentPatch, string) {
 			p.TagIDs = []string{}
 		}
 	}
+	if in.ExpectedModifiedAt.Set {
+		p.ExpectedModifiedAt = &in.ExpectedModifiedAt.Value
+	}
 	return p, ""
 }
 
@@ -170,7 +186,8 @@ func (in documentPatchJSON) patch() (store.DocumentPatch, string) {
 // input (owner_mismatch for a link to a row that is not the document
 // owner's, invalid_title, invalid_notes, invalid_asn, invalid_field,
 // nothing_to_change), 404 outside the scope, 409 asn_taken naming the
-// document that has the number, 503 without the audit log or after
+// document that has the number, 409 document_changed with the current
+// modifiedAt when expectedModifiedAt no longer holds, 503 without the audit log or after
 // repeated deadlocks (Retry-After).
 func (s *Server) handlePatchDocument(w http.ResponseWriter, r *http.Request) {
 	if !s.documentsAvailable(w, r) {

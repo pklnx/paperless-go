@@ -110,11 +110,17 @@ export function documentQuery(s: ViewState, ownOnly: boolean): DocumentQuery {
 
 /**
  * Asked before the state changes: by update, and on the back and forward
- * buttons. False keeps the current state. The open document's form sets
- * one while it has unsaved changes.
+ * buttons, with the next state; by confirmLeave (logging out) with null,
+ * leaving the app. False keeps the current state. The open document's
+ * form sets one while it has unsaved changes.
  */
-export type NavigationGuard = (next: ViewState) => boolean;
+export type NavigationGuard = (next: ViewState | null) => boolean;
 let guard: NavigationGuard | null = null;
+
+/** Asks the guard about leaving the app (logging out): true when there is none or it agrees. */
+export function confirmLeave(): boolean {
+  return !guard || guard(null);
+}
 
 /** Sets the guard (null removes it); returns a function that removes this guard again. */
 export function setNavigationGuard(g: NavigationGuard | null): () => void {

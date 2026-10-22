@@ -62,6 +62,8 @@ async function send<T>(method: string, path: string, body?: unknown): Promise<T 
 }
 
 export interface User {
+  /** The user's ID, as documents' ownerId. */
+  id: number;
   name: string;
   admin: boolean;
   /** Logged in with a generated password: must choose their own first. */
@@ -353,6 +355,11 @@ export const processingPending = (d: DocumentSummary) => d.processing?.state ===
 /** A document as GET /api/documents/{id} and the PATCH answer it: the list's fields and the rest. */
 export interface DocumentDetail extends DocumentSummary {
   ownerId: number;
+  /**
+   * The server's string as it came, passed back verbatim as a PATCH's
+   * expectedModifiedAt: never through a Date (milliseconds only), or the
+   * microseconds are lost and every save is refused as changed meanwhile.
+   */
   modifiedAt: string;
   notes: string;
   isFavorite: boolean;
@@ -381,6 +388,12 @@ export interface DocumentPatch {
   correspondentId?: string | null;
   documentTypeId?: string | null;
   tagIds?: string[];
+  /**
+   * A precondition, no field to change: the document's modifiedAt exactly
+   * as GET or the last PATCH answered it. When it changed meanwhile the
+   * answer is 409 document_changed with the current modifiedAt.
+   */
+  expectedModifiedAt?: string;
 }
 
 /** A page of GET /api/documents; nextCursor is missing on the last page. */
