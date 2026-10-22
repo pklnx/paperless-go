@@ -617,3 +617,143 @@ func TestWorkerShutdownDuringThumbnail(t *testing.T) {
 		t.Fatalf("job: %+v", j)
 	}
 }
+
+// A pdftoppm that runs out of the thumbnail's own limit costs only the
+// thumbnail: the text is stored, the job is done, and on a reprocess the
+// earlier thumbnail stays.
+func TestWorkerThumbnailTimeout(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.w.Pipeline.ThumbnailTimeout = time.Millisecond // e.w.Timeout is an hour
+	d := e.doc(t, "%PDF-1.4 hangs pdftoppm")
+	started := make(chan struct{}, 1)
+	e.runner.handle = blockingThumbnail(started, poppler(pdf{pages: []string{longText}}))
+	e.runOnce(t, ctx, Done)
+	<-started
+	got, err := e.st.GetDocument(ctx, e.owner, d.ID)
+	if err != nil || got.ThumbnailSHA256 != nil || got.ExtractedText != longText || got.PageCount != 1 || got.ArchiveSHA256 == nil {
+		t.Fatalf("processed without a thumbnail: %+v, %v", got, err)
+	}
+	if j := e.job(t, d.ID); j.State != store.JobDone || j.LastError != "" || j.Attempts != 1 {
+		t.Fatalf("job: %+v", j)
+	}
+	if log := e.log.String(); !strings.Contains(log, "no thumbnail") || !strings.Contains(log, errThumbnailTimeout.Error()) {
+		t.Fatalf("log: %s", log)
+	}
+
+	// Reprocess with a thumbnail, then once more with pdftoppm hanging:
+	// the thumbnail of the first stays.
+	thumb := jpegOf(362, 512)
+	if _, err := e.st.Reprocess(ctx, store.ReprocessSelection{IDs: []string{d.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	e.runner.handle = poppler(pdf{pages: []string{longText}, thumb: thumb})
+	e.runOnce(t, ctx, Done)
+	if _, err := e.st.Reprocess(ctx, store.ReprocessSelection{IDs: []string{d.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	e.runner.handle = blockingThumbnail(started, poppler(pdf{pages: []string{longText}}))
+	e.runOnce(t, ctx, Done)
+	<-started
+	if got, err := e.st.GetDocument(ctx, e.owner, d.ID); err != nil || got.ThumbnailSHA256 == nil || *got.ThumbnailSHA256 != blobOf(thumb) {
+		t.Fatalf("thumbnail after a timed-out one: %+v, %v", got, err)
+	}
+	e.workDirEmpty(t)
+}
+
+// expiringContext is an attempt context that the test expires by hand: its
+// Err is then context.DeadlineExceeded, as for an attempt that ran out of
+// its limit.
+type expiringContext struct {
+	context.Context
+	cancel  context.CancelFunc
+	mu      sync.Mutex
+	expired bool
+}
+
+func newExpiringContext(parent context.Context) *expiringContext {
+	ctx, cancel := context.WithCancel(parent)
+	return &expiringContext{Context: ctx, cancel: cancel}
+}
+
+func (c *expiringContext) expire() {
+	c.mu.Lock()
+	c.expired = true
+	c.mu.Unlock()
+	c.cancel()
+}
+
+func (c *expiringContext) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.expired {
+		return context.DeadlineExceeded
+	}
+	return c.Context.Err()
+}
+
+// When the attempt's own limit ends while the thumbnail is rendered, the
+// attempt fails as a timeout and is retried; nothing is stored.
+func TestWorkerAttemptTimeoutDuringThumbnail(t *testing.T) {
+	e := newEnv(t)
+	d := e.doc(t, "%PDF-1.4 slow")
+	attempt := make(chan *expiringContext, 1)
+	e.w.attemptContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		c := newExpiringContext(parent)
+		attempt <- c
+		return c, c.cancel
+	}
+	e.w.Pipeline.ThumbnailTimeout = time.Hour
+	started := make(chan struct{})
+	e.runner.handle = blockingThumbnail(started, poppler(pdf{pages: []string{longText}}))
+	go func() {
+		c := <-attempt
+		<-started
+		c.expire()
+	}()
+	e.runOnce(t, context.Background(), Retry)
+	j := e.job(t, d.ID)
+	if j.State != store.JobQueued || j.Attempts != 1 || j.LastError != "Processing took longer than the limit of 1h0m0s." {
+		t.Fatalf("job: %+v", j)
+	}
+	got, err := e.st.GetDocument(context.Background(), e.owner, d.ID)
+	if err != nil || got.ArchiveSHA256 != nil || got.ThumbnailSHA256 != nil || got.ExtractedText != "" || got.PageCount != 0 {
+		t.Fatalf("stored after the attempt's limit: %+v, %v", got, err)
+	}
+	e.workDirEmpty(t)
+}
+
+// A lost lease while the thumbnail is rendered drops the result.
+func TestWorkerLeaseLostDuringThumbnail(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	d := e.doc(t, "%PDF-1.4 stuck in pdftoppm")
+	started := make(chan struct{})
+	beats := make(chan error)
+	e.w.heartbeat = func(err error) { beats <- err }
+	e.runner.handle = blockingThumbnail(started, poppler(pdf{pages: []string{longText}}))
+	done := make(chan Outcome)
+	go func() {
+		o, _ := e.w.RunOnce(ctx)
+		done <- o
+	}()
+	<-started
+	e.clock.Add(DefaultLease + time.Second)
+	e.w.Housekeeping(ctx)
+	e.ticks <- time.Time{}
+	if err := <-beats; !errors.Is(err, store.ErrLeaseLost) {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if o := <-done; o != Dropped {
+		t.Fatalf("outcome %v", o)
+	}
+	j := e.job(t, d.ID)
+	if j.State != store.JobQueued || j.Attempts != 1 || j.LastError != msgLeaseExpired {
+		t.Fatalf("job: %+v", j)
+	}
+	got, err := e.st.GetDocument(ctx, e.owner, d.ID)
+	if err != nil || got.ArchiveSHA256 != nil || got.ThumbnailSHA256 != nil || got.ExtractedText != "" {
+		t.Fatalf("stored after the lease was lost: %+v, %v", got, err)
+	}
+	e.workDirEmpty(t)
+}

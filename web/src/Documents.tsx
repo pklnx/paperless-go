@@ -94,6 +94,8 @@ export function DocumentsHome({ queue }: { queue: UploadQueue }) {
   const [maxSize, setMaxSize] = useState<number | undefined>(queue.maxSize);
   const [error, setError] = useState("");
   const [poll, setPoll] = useState(0);
+  /** Counts the loads that ended, with or without success, so the polling goes on after a failed one. */
+  const [loaded, setLoaded] = useState(0);
   const imported = items.filter((i) => i.state.kind === "imported").length;
 
   // Load the list at start, again after each import, and while documents
@@ -106,20 +108,29 @@ export function DocumentsHome({ queue }: { queue: UploadQueue }) {
         queue.maxSize = res.maxUploadSize;
         setMaxSize(res.maxUploadSize);
         setError("");
+        setLoaded((n) => n + 1);
       },
       (err: unknown) => {
-        if (!ctl.signal.aborted) setError(t.failed(err instanceof Error ? err.message : String(err)));
+        // An aborted load is followed by another one (or the page is
+        // gone): it arms no timer.
+        if (ctl.signal.aborted) return;
+        setError(t.failed(err instanceof Error ? err.message : String(err)));
+        setLoaded((n) => n + 1);
       },
     );
     return () => ctl.abort();
   }, [queue, imported, poll]);
 
+  // Each ended load arms the timer again while a document is pending, also
+  // a failed one: while the server stays down, the page keeps trying every
+  // pollDelay, and the error stays until a load succeeds. Polling ends when
+  // the list shows no pending document.
   const pending = docs?.some(processingPending) ?? false;
   useEffect(() => {
     if (!pending) return;
     const id = pollTimer.set(() => setPoll((n) => n + 1), pollDelay);
     return () => pollTimer.clear(id);
-  }, [pending, docs]);
+  }, [pending, docs, loaded]);
 
   const limit = maxSize ? formatSize(maxSize, lang) : "";
   return (
