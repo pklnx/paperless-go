@@ -113,3 +113,16 @@ export function chipInk(bg: string): "#000000" | "#ffffff" {
   // Contrast with black (l + 0.05) / 0.05 against white 1.05 / (l + 0.05).
   return (l + 0.05) * (l + 0.05) >= 0.05 * 1.05 ? "#000000" : "#ffffff";
 }
+
+/** The tags as one list in tree order (each level sorted by name), with their depth: for pickers that indent. */
+export function flatTagTree(tags: readonly Tag[]): { tag: Tag; depth: number }[] {
+  const out: { tag: Tag; depth: number }[] = [];
+  const walk = (nodes: TagNode[], depth: number) => {
+    for (const n of nodes) {
+      out.push({ tag: n.item, depth });
+      walk(n.children, depth + 1);
+    }
+  };
+  walk(buildTagTree(tags), 0);
+  return out;
+}

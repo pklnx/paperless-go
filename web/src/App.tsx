@@ -8,6 +8,7 @@ import { t } from "./i18n";
 import { MenuIcon, iconButton } from "./icons";
 import logo from "./logo.svg";
 import { LogPage } from "./LogPage";
+import { MetadataPage } from "./MetadataPage";
 import { ProfilePage } from "./Profile";
 import { Sheet } from "./Sheet";
 import { Sidebar, type Loaded } from "./Sidebar";
@@ -48,7 +49,10 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
     };
   }, []);
 
-  // The sidebar's counts and names, again after each import.
+  // The sidebar's counts and names, again after each import and after
+  // each change of documents or names.
+  const [changes, setChanges] = useState(0);
+  const changed = useCallback(() => setChanges((n) => n + 1), []);
   const [counts, setCounts] = useState<DocumentCounts | null>(null);
   const [metadata, setMetadata] = useState<Loaded<Metadata>>({ data: null, error: "" });
   useEffect(() => {
@@ -64,7 +68,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
       },
     );
     return () => ctl.abort();
-  }, [ownOnly, imported]);
+  }, [ownOnly, imported, changes]);
   const collapsed = useCollapsedTags(user.name, metadata.data?.tags ?? null);
 
   // "All documents" lists everything: no filter, no search. Another entry
@@ -101,7 +105,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
       health={health}
     />
   );
-  const view = state.view === "profile" || state.view === "log" || (state.view === "users" && user.admin) ? state.view : "";
+  const view = state.view === "profile" || state.view === "log" || state.view === "metadata" || (state.view === "users" && user.admin) ? state.view : "";
 
   return (
     <div className="flex h-full">
@@ -130,9 +134,10 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
           {view === "" && (
             <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6">
               <DocumentsUpload queue={queue} maxSize={maxSize} />
-              <DocumentList state={state} update={update} query={query} user={user} metadata={metadata.data} everyone={everyone} reload={imported} onMaxUploadSize={onMaxUploadSize} />
+              <DocumentList state={state} update={update} query={query} user={user} metadata={metadata.data} everyone={everyone} reload={imported} onMaxUploadSize={onMaxUploadSize} onChanged={changed} />
             </div>
           )}
+          {view === "metadata" && <MetadataPage metadata={metadata} onChanged={changed} open={select} />}
           {view === "profile" && <ProfilePage user={user} />}
           {view === "log" && <LogPage admin={user.admin} />}
           {view === "users" && <UsersPage />}

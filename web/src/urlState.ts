@@ -25,7 +25,7 @@ export interface ViewState {
   all: string;
   /** The open document's ID (#7, part 4). */
   doc: string;
-  /** "" for the documents, or a page: "profile", "log", "users". */
+  /** "" for the documents, or a page: "metadata", "profile", "log", "users". */
   view: string;
 }
 
