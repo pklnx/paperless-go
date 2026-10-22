@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ApiError, bulkApi, type BulkChange, type BulkMatch, type BulkSelection, type Metadata, type NamedRow } from "./api";
 import { sortByName } from "./collate";
 import { t } from "./i18n";
@@ -59,6 +59,10 @@ export function BulkBar({ target, metadata, ownerId, onDone }: Props) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<Message | null>(null);
 
+  // Another selection: an error and its "Try again" were about the old one.
+  const targetKey = "ids" in target ? `ids:${target.ids.join(",")}` : `match:${JSON.stringify(target.match)}`;
+  useEffect(() => setMsg((m) => (m?.kind === "error" ? null : m)), [targetKey]);
+
   const own = <T extends { ownerId: number }>(rows: readonly T[]) => (ownerId === null ? rows : rows.filter((r) => r.ownerId === ownerId));
 
   const fail = (err: unknown, again: () => void) => {
@@ -66,7 +70,8 @@ export function BulkBar({ target, metadata, ownerId, onDone }: Props) {
     setMsg({ kind: "error", text: e.text, retry: e.retry ? again : undefined });
   };
 
-  const apply = (sel: BulkSelection, change: BulkChange) => {
+  /** Sends the change; again is what "Try again" does (by default the same request). */
+  const apply = (sel: BulkSelection, change: BulkChange, again?: () => void) => {
     setBusy(true);
     setMsg(null);
     bulkApi.apply(sel, change).then(
@@ -77,7 +82,7 @@ export function BulkBar({ target, metadata, ownerId, onDone }: Props) {
       },
       (err: unknown) => {
         setBusy(false);
-        fail(err, () => apply(sel, change));
+        fail(err, again ?? (() => apply(sel, change)));
       },
     );
   };
@@ -162,7 +167,9 @@ export function BulkBar({ target, metadata, ownerId, onDone }: Props) {
                 className={primary}
                 onClick={() => {
                   setConfirm(null);
-                  apply({ match: confirm.match }, confirm.change);
+                  // A retry counts again and asks again: the matches may have changed.
+                  const change = confirm.change;
+                  apply({ match: confirm.match }, change, () => run(change));
                 }}
               >
                 {t.bulkConfirm(confirm.n)}

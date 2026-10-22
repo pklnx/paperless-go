@@ -82,7 +82,7 @@ three tabs, each with the number of its documents. A click on a name opens
 the list filtered by it.
 
 - **Edit** renames a row. For a tag it also sets the colour (one of the
-  palette, or any `#RRGGBB`) and the parent tag; "None" makes it a
+  palette, or any `#RRGGBB`) and the parent tag; "None (a top-level tag)" makes it a
   top-level tag. A tag cannot be moved under itself or one of its own
   sub-tags.
 - On a larger screen a tag can also be dragged onto another tag to move it

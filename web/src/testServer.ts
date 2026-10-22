@@ -45,9 +45,9 @@ export interface Server {
   types: NamedRow[];
   counts: { inbox: number; favorites: number; total: number };
   /** The answer to GET /api/documents for its parameters. */
-  documents: (p: URLSearchParams) => Reply;
+  documents: (p: URLSearchParams) => Reply | Promise<Reply>;
   /** The answer to POST /api/documents/bulk for its body. */
-  bulk: (body: Record<string, unknown>) => Reply;
+  bulk: (body: Record<string, unknown>) => Reply | Promise<Reply>;
   /** The answer to PATCH or DELETE of a tag, correspondent or type. */
   metadata: (method: string, path: string, body: Record<string, unknown> | undefined) => Reply;
 }
@@ -91,13 +91,20 @@ export function stubServer(): { server: Server; requests: Request[] } {
     if (path === "/api/session") return json(200, { user: { mustChangePassword: false, twoFactorEnabled: false, twoFactorRequired: false, ...server.user } });
     if (path === "/healthz") return new Response("ok", { status: 200 });
     if (path === "/api/documents/counts") return json(200, server.counts);
-    if (path === "/api/documents/bulk" && method === "POST") return reply(server.bulk(body ?? {}));
+    if (path === "/api/documents/bulk" && method === "POST") return reply(await server.bulk(body ?? {}));
     if (method === "GET" && path === "/api/tags") return json(200, { tags: server.tags });
     if (method === "GET" && path === "/api/correspondents") return json(200, { correspondents: server.correspondents });
     if (method === "GET" && path === "/api/document-types") return json(200, { documentTypes: server.types });
     if (/^\/api\/(tags|correspondents|document-types)\/[^/]+$/.test(path) && (method === "PATCH" || method === "DELETE")) return reply(server.metadata(method, path, body));
-    if (path === "/api/documents" && method === "GET") return reply(server.documents(p));
+    if (path === "/api/documents" && method === "GET") return reply(await server.documents(p));
     return json(404, { error: "not found" });
   });
   return { server, requests };
+}
+
+/** A reply the test sends when it chooses: for answers that arrive after the user moved on. */
+export function held(): { promise: Promise<Reply>; release: (r: Reply) => void } {
+  let release!: (r: Reply) => void;
+  const promise = new Promise<Reply>((r) => (release = r));
+  return { promise, release };
 }

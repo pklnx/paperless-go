@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { ApiError } from "./api";
+import { ApiError, bulkApi, type BulkCount } from "./api";
 import { App } from "./App";
 import { bulkErrorText } from "./BulkBar";
 import { t } from "./i18n";
 import { longPressTimer, maxSelection } from "./selection";
-import { doc, named, page, stubServer, tag, type Request, type Server } from "./testServer";
+import { doc, held, named, page, stubServer, tag, type Request, type Server } from "./testServer";
 
 // Selecting documents in the list and changing them together, against a
 // fake server: what the UI sends, and what it shows for each answer.
@@ -263,6 +263,43 @@ describe("errors", () => {
     ]);
   });
 
+  it("drops an error and its Try again when the selection changes", async () => {
+    server.documents = () => page([doc("1", "Doc 1"), doc("2", "Doc 2")]);
+    server.bulk = () => ({ status: 503, body: { error: "a concurrent change got in the way; try again" } });
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 1") }));
+    fireEvent.click(bar().getByRole("button", { name: t.bulkFavorite }));
+    expect((await bar().findByRole("alert")).textContent).toContain(t.serverBusy);
+    fireEvent.click(box("Doc 2"));
+    expect(bar().queryByRole("alert")).toBeNull();
+    expect(bar().queryByRole("button", { name: t.tryAgain })).toBeNull();
+  });
+
+  it("counts and asks again before retrying a change of all matches", async () => {
+    server.documents = (p) => (p.get("cursor") ? page([doc("3", "Doc 3")]) : page([doc("1", "Doc 1"), doc("2", "Doc 2")], "c1"));
+    let fail = true;
+    server.bulk = (b) => (b.dryRun ? { body: { matched: 3, owners: 1, limit: 5000 } } : fail ? { status: 503, body: { error: "busy" } } : { body: { updated: 3 } });
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    await screen.findByText(t.allMatchesSelected(3));
+    fireEvent.click(bar().getByRole("button", { name: t.bulkFavorite }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: t.bulkConfirmTitle })).getByRole("button", { name: t.bulkConfirm(3) }));
+    const alert = await bar().findByRole("alert");
+    fail = false;
+    fireEvent.click(within(alert).getByRole("button", { name: t.tryAgain }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: t.bulkConfirmTitle })).getByRole("button", { name: t.bulkConfirm(3) }));
+    expect((await bar().findByRole("status")).textContent).toBe(t.bulkUpdated(3));
+    const match = { tz };
+    expect(bulks()).toEqual([
+      { match, dryRun: true },
+      { match, dryRun: true },
+      { match, favorite: true },
+      { match, dryRun: true },
+      { match, favorite: true },
+    ]);
+  });
+
   it("names each refusal", () => {
     const err = (status: number, body: Record<string, unknown>) => new ApiError(status, String(body.error ?? ""), body);
     expect(bulkErrorText(err(400, { code: "too_many_documents", matched: 5001, limit: 5000 }))).toEqual({ text: `${t.bulkMatchCount(5001)} ${t.bulkTooMany(5000)}`, retry: false });
@@ -314,6 +351,39 @@ describe("all matches of a search", () => {
     fireEvent.click(within(await screen.findByRole("dialog", { name: t.bulkConfirmTitle })).getByRole("button", { name: t.bulkConfirm(121) }));
     expect((await bar().findByRole("status")).textContent).toBe(t.bulkUpdated(121));
     expect(bulks()).toEqual([{ match, dryRun: true }, { match, dryRun: true }, { match, dryRun: true }, { match, inbox: false }]);
+    // The count is stale now: back to the checked rows.
+    await waitFor(() => expect(screen.queryByText(t.allMatchesSelected(120))).toBeNull());
+    expect(bar().getByText(t.selectedCount(2))).toBeTruthy();
+    fireEvent.click(bar().getByRole("button", { name: t.bulkFavorite }));
+    await waitFor(() => expect(bulks().at(-1)).toEqual({ ids: ["1", "2"], favorite: true }));
+  });
+
+  it("offers one owner's names when all matches belong to that owner", async () => {
+    server.user = { name: "root", admin: true };
+    window.history.replaceState(null, "", "/?all=1");
+    server.documents = (p) => (p.get("cursor") ? page([doc("3", "B3", { ownerId: 2 })]) : page([doc("1", "B1", { ownerId: 2 }), doc("2", "B2", { ownerId: 2 })], "c1"));
+    server.tags = [tag("t1", "Root tag", null, { ownerId: 1 }), tag("t2", "Bob tag", null, { ownerId: 2 })];
+    let owners = 1;
+    server.bulk = () => ({ body: { matched: 3, owners, limit: 5000 } });
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    await screen.findByText(t.allMatchesSelected(3));
+    const tagChoices = () => {
+      fireEvent.click(bar().getByRole("button", { name: t.bulkTags }));
+      const sheet = within(screen.getByRole("dialog", { name: t.bulkTagsTitle }));
+      const names = within(sheet.getAllByRole("group")[0]!).getAllByRole("checkbox").map((c) => c.parentElement?.textContent);
+      fireEvent.click(sheet.getByRole("button", { name: t.closeDialog }));
+      return names;
+    };
+    expect(tagChoices()).toEqual(["Bob tag"]);
+    // Several owners: every name (the server refuses setting them).
+    owners = 2;
+    fireEvent.click(screen.getByRole("button", { name: t.clearSelection }));
+    fireEvent.click(screen.getByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    await screen.findByText(t.allMatchesSelected(3));
+    expect(tagChoices()).toEqual(["Bob tag", "Root tag"]);
   });
 
   it("sends no owner with Everyone's documents on, and none for a user", async () => {
@@ -350,13 +420,84 @@ describe("all matches of a search", () => {
     expect(bulks().every((b) => b!.dryRun === true)).toBe(true);
   });
 
-  it("clears the selection for another list", async () => {
-    server.tags = [tag("t1", "Steuer")];
+  it("clears the selection for another list, checked rows and all matches", async () => {
+    server.tags = [tag("t1", "Steuer"), tag("t2", "Arzt")];
+    // Every list holds the same documents, so pruning alone would keep them checked.
     server.documents = twoPages();
+    server.bulk = () => ({ body: { matched: 3, owners: 1, limit: 5000 } });
     await start();
     fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 1") }));
     expect(bar().getByText(t.selectedCount(1))).toBeTruthy();
     fireEvent.click(within(screen.getByTestId("sidebar")).getByRole("button", { name: /Steuer/ }));
     await waitFor(() => expect(screen.queryByRole("region", { name: t.bulkActions })).toBeNull());
+    expect(box("Doc 1").checked).toBe(false);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    await screen.findByText(t.allMatchesSelected(3));
+    fireEvent.click(within(screen.getByTestId("sidebar")).getByRole("button", { name: /Arzt/ }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: t.bulkActions })).toBeNull());
+    expect(screen.queryByText(t.allMatchesSelected(3))).toBeNull();
+    expect(box("Doc 1").checked || box("Doc 2").checked).toBe(false);
+
+    // A refusal of "all matches" belongs to its list too.
+    server.bulk = () => ({ body: { matched: 6000, owners: 0, limit: 5000 } });
+    fireEvent.click(screen.getByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    expect((await screen.findByRole("alert")).textContent).toBe(`${t.bulkMatchCount(6000)} ${t.bulkTooMany(5000)}`);
+    fireEvent.click(within(screen.getByTestId("sidebar")).getByRole("button", { name: /Steuer/ }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: t.bulkActions })).toBeNull());
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("drops a count that answers after the list changed", async () => {
+    server.tags = [tag("t1", "Steuer")];
+    server.documents = twoPages();
+    const answer = held();
+    server.bulk = () => answer.promise;
+    let counted: Promise<BulkCount> | undefined;
+    const count = bulkApi.count;
+    vi.spyOn(bulkApi, "count").mockImplementation((m) => (counted = count(m)));
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    expect(bulks()).toEqual([{ match: { tz }, dryRun: true }]);
+    fireEvent.click(within(screen.getByTestId("sidebar")).getByRole("button", { name: /Steuer/ }));
+    await waitFor(() => expect(gets("/api/documents").at(-1)!.url).toContain("tag=t1"));
+    await screen.findByText("Doc 1");
+    // The list's own handler of the count runs before this await resumes.
+    await act(async () => {
+      answer.release({ body: { matched: 3, owners: 1, limit: 5000 } });
+      await counted;
+    });
+    expect(screen.queryByText(t.allMatchesSelected(3))).toBeNull();
+    expect(screen.queryByRole("region", { name: t.bulkActions })).toBeNull();
+    expect(box("Doc 1").checked).toBe(false);
+  });
+
+  it("leaves a list that loaded after a slow change as it is", async () => {
+    server.tags = [tag("t1", "Steuer")];
+    server.documents = (p) => (p.get("tag") ? page([doc("b1", "B 1")]) : page([doc("1", "Doc 1")]));
+    const answer = held();
+    server.bulk = () => answer.promise;
+    let applied: Promise<number> | undefined;
+    const apply = bulkApi.apply;
+    vi.spyOn(bulkApi, "apply").mockImplementation((sel, c) => (applied = apply(sel, c)));
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 1") }));
+    fireEvent.click(bar().getByRole("button", { name: t.bulkFavorite }));
+    fireEvent.click(within(screen.getByTestId("sidebar")).getByRole("button", { name: /Steuer/ }));
+    await screen.findByText("B 1");
+    const lists = gets("/api/documents").length;
+    const counts = gets("/api/documents/counts").length;
+    await act(async () => {
+      answer.release({ body: { updated: 1 } });
+      await applied;
+    });
+    // The change reloads the counts (after the list would have started loading again) ...
+    await waitFor(() => expect(gets("/api/documents/counts").length).toBe(counts + 1));
+    // ... but not the list, which belongs to the change's list, not this one.
+    expect(gets("/api/documents")).toHaveLength(lists);
+    expect(screen.getByText("B 1")).toBeTruthy();
   });
 });

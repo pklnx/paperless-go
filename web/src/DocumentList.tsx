@@ -72,6 +72,9 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   onMax.current = onMaxUploadSize;
   const queryRef = useRef(query);
   queryRef.current = query;
+  // The list on screen: answers started for another list are dropped.
+  const keyRef = useRef(key);
+  keyRef.current = key;
 
   // One request at a time per controller: a new list or page aborts the
   // previous one; the polling has its own, so it never aborts "Load more".
@@ -156,6 +159,10 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   // rows and the selection stay where they were. Only the first page of
   // a typed search writes a document.search entry, as any reload does.
   const refresh = () => {
+    // Started for a list that is no longer shown (the user moved on while
+    // the change ran): the shown list has loaded on its own, and its
+    // request must not be aborted.
+    if (keyRef.current !== key) return;
     const want = list.docs?.length ?? 0;
     ctl.current?.abort();
     pollCtl.current?.abort();
@@ -175,10 +182,10 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
       return { docs, first: first ?? [], cursor };
     })().then(
       (r) => {
-        if (!c.signal.aborted) setList({ key, docs: r.docs, first: new Set(r.first.map((d) => d.id)), cursor: r.cursor, loading: false, error: "" });
+        if (!c.signal.aborted && keyRef.current === key) setList({ key, docs: r.docs, first: new Set(r.first.map((d) => d.id)), cursor: r.cursor, loading: false, error: "" });
       },
       (err: unknown) => {
-        if (!c.signal.aborted) setList((l) => ({ ...l, loading: false, error: errorText(err) }));
+        if (!c.signal.aborted && keyRef.current === key) setList((l) => ({ ...l, loading: false, error: errorText(err) }));
       },
     );
   };
@@ -188,13 +195,15 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const anchor = useRef<string | null>(null);
   const [capped, setCapped] = useState(false);
-  const [allMatches, setAllMatches] = useState<number | null>(null);
+  // "All matches": the count and owners of the dry run, for the list it was made for.
+  const [matchSel, setMatchSel] = useState<{ key: string; matched: number; owners: number } | null>(null);
+  const allMatches = matchSel !== null && matchSel.key === key ? matchSel.matched : null;
   const [selectError, setSelectError] = useState("");
   const clearSelection = () => {
     setSelected(new Set());
     anchor.current = null;
     setCapped(false);
-    setAllMatches(null);
+    setMatchSel(null);
     setSelectError("");
   };
   // Another list: another selection.
@@ -205,7 +214,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   const orderKey = order.join(",");
   useEffect(() => setSelected((s) => pruneSelection(s, order)), [orderKey]);
   const pick = (id: string, shift: boolean) => {
-    setAllMatches(null);
+    setMatchSel(null);
     setSelectError("");
     const r = clickSelect(order, selected, anchor.current, id, shift);
     if (!shift) anchor.current = id;
@@ -214,7 +223,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   };
   const allLoaded = order.length > 0 && (selected.size === Math.min(order.length, maxSelection));
   const toggleAll = () => {
-    setAllMatches(null);
+    setMatchSel(null);
     setSelectError("");
     if (allLoaded) {
       clearSelection();
@@ -226,19 +235,28 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   };
   const countMatches = () => {
     setSelectError("");
+    const k = key;
     bulkApi.count(bulkMatch(query)).then(
       (c) => {
+        // Counted for a list that is no longer shown: not this list's selection.
+        if (keyRef.current !== k) return;
         if (c.matched > c.limit) setSelectError(`${t.bulkMatchCount(c.matched)} ${t.bulkTooMany(c.limit)}`);
         else if (c.matched === 0) setSelectError(t.bulkNoMatches);
-        else setAllMatches(c.matched);
+        else setMatchSel({ key: k, matched: c.matched, owners: c.owners });
       },
-      (err: unknown) => setSelectError(bulkErrorText(err).text),
+      (err: unknown) => {
+        if (keyRef.current === k) setSelectError(bulkErrorText(err).text);
+      },
     );
   };
   const selectedIds = order.filter((id) => selected.has(id));
   const target: BulkTarget | null = allMatches !== null ? { match: bulkMatch(query), matched: allMatches } : selectedIds.length > 0 ? { ids: selectedIds } : null;
   const owners = new Set((loaded ?? []).filter((d) => selected.has(d.id)).map((d) => d.ownerId));
-  const selectedOwner = allMatches === null && owners.size === 1 ? ([...owners][0] ?? null) : null;
+  // The one owner of the selection, when known. For all matches the dry
+  // run says how many owners there are; with one, every loaded row is a
+  // match of it.
+  const selectedOwner =
+    allMatches !== null ? (matchSel?.owners === 1 ? (loaded?.[0]?.ownerId ?? null) : null) : owners.size === 1 ? ([...owners][0] ?? null) : null;
   const selecting = target !== null;
 
   const filter = activeFilter(state);
@@ -321,6 +339,8 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
           metadata={metadata}
           ownerId={selectedOwner}
           onDone={() => {
+            // The count of all matches is stale after a change: back to the checked rows.
+            setMatchSel(null);
             refresh();
             onChanged?.();
           }}
