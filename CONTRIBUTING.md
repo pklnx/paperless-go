@@ -42,10 +42,9 @@ See [SECURITY.md](SECURITY.md).
 - GitHub asks the maintainer to approve workflow runs for outside
   contributors, so CI on a fork pull request starts only after that
   approval.
-- Fork pull requests do not get the Claude GitHub Action's second review,
-  and `@claude` does not answer on them: their runs get no secrets. They are
-  reviewed in a Claude session instead; if a second review is needed, the
-  maintainer moves the changes onto a branch in this repository.
+- Fork pull requests get the same reviews as any other pull request: a
+  review in a Claude session, and a second, independent session review when
+  the change is risky.
 
 ## License
 
