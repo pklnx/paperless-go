@@ -727,10 +727,14 @@ answers `404` and an admin may change everyone's (the row keeps its owner).
 - **`PATCH`** changes only the fields sent: `name`, for tags also `color`
   and `parentId` (`null` makes a root tag). `matchText`, `matchMode` and
   `symbol` stay as stored; unknown fields and an empty patch answer `400`.
-  `store.Patch*` locks the row (`SELECT … FOR UPDATE`), merges and writes
-  in one transaction, so a concurrent patch of another field is not lost.
+  `store.Patch*` locks the row (`SELECT … FOR NO KEY UPDATE`), merges and
+  writes in one transaction, so a concurrent patch of another field is not
+  lost. The weaker mode lets foreign-key checks on the row (a new parent
+  tag, a document's tag) go on without waiting, so opposite tag moves
+  answer `409` `tag_cycle` instead of deadlocking.
   Only the fields sent are checked: a name of 1 to 128 characters after
-  trimming (`invalid_name`), a colour `#RRGGBB` (`invalid_color`); an
+  trimming, no control characters (Unicode Cc, also NUL; checked before
+  trimming, so a trailing newline is refused) (`invalid_name`), a colour `#RRGGBB` (`invalid_color`); an
   imported name that is longer does not block a colour change.
 - **`DELETE`** answers `204`; documents keep everything else, a deleted
   tag's children become root tags. A deadlock with a concurrent change of
