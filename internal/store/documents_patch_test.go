@@ -639,8 +639,7 @@ func TestBulkUpdatesOverlapping(t *testing.T) {
 }
 
 // heldChange is a change held at its first WithAfterLock call until
-// release is closed; attempts counts the calls, one per attempt that got
-// its locks.
+// release is closed; attempts counts the calls.
 type heldChange struct {
 	attempts atomic.Int32
 	release  chan struct{}
@@ -676,21 +675,16 @@ func holdAfterLock(ctx context.Context, t *testing.T, name string, change func(c
 	return h
 }
 
-// countAfterLock runs change in the background with a WithAfterLock
-// context that counts its attempts.
-func countAfterLock(ctx context.Context, change func(context.Context) error) (*atomic.Int32, chan error) {
-	var attempts atomic.Int32
+// startChange runs change in the background.
+func startChange(ctx context.Context, change func(context.Context) error) chan error {
 	done := make(chan error, 1)
-	go func() {
-		done <- change(store.WithAfterLock(ctx, func() { attempts.Add(1) }))
-	}()
-	return &attempts, done
+	go func() { done <- change(ctx) }()
+	return done
 }
 
-// lockOrderStores opens two stores for a lock-order test: winner detects
+// lockOrderStores opens two stores for a deadlock test: winner detects
 // deadlocks only after an hour, loser after 10 ms, so a deadlock always
-// aborts loser's transaction and shows as a second attempt there; nothing
-// waits for time.
+// aborts loser's transaction (ErrRetry); nothing waits for time.
 func lockOrderStores(t *testing.T, dbURL, winner, loser string) (w, l *store.Store) {
 	t.Helper()
 	w = openWith(t, dbURL, map[string]string{"options": "-c deadlock_timeout=1h", "application_name": winner})
@@ -698,278 +692,307 @@ func lockOrderStores(t *testing.T, dbURL, winner, loser string) (w, l *store.Sto
 	return w, l
 }
 
-// A bulk change that holds its documents while DeleteTag of a tag it
-// removes waits for them, then goes on, does not deadlock: the delete
-// locks the tag's documents before it deletes its document_tags rows, so
-// it waits for the bulk change and then finds the rows gone. Before #99
-// the delete's cascade took those rows first and its trigger then waited
-// for the documents while the bulk change waited for the rows: a
-// deadlock, and the bulk change (10 ms) had a second attempt.
-func TestBulkUpdateNoDeadlockWithDeleteTag(t *testing.T) {
-	st, dbURL := storetest.NewWithURL(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
-	tag := mustTag(t, st, alice, "Doomed", nil)
-	corr := mustCorrespondent(t, st, alice, "Bank")
-	var docs []string
-	for i := range 3 {
-		in := newDoc(fmt.Sprint("doc ", i))
-		in.TagIDs = []string{tag.ID}
-		docs = append(docs, mustDoc(t, st, alice, in).ID)
-	}
-	deleter, bulkStore := lockOrderStores(t, dbURL, "deleter", "bulk")
-	conn := connect(t, dbURL)
-
-	h := holdAfterLock(ctx, t, "bulk change", func(ctx context.Context) error {
-		_, err := bulkStore.BulkUpdateDocuments(ctx, alice, store.BulkSelection{IDs: docs},
-			store.BulkChange{RemoveTags: []string{tag.ID}, SetCorrespondent: true, CorrespondentID: &corr.ID}, "document.update")
-		return err
+// withAndWithoutOwnerLock runs test with the owner lock and once more
+// without it (store.DisableOwnerLock, which also turns the guard off):
+// a regression test of a deadlock the lock rules out passes with it and
+// shows the deadlock (ErrRetry on the side with the short
+// deadlock_timeout) without it.
+func withAndWithoutOwnerLock(t *testing.T, test func(t *testing.T, locked bool)) {
+	t.Run("owner lock", func(t *testing.T) { test(t, true) })
+	t.Run("without owner lock", func(t *testing.T) {
+		store.DisableOwnerLock(t)
+		test(t, false)
 	})
-	deleted := make(chan error, 1)
-	go func() { deleted <- deleter.DeleteTag(ctx, alice, tag.ID) }()
-	waitForLock(ctx, t, conn, "deleter", deleted)
-	close(h.release)
-	if err := <-h.done; err != nil {
-		t.Fatalf("bulk change: %v", err)
-	}
-	if err := <-deleted; err != nil {
-		t.Fatalf("delete tag: %v", err)
-	}
-	if n := h.attempts.Load(); n != 1 {
-		t.Errorf("%d attempts of the bulk change, want 1 (no deadlock)", n)
-	}
-	for _, id := range docs {
-		if g := getDoc(t, st, id); len(g.TagIDs) != 0 || g.CorrespondentID == nil || *g.CorrespondentID != corr.ID {
-			t.Errorf("after both: %+v", g)
-		}
-	}
-	if _, err := st.GetTag(ctx, alice, tag.ID); !errors.Is(err, store.ErrNotFound) {
-		t.Errorf("tag after the delete: %v", err)
+}
+
+// wantDeadlockLoser checks the losing side's result: success with the
+// owner lock, ErrRetry (the deadlock) without it.
+func wantDeadlockLoser(t *testing.T, name string, locked bool, err error) {
+	t.Helper()
+	switch {
+	case locked && err != nil:
+		t.Errorf("%s: %v, want success", name, err)
+	case !locked && !errors.Is(err, store.ErrRetry):
+		t.Errorf("%s without the owner lock: %v, want the deadlock (ErrRetry)", name, err)
 	}
 }
 
-// A bulk change adding a tag and DeleteTag of that tag take their locks in
-// one order: the tag first (the bulk change's key share before its
-// documents, the delete's row lock before the tag's documents).
-//   - Bulk first: the delete waits for the bulk change's key share, then
-//     removes the tag from every document; one attempt each. Before #99
-//     the bulk change's foreign-key check waited for the delete's row lock
-//     while holding the documents the delete's trigger waited for: a
-//     deadlock, and a retry with owner_mismatch.
+// A bulk change that holds its documents while DeleteTag of a tag it
+// removes waits, then goes on, does not deadlock: the delete waits for the
+// bulk change's owner lock before it touches anything, then finds the
+// tag's document_tags rows gone. Without the lock the delete's cascade
+// takes those rows, its trigger then waits for the documents while the
+// bulk change waits for the rows: a deadlock (the #99 pair).
+func TestBulkUpdateNoDeadlockWithDeleteTag(t *testing.T) {
+	withAndWithoutOwnerLock(t, func(t *testing.T, locked bool) {
+		st, dbURL := storetest.NewWithURL(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+		tag := mustTag(t, st, alice, "Doomed", nil)
+		corr := mustCorrespondent(t, st, alice, "Bank")
+		var docs []string
+		for i := range 3 {
+			in := newDoc(fmt.Sprint("doc ", i))
+			in.TagIDs = []string{tag.ID}
+			docs = append(docs, mustDoc(t, st, alice, in).ID)
+		}
+		deleter, bulkStore := lockOrderStores(t, dbURL, "deleter", "bulk")
+		conn := connect(t, dbURL)
+
+		h := holdAfterLock(ctx, t, "bulk change", func(ctx context.Context) error {
+			_, err := bulkStore.BulkUpdateDocuments(ctx, alice, store.BulkSelection{IDs: docs},
+				store.BulkChange{RemoveTags: []string{tag.ID}, SetCorrespondent: true, CorrespondentID: &corr.ID}, "document.update")
+			return err
+		})
+		deleted := make(chan error, 1)
+		go func() { deleted <- deleter.DeleteTag(ctx, alice, tag.ID) }()
+		waitForLock(ctx, t, conn, "deleter", deleted)
+		close(h.release)
+		wantDeadlockLoser(t, "bulk change", locked, <-h.done)
+		if err := <-deleted; err != nil {
+			t.Fatalf("delete tag: %v", err)
+		}
+		for _, id := range docs {
+			if g := getDoc(t, st, id); len(g.TagIDs) != 0 || (g.CorrespondentID != nil) != locked {
+				t.Errorf("after both: %+v", g)
+			}
+		}
+		if _, err := st.GetTag(ctx, alice, tag.ID); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("tag after the delete: %v", err)
+		}
+	})
+}
+
+// A bulk change adding a tag and DeleteTag of that tag serialise at the
+// owner lock.
+//   - Bulk first: the delete waits, then removes the tag from every
+//     document. Without the lock the bulk change's foreign-key check waits
+//     for the delete's row lock while holding the documents the delete's
+//     trigger waits for: a deadlock (the #99 pair).
 //   - Delete first: the bulk change waits for the delete, finds the tag
-//     gone (its key share skips the row) and fails with ErrOwnerMismatch,
-//     changing nothing.
+//     gone and fails with ErrOwnerMismatch, changing nothing.
 func TestBulkAddTagNoDeadlockWithDeleteTag(t *testing.T) {
 	for _, bulkFirst := range []bool{true, false} {
 		t.Run(map[bool]string{true: "bulk first", false: "delete first"}[bulkFirst], func(t *testing.T) {
-			st, dbURL := storetest.NewWithURL(t)
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
-			tag := mustTag(t, st, alice, "Doomed", nil)
-			var docs []string
-			for i := range 4 {
-				in := newDoc(fmt.Sprint("doc ", i))
-				if i%2 == 0 {
-					in.TagIDs = []string{tag.ID}
+			test := func(t *testing.T, locked bool) {
+				st, dbURL := storetest.NewWithURL(t)
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+				tag := mustTag(t, st, alice, "Doomed", nil)
+				var docs []string
+				for i := range 4 {
+					in := newDoc(fmt.Sprint("doc ", i))
+					if i%2 == 0 {
+						in.TagIDs = []string{tag.ID}
+					}
+					docs = append(docs, mustDoc(t, st, alice, in).ID)
 				}
-				docs = append(docs, mustDoc(t, st, alice, in).ID)
-			}
-			deleter, bulkStore := lockOrderStores(t, dbURL, "deleter", "bulk")
-			conn := connect(t, dbURL)
-			change := func(ctx context.Context) error {
-				_, err := bulkStore.BulkUpdateDocuments(ctx, alice, store.BulkSelection{IDs: docs},
-					store.BulkChange{AddTags: []string{tag.ID}, IsFavorite: ptr(true)}, "document.update")
-				return err
-			}
-			del := func(ctx context.Context) error { return deleter.DeleteTag(ctx, alice, tag.ID) }
+				deleter, bulkStore := lockOrderStores(t, dbURL, "deleter", "bulk")
+				conn := connect(t, dbURL)
+				change := func(ctx context.Context) error {
+					_, err := bulkStore.BulkUpdateDocuments(ctx, alice, store.BulkSelection{IDs: docs},
+						store.BulkChange{AddTags: []string{tag.ID}, IsFavorite: ptr(true)}, "document.update")
+					return err
+				}
+				del := func(ctx context.Context) error { return deleter.DeleteTag(ctx, alice, tag.ID) }
 
-			var bulkErr, delErr error
-			var bulkAttempts, delAttempts int32
+				var bulkErr, delErr error
+				if bulkFirst {
+					h := holdAfterLock(ctx, t, "bulk change", change)
+					deleted := startChange(ctx, del)
+					waitForLock(ctx, t, conn, "deleter", deleted)
+					close(h.release)
+					bulkErr, delErr = <-h.done, <-deleted
+				} else {
+					h := holdAfterLock(ctx, t, "delete", del)
+					changed := startChange(ctx, change)
+					waitForLock(ctx, t, conn, "bulk", changed)
+					close(h.release)
+					delErr, bulkErr = <-h.done, <-changed
+				}
+				if delErr != nil {
+					t.Errorf("delete: %v, want success", delErr)
+				}
+				if bulkFirst {
+					wantDeadlockLoser(t, "bulk change", locked, bulkErr)
+				} else if !errors.Is(bulkErr, store.ErrOwnerMismatch) {
+					t.Errorf("bulk change after the delete: %v, want ErrOwnerMismatch", bulkErr)
+				}
+				for _, id := range docs {
+					if g := getDoc(t, st, id); len(g.TagIDs) != 0 || g.IsFavorite != (bulkFirst && locked) {
+						t.Errorf("after both: %+v", g)
+					}
+				}
+			}
 			if bulkFirst {
-				h := holdAfterLock(ctx, t, "bulk change", change)
-				n, deleted := countAfterLock(ctx, del)
-				waitForLock(ctx, t, conn, "deleter", deleted)
-				close(h.release)
-				bulkErr, delErr = <-h.done, <-deleted
-				bulkAttempts, delAttempts = h.attempts.Load(), n.Load()
+				withAndWithoutOwnerLock(t, test)
 			} else {
-				h := holdAfterLock(ctx, t, "delete", del)
-				n, changed := countAfterLock(ctx, change)
-				waitForLock(ctx, t, conn, "bulk", changed)
-				close(h.release)
-				delErr, bulkErr = <-h.done, <-changed
-				delAttempts, bulkAttempts = h.attempts.Load(), n.Load()
-			}
-			if delErr != nil || delAttempts != 1 {
-				t.Errorf("delete: %v after %d attempts, want success after 1", delErr, delAttempts)
-			}
-			if bulkFirst {
-				if bulkErr != nil || bulkAttempts != 1 {
-					t.Errorf("bulk change: %v after %d attempts, want success after 1", bulkErr, bulkAttempts)
-				}
-			} else if !errors.Is(bulkErr, store.ErrOwnerMismatch) {
-				t.Errorf("bulk change after the delete: %v, want ErrOwnerMismatch", bulkErr)
-			}
-			for _, id := range docs {
-				if g := getDoc(t, st, id); len(g.TagIDs) != 0 || g.IsFavorite != bulkFirst {
-					t.Errorf("after both: %+v", g)
-				}
+				test(t, true)
 			}
 		})
 	}
 }
 
 // A bulk change setting a correspondent or document type and the delete
-// of that row take their locks in one order. d1 already has the row, d2
-// not. Bulk first: the delete waits for the bulk change's key share, then
-// clears the row on both; before #99 the delete's SET NULL waited for d1
-// while the bulk change's foreign-key check for d2 waited for the
-// delete's row lock: a deadlock. Delete first: the bulk change waits,
-// then fails with ErrOwnerMismatch and changes nothing.
+// of that row serialise at the owner lock. d1 already has the row, d2
+// not. Bulk first: the delete waits, then clears the row on both; without
+// the lock the delete's SET NULL waits for d1 while the bulk change's
+// foreign-key check for d2 waits for the delete's row lock: a deadlock
+// (the #99 pair). Delete first: the bulk change waits, then fails with
+// ErrOwnerMismatch and changes nothing.
 func TestBulkSetLinkNoDeadlockWithDelete(t *testing.T) {
 	for _, kind := range []string{"correspondent", "documentType"} {
 		for _, bulkFirst := range []bool{true, false} {
 			t.Run(kind+map[bool]string{true: ", bulk first", false: ", delete first"}[bulkFirst], func(t *testing.T) {
-				st, dbURL := storetest.NewWithURL(t)
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
-				var id string
-				link := func(in *store.NewDocument) { in.CorrespondentID = &id }
-				c := store.BulkChange{SetCorrespondent: true, CorrespondentID: &id}
-				linked := func(d *store.Document) bool { return d.CorrespondentID != nil }
-				if kind == "correspondent" {
-					id = mustCorrespondent(t, st, alice, "Bank").ID
-				} else {
-					id = mustDocType(t, st, alice, "Invoice").ID
-					link = func(in *store.NewDocument) { in.DocumentTypeID = &id }
-					c = store.BulkChange{SetDocumentType: true, DocumentTypeID: &id}
-					linked = func(d *store.Document) bool { return d.DocumentTypeID != nil }
-				}
-				c.IsFavorite = ptr(true)
-				in1 := newDoc("d1")
-				link(&in1)
-				docs := []string{mustDoc(t, st, alice, in1).ID, mustDoc(t, st, alice, newDoc("d2")).ID}
-				deleter, bulkStore := lockOrderStores(t, dbURL, "deleter", "bulk")
-				conn := connect(t, dbURL)
-				change := func(ctx context.Context) error {
-					_, err := bulkStore.BulkUpdateDocuments(ctx, alice, store.BulkSelection{IDs: docs}, c, "document.update")
-					return err
-				}
-				del := func(ctx context.Context) error {
+				test := func(t *testing.T, locked bool) {
+					st, dbURL := storetest.NewWithURL(t)
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+					var id string
+					link := func(in *store.NewDocument) { in.CorrespondentID = &id }
+					c := store.BulkChange{SetCorrespondent: true, CorrespondentID: &id}
+					linked := func(d *store.Document) bool { return d.CorrespondentID != nil }
 					if kind == "correspondent" {
-						return deleter.DeleteCorrespondent(ctx, alice, id)
+						id = mustCorrespondent(t, st, alice, "Bank").ID
+					} else {
+						id = mustDocType(t, st, alice, "Invoice").ID
+						link = func(in *store.NewDocument) { in.DocumentTypeID = &id }
+						c = store.BulkChange{SetDocumentType: true, DocumentTypeID: &id}
+						linked = func(d *store.Document) bool { return d.DocumentTypeID != nil }
 					}
-					return deleter.DeleteDocumentType(ctx, alice, id)
-				}
+					c.IsFavorite = ptr(true)
+					in1 := newDoc("d1")
+					link(&in1)
+					docs := []string{mustDoc(t, st, alice, in1).ID, mustDoc(t, st, alice, newDoc("d2")).ID}
+					deleter, bulkStore := lockOrderStores(t, dbURL, "deleter", "bulk")
+					conn := connect(t, dbURL)
+					change := func(ctx context.Context) error {
+						_, err := bulkStore.BulkUpdateDocuments(ctx, alice, store.BulkSelection{IDs: docs}, c, "document.update")
+						return err
+					}
+					del := func(ctx context.Context) error {
+						if kind == "correspondent" {
+							return deleter.DeleteCorrespondent(ctx, alice, id)
+						}
+						return deleter.DeleteDocumentType(ctx, alice, id)
+					}
 
-				var bulkErr, delErr error
-				var bulkAttempts, delAttempts int32
+					var bulkErr, delErr error
+					if bulkFirst {
+						h := holdAfterLock(ctx, t, "bulk change", change)
+						deleted := startChange(ctx, del)
+						waitForLock(ctx, t, conn, "deleter", deleted)
+						close(h.release)
+						bulkErr, delErr = <-h.done, <-deleted
+					} else {
+						h := holdAfterLock(ctx, t, "delete", del)
+						changed := startChange(ctx, change)
+						waitForLock(ctx, t, conn, "bulk", changed)
+						close(h.release)
+						delErr, bulkErr = <-h.done, <-changed
+					}
+					if delErr != nil {
+						t.Errorf("delete: %v, want success", delErr)
+					}
+					if bulkFirst {
+						wantDeadlockLoser(t, "bulk change", locked, bulkErr)
+					} else if !errors.Is(bulkErr, store.ErrOwnerMismatch) {
+						t.Errorf("bulk change after the delete: %v, want ErrOwnerMismatch", bulkErr)
+					}
+					for _, d := range docs {
+						if g := getDoc(t, st, d); linked(g) || g.IsFavorite != (bulkFirst && locked) {
+							t.Errorf("after both: %+v", g)
+						}
+					}
+				}
 				if bulkFirst {
-					h := holdAfterLock(ctx, t, "bulk change", change)
-					n, deleted := countAfterLock(ctx, del)
-					waitForLock(ctx, t, conn, "deleter", deleted)
-					close(h.release)
-					bulkErr, delErr = <-h.done, <-deleted
-					bulkAttempts, delAttempts = h.attempts.Load(), n.Load()
+					withAndWithoutOwnerLock(t, test)
 				} else {
-					h := holdAfterLock(ctx, t, "delete", del)
-					n, changed := countAfterLock(ctx, change)
-					waitForLock(ctx, t, conn, "bulk", changed)
-					close(h.release)
-					delErr, bulkErr = <-h.done, <-changed
-					delAttempts, bulkAttempts = h.attempts.Load(), n.Load()
-				}
-				if delErr != nil || delAttempts != 1 {
-					t.Errorf("delete: %v after %d attempts, want success after 1", delErr, delAttempts)
-				}
-				if bulkFirst {
-					if bulkErr != nil || bulkAttempts != 1 {
-						t.Errorf("bulk change: %v after %d attempts, want success after 1", bulkErr, bulkAttempts)
-					}
-				} else if !errors.Is(bulkErr, store.ErrOwnerMismatch) {
-					t.Errorf("bulk change after the delete: %v, want ErrOwnerMismatch", bulkErr)
-				}
-				for _, d := range docs {
-					if g := getDoc(t, st, d); linked(g) || g.IsFavorite != bulkFirst {
-						t.Errorf("after both: %+v", g)
-					}
+					test(t, true)
 				}
 			})
 		}
 	}
 }
 
-// A patch linking a document to a tag or correspondent takes its key share
-// before the document's lock, so the row's delete waits for it, then
-// removes the link: one attempt each, the patch succeeds.
-//   - tagIds with T, the document already has T: before #99 the delete's
-//     cascade took the document's document_tags row, its trigger waited
-//     for the document, and the patch's ClearDocumentTags waited for the
-//     row: a deadlock, then owner_mismatch on the retry.
+// A patch linking a document to a tag or correspondent and the row's
+// delete serialise at the owner lock: the delete waits for the patch,
+// then removes the link; the patch succeeds.
+//   - tagIds with T, the document already has T: without the lock the
+//     delete's cascade takes the document's document_tags row, its
+//     trigger waits for the document, and the patch's ClearDocumentTags
+//     waits for the row: a deadlock (the #99 pair).
 //   - correspondentId C, the document already has C: the key is unchanged,
-//     so the patch has no foreign-key check and there was no deadlock
-//     before #99 either; the row checks the order and the end state.
-//   - correspondentId C, the document has none: before #99 the delete did
-//     not touch the document and finished without waiting, and the patch
-//     then failed with owner_mismatch.
+//     so the patch has no foreign-key check; no deadlock without the lock
+//     either, the row checks the end state.
+//   - correspondentId C, the document has none: without the lock the
+//     delete would not touch the document and finish first, and the
+//     patch would then fail with owner_mismatch.
 func TestPatchDocumentNoDeadlockWithDelete(t *testing.T) {
 	for _, c := range []struct {
-		name   string
-		tag    bool // else a correspondent
-		linked bool // the document has the row before the patch
+		name     string
+		tag      bool // else a correspondent
+		linked   bool // the document has the row before the patch
+		deadlock bool // deadlocks without the owner lock
 	}{
-		{"tagIds, document has the tag", true, true},
-		{"correspondentId, document has it", false, true},
-		{"correspondentId, document has none", false, false},
+		{"tagIds, document has the tag", true, true, true},
+		{"correspondentId, document has it", false, true, false},
+		{"correspondentId, document has none", false, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			st, dbURL := storetest.NewWithURL(t)
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
-			var id string
-			var p store.DocumentPatch
-			in := newDoc("doc")
-			if c.tag {
-				id = mustTag(t, st, alice, "T", nil).ID
-				p = store.DocumentPatch{SetTags: true, TagIDs: []string{id}, Title: ptr("patched")}
-				if c.linked {
-					in.TagIDs = []string{id}
-				}
-			} else {
-				id = mustCorrespondent(t, st, alice, "C").ID
-				p = store.DocumentPatch{SetCorrespondent: true, CorrespondentID: &id, Title: ptr("patched")}
-				if c.linked {
-					in.CorrespondentID = &id
-				}
-			}
-			doc := mustDoc(t, st, alice, in)
-			deleter, patcher := lockOrderStores(t, dbURL, "deleter", "patcher")
-			conn := connect(t, dbURL)
-
-			h := holdAfterLock(ctx, t, "patch", func(ctx context.Context) error {
-				_, err := patcher.PatchDocument(ctx, alice, doc.ID, p)
-				return err
-			})
-			n, deleted := countAfterLock(ctx, func(ctx context.Context) error {
+			test := func(t *testing.T, locked bool) {
+				st, dbURL := storetest.NewWithURL(t)
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+				var id string
+				var p store.DocumentPatch
+				in := newDoc("doc")
 				if c.tag {
-					return deleter.DeleteTag(ctx, alice, id)
+					id = mustTag(t, st, alice, "T", nil).ID
+					p = store.DocumentPatch{SetTags: true, TagIDs: []string{id}, Title: ptr("patched")}
+					if c.linked {
+						in.TagIDs = []string{id}
+					}
+				} else {
+					id = mustCorrespondent(t, st, alice, "C").ID
+					p = store.DocumentPatch{SetCorrespondent: true, CorrespondentID: &id, Title: ptr("patched")}
+					if c.linked {
+						in.CorrespondentID = &id
+					}
 				}
-				return deleter.DeleteCorrespondent(ctx, alice, id)
-			})
-			waitForLock(ctx, t, conn, "deleter", deleted)
-			close(h.release)
-			if err := <-h.done; err != nil || h.attempts.Load() != 1 {
-				t.Errorf("patch: %v after %d attempts, want success after 1", err, h.attempts.Load())
+				doc := mustDoc(t, st, alice, in)
+				deleter, patcher := lockOrderStores(t, dbURL, "deleter", "patcher")
+				conn := connect(t, dbURL)
+
+				h := holdAfterLock(ctx, t, "patch", func(ctx context.Context) error {
+					_, err := patcher.PatchDocument(ctx, alice, doc.ID, p)
+					return err
+				})
+				deleted := startChange(ctx, func(ctx context.Context) error {
+					if c.tag {
+						return deleter.DeleteTag(ctx, alice, id)
+					}
+					return deleter.DeleteCorrespondent(ctx, alice, id)
+				})
+				waitForLock(ctx, t, conn, "deleter", deleted)
+				close(h.release)
+				wantDeadlockLoser(t, "patch", locked, <-h.done)
+				if err := <-deleted; err != nil {
+					t.Errorf("delete: %v, want success", err)
+				}
+				g := getDoc(t, st, doc.ID)
+				if g.Title != map[bool]string{true: "patched", false: "doc"}[locked] || len(g.TagIDs) != 0 || g.CorrespondentID != nil {
+					t.Errorf("after both: %+v", g)
+				}
 			}
-			if err := <-deleted; err != nil || n.Load() != 1 {
-				t.Errorf("delete: %v after %d attempts, want success after 1", err, n.Load())
-			}
-			if g := getDoc(t, st, doc.ID); g.Title != "patched" || len(g.TagIDs) != 0 || g.CorrespondentID != nil {
-				t.Errorf("after both: %+v", g)
+			if c.deadlock {
+				withAndWithoutOwnerLock(t, test)
+			} else {
+				test(t, true)
 			}
 		})
 	}
@@ -1040,38 +1063,6 @@ func TestBulkUpdateByMatchRecheckKeepsLockedMatches(t *testing.T) {
 	}
 	if summaries != 1 {
 		t.Errorf("%d summaries, want 1", summaries)
-	}
-}
-
-// A deadlock on every attempt gives ErrRetry after three attempts, and
-// nothing changes.
-func TestBulkUpdateDeadlockEveryAttempt(t *testing.T) {
-	st, dbURL := storetest.NewWithURL(t)
-	ctx := context.Background()
-	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
-	doc := mustDoc(t, st, alice, newDoc("doc"))
-	conn := connect(t, dbURL)
-	if _, err := conn.Exec(ctx, `
-		CREATE FUNCTION test_deadlock() RETURNS trigger LANGUAGE plpgsql AS $$
-		BEGIN RAISE EXCEPTION 'test deadlock' USING ERRCODE = 'deadlock_detected'; END $$;
-		CREATE TRIGGER test_deadlock BEFORE UPDATE ON documents FOR EACH ROW EXECUTE FUNCTION test_deadlock();`); err != nil {
-		t.Fatal(err)
-	}
-	var attempts atomic.Int32
-	held := store.WithAfterLock(ctx, func() { attempts.Add(1) })
-	_, err := st.BulkUpdateDocuments(held, alice, store.BulkSelection{IDs: []string{doc.ID}}, store.BulkChange{IsFavorite: ptr(true)}, "document.update")
-	if !errors.Is(err, store.ErrRetry) || attempts.Load() != 3 {
-		t.Errorf("%v after %d attempts, want ErrRetry after 3", err, attempts.Load())
-	}
-	attempts.Store(0)
-	if _, err := st.PatchDocument(held, alice, doc.ID, store.DocumentPatch{Title: ptr("x")}); !errors.Is(err, store.ErrRetry) || attempts.Load() != 3 {
-		t.Errorf("patch: %v after %d attempts, want ErrRetry after 3", err, attempts.Load())
-	}
-	if _, err := conn.Exec(ctx, `DROP TRIGGER test_deadlock ON documents`); err != nil {
-		t.Fatal(err)
-	}
-	if g := getDoc(t, st, doc.ID); g.IsFavorite || g.Title != "doc" {
-		t.Errorf("changed: %+v", g)
 	}
 }
 
@@ -1187,62 +1178,75 @@ func TestBulkUpdateRepeatedTags(t *testing.T) {
 // left is no longer the confirmed one, so nothing changes (409). Without
 // the recheck the locked set would still match the fingerprint and the
 // document would be changed although it no longer matches (#99).
+//   - alice's own change: she holds her owner lock from before the match,
+//     so only SQL outside the store can change the match in between (a
+//     store patch would wait for her lock).
+//   - an admin's change over all owners: the owner locks come after the
+//     match, so alice's store patch gets in between.
 func TestBulkUpdateByMatchRecheckedAfterLock(t *testing.T) {
-	st, dbURL := storetest.NewWithURL(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	conn := connect(t, dbURL)
-	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
-	moved := mustDoc(t, st, alice, newDoc("moved"))
-	stays := mustDoc(t, st, alice, newDoc("stays"))
-	inbox := &search.Query{Filters: []search.Filter{{Field: search.FieldIs, Values: []string{search.IsInbox}}}}
-	sel := confirmed(t, st, alice, store.BulkSelection{Match: inbox})
-	before := len(auditRows(t, conn))
-
-	var attempts atomic.Int32
-	matched, release := make(chan struct{}), make(chan struct{})
-	done := make(chan error, 1)
-	var changed []string
-	go func() {
-		e := &store.AuditEntry{Actor: store.ActorCLI, Action: "document.bulk_update"}
-		held := store.WithBeforeLock(store.WithAudit(ctx, e), func() {
-			if attempts.Add(1) > 1 {
-				return
+	for _, admin := range []bool{false, true} {
+		t.Run(map[bool]string{false: "own scope, raw SQL", true: "admin over all owners, store patch"}[admin], func(t *testing.T) {
+			st, dbURL := storetest.NewWithURL(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			conn := connect(t, dbURL)
+			alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+			sc := alice
+			if admin {
+				sc = store.Scope{UserID: storetest.User(t, st, "root", true).ID, All: true}
 			}
-			close(matched)
+			moved := mustDoc(t, st, alice, newDoc("moved"))
+			stays := mustDoc(t, st, alice, newDoc("stays"))
+			inbox := &search.Query{Filters: []search.Filter{{Field: search.FieldIs, Values: []string{search.IsInbox}}}}
+			sel := confirmed(t, st, sc, store.BulkSelection{Match: inbox})
+			before := len(auditRows(t, conn))
+
+			matched, release := make(chan struct{}), make(chan struct{})
+			done := make(chan error, 1)
+			var changed []string
+			go func() {
+				e := &store.AuditEntry{Actor: store.ActorCLI, Action: "document.bulk_update"}
+				held := store.WithBeforeLock(store.WithAudit(ctx, e), func() {
+					close(matched)
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+				})
+				var err error
+				changed, err = st.BulkUpdateDocuments(held, sc, sel, store.BulkChange{IsFavorite: ptr(true)}, "document.update")
+				done <- err
+			}()
 			select {
-			case <-release:
-			case <-ctx.Done():
+			case <-matched:
+			case err := <-done:
+				t.Fatalf("bulk change finished before it matched: %v", err)
+			}
+			// Both matched; now one leaves the inbox.
+			if admin {
+				if _, err := st.PatchDocument(ctx, alice, moved.ID, store.DocumentPatch{IsInbox: ptr(false)}); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := conn.Exec(ctx, `UPDATE documents SET is_inbox = false WHERE id = $1`, moved.ID); err != nil {
+				t.Fatal(err)
+			}
+			close(release)
+			var mc *store.MatchChangedError
+			if err := <-done; !errors.As(err, &mc) || !errors.Is(err, store.ErrMatchChanged) || mc.Count != 1 || changed != nil {
+				t.Fatalf("bulk change: %v, changed %v; want ErrMatchChanged with count 1", err, changed)
+			}
+			if g := getDoc(t, st, moved.ID); g.IsFavorite {
+				t.Errorf("the document no longer matching was changed: %+v", g)
+			}
+			if g := getDoc(t, st, stays.ID); g.IsFavorite {
+				t.Errorf("the refused change changed the matching document: %+v", g)
+			}
+			for _, r := range auditRows(t, conn)[before:] {
+				if r.Action == "document.bulk_update" || r.Actor == store.ActorCLI {
+					t.Errorf("the refused change wrote an audit entry: %+v", r)
+				}
 			}
 		})
-		var err error
-		changed, err = st.BulkUpdateDocuments(held, alice, sel, store.BulkChange{IsFavorite: ptr(true)}, "document.update")
-		done <- err
-	}()
-	select {
-	case <-matched:
-	case err := <-done:
-		t.Fatalf("bulk change finished before it matched: %v", err)
-	}
-	// Both matched; now one leaves the inbox.
-	if _, err := st.PatchDocument(ctx, alice, moved.ID, store.DocumentPatch{IsInbox: ptr(false)}); err != nil {
-		t.Fatal(err)
-	}
-	close(release)
-	var mc *store.MatchChangedError
-	if err := <-done; !errors.As(err, &mc) || !errors.Is(err, store.ErrMatchChanged) || mc.Count != 1 || changed != nil {
-		t.Fatalf("bulk change: %v, changed %v; want ErrMatchChanged with count 1", err, changed)
-	}
-	if g := getDoc(t, st, moved.ID); g.IsFavorite {
-		t.Errorf("the document no longer matching was changed: %+v", g)
-	}
-	if g := getDoc(t, st, stays.ID); g.IsFavorite {
-		t.Errorf("the refused change changed the matching document: %+v", g)
-	}
-	for _, r := range auditRows(t, conn)[before:] {
-		if r.Action == "document.bulk_update" || r.Actor == store.ActorCLI {
-			t.Errorf("the refused change wrote an audit entry: %+v", r)
-		}
 	}
 }
 

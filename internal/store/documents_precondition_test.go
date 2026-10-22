@@ -130,6 +130,10 @@ func TestModifiedAtStrictlyIncreasesInOneTransaction(t *testing.T) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := db.New(tx)
+	// As a store writer does: the owner's write lock first.
+	if err := q.LockOwner(ctx, db.LockOwnerParams{Prefix: store.OwnerLockPrefix, OwnerID: alice.UserID}); err != nil {
+		t.Fatal(err)
+	}
 	modified := func() time.Time {
 		t.Helper()
 		var m time.Time
@@ -153,11 +157,6 @@ func TestModifiedAtStrictlyIncreasesInOneTransaction(t *testing.T) {
 		{"BulkUpdateDocuments", func() error {
 			return q.BulkUpdateDocuments(ctx, db.BulkUpdateDocumentsParams{Ids: []pgtype.UUID{u}, IsFavorite: ptr(true)})
 		}},
-		{"TouchDocument", func() error { return q.TouchDocument(ctx, u) }},
-		{"UpdateDocument", func() error {
-			_, err := q.UpdateDocument(ctx, db.UpdateDocumentParams{ID: u, Title: "three"})
-			return err
-		}},
 	}
 	prev := modified()
 	for _, w := range writes {
@@ -175,7 +174,7 @@ func TestModifiedAtStrictlyIncreasesInOneTransaction(t *testing.T) {
 // Every store function that writes a PATCH-able field or the tags moves
 // modified_at forward, also when the stored value lies ahead of the clock
 // (a clock stepped back): each path of PatchDocument and
-// BulkUpdateDocuments, UpdateDocument and SetDocumentTags.
+// BulkUpdateDocuments.
 func TestEveryDocumentWriteAdvancesModifiedAt(t *testing.T) {
 	st, dbURL := storetest.NewWithURL(t)
 	conn := connect(t, dbURL)
@@ -207,11 +206,6 @@ func TestEveryDocumentWriteAdvancesModifiedAt(t *testing.T) {
 			_, err := bulk(t, st, alice, store.BulkSelection{IDs: []string{doc.ID}}, store.BulkChange{IsInbox: ptr(false)})
 			return err
 		}},
-		{"UpdateDocument", func() error {
-			_, err := st.UpdateDocument(ctx, alice, doc.ID, store.DocumentUpdate{Title: "updated"})
-			return err
-		}},
-		{"SetDocumentTags", func() error { return st.SetDocumentTags(ctx, alice, doc.ID, []string{tag.ID}) }},
 	}
 	prev := getDoc(t, st, doc.ID).ModifiedAt
 	if !prev.Equal(future) {

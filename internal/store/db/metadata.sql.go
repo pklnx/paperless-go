@@ -12,6 +12,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const correspondentOwner = `-- name: CorrespondentOwner :one
+SELECT owner_id FROM correspondents
+WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+`
+
+type CorrespondentOwnerParams struct {
+	ID    pgtype.UUID
+	Owner *int64
+}
+
+// CorrespondentOwner, DocumentTypeOwner and TagOwner read a row's owner
+// in the scope, without a lock, so a writer can take the owner's write
+// lock (store.lockOwners) first.
+func (q *Queries) CorrespondentOwner(ctx context.Context, arg CorrespondentOwnerParams) (int64, error) {
+	row := q.db.QueryRow(ctx, correspondentOwner, arg.ID, arg.Owner)
+	var owner_id int64
+	err := row.Scan(&owner_id)
+	return owner_id, err
+}
+
 const createCorrespondent = `-- name: CreateCorrespondent :one
 
 INSERT INTO correspondents (owner_id, name, match_text, match_mode)
@@ -217,6 +237,23 @@ func (q *Queries) DocumentCounts(ctx context.Context, owner *int64) (DocumentCou
 	var i DocumentCountsRow
 	err := row.Scan(&i.Inbox, &i.Favorites, &i.Total)
 	return i, err
+}
+
+const documentTypeOwner = `-- name: DocumentTypeOwner :one
+SELECT owner_id FROM document_types
+WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+`
+
+type DocumentTypeOwnerParams struct {
+	ID    pgtype.UUID
+	Owner *int64
+}
+
+func (q *Queries) DocumentTypeOwner(ctx context.Context, arg DocumentTypeOwnerParams) (int64, error) {
+	row := q.db.QueryRow(ctx, documentTypeOwner, arg.ID, arg.Owner)
+	var owner_id int64
+	err := row.Scan(&owner_id)
+	return owner_id, err
 }
 
 const getCorrespondent = `-- name: GetCorrespondent :one
@@ -613,45 +650,6 @@ func (q *Queries) LockCorrespondent(ctx context.Context, arg LockCorrespondentPa
 	return i, err
 }
 
-const lockCorrespondentDocuments = `-- name: LockCorrespondentDocuments :exec
-SELECT id FROM documents WHERE correspondent_id = $1::uuid
-ORDER BY id
-FOR NO KEY UPDATE
-`
-
-// LockCorrespondentDocuments locks the documents of a correspondent for
-// its delete. FOR NO KEY UPDATE, as LockDocuments: SET NULL changes no key.
-func (q *Queries) LockCorrespondentDocuments(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, lockCorrespondentDocuments, id)
-	return err
-}
-
-const lockCorrespondentForDelete = `-- name: LockCorrespondentForDelete :one
-
-SELECT id FROM correspondents
-WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
-FOR UPDATE
-`
-
-type LockCorrespondentForDeleteParams struct {
-	ID    pgtype.UUID
-	Owner *int64
-}
-
-// The deletes take their locks in one order (docs/development/
-// architecture.md, "Lock order"): the row FOR UPDATE, which waits for the
-// writers linking documents to it and keeps new links out (their foreign-
-// key check takes FOR KEY SHARE), a tag's direct children, then the linked
-// documents in id order; only then the DELETE, whose cascade and triggers
-// touch rows the transaction already holds.
-// LockCorrespondentForDelete locks a correspondent for its delete.
-func (q *Queries) LockCorrespondentForDelete(ctx context.Context, arg LockCorrespondentForDeleteParams) (pgtype.UUID, error) {
-	row := q.db.QueryRow(ctx, lockCorrespondentForDelete, arg.ID, arg.Owner)
-	var id pgtype.UUID
-	err := row.Scan(&id)
-	return id, err
-}
-
 const lockDocumentType = `-- name: LockDocumentType :one
 SELECT id, owner_id, name, symbol, match_text, match_mode, created_at, modified_at FROM document_types
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
@@ -678,36 +676,6 @@ func (q *Queries) LockDocumentType(ctx context.Context, arg LockDocumentTypePara
 		&i.ModifiedAt,
 	)
 	return i, err
-}
-
-const lockDocumentTypeDocuments = `-- name: LockDocumentTypeDocuments :exec
-SELECT id FROM documents WHERE document_type_id = $1::uuid
-ORDER BY id
-FOR NO KEY UPDATE
-`
-
-func (q *Queries) LockDocumentTypeDocuments(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, lockDocumentTypeDocuments, id)
-	return err
-}
-
-const lockDocumentTypeForDelete = `-- name: LockDocumentTypeForDelete :one
-SELECT id FROM document_types
-WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
-FOR UPDATE
-`
-
-type LockDocumentTypeForDeleteParams struct {
-	ID    pgtype.UUID
-	Owner *int64
-}
-
-// LockDocumentTypeForDelete is LockCorrespondentForDelete for a type.
-func (q *Queries) LockDocumentTypeForDelete(ctx context.Context, arg LockDocumentTypeForDeleteParams) (pgtype.UUID, error) {
-	row := q.db.QueryRow(ctx, lockDocumentTypeForDelete, arg.ID, arg.Owner)
-	var id pgtype.UUID
-	err := row.Scan(&id)
-	return id, err
 }
 
 const lockTag = `-- name: LockTag :one
@@ -740,53 +708,21 @@ func (q *Queries) LockTag(ctx context.Context, arg LockTagParams) (Tag, error) {
 	return i, err
 }
 
-const lockTagChildren = `-- name: LockTagChildren :exec
-SELECT id FROM tags WHERE parent_id = $1::uuid
-ORDER BY id
-FOR NO KEY UPDATE
-`
-
-// LockTagChildren locks a tag's direct children for its delete, after the
-// tag and before its documents: the delete's SET NULL (parent_id) updates
-// them, and a child's own delete (holding the child, then waiting for
-// documents) must not wait for documents the parent's delete holds.
-func (q *Queries) LockTagChildren(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, lockTagChildren, id)
-	return err
-}
-
-const lockTagDocuments = `-- name: LockTagDocuments :exec
-SELECT d.id FROM documents d
-JOIN document_tags dt ON dt.document_id = d.id
-WHERE dt.tag_id = $1::uuid
-ORDER BY d.id
-FOR NO KEY UPDATE OF d
-`
-
-// LockTagDocuments locks the documents of a tag for its delete (the
-// cascade to document_tags and its search trigger update them).
-func (q *Queries) LockTagDocuments(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, lockTagDocuments, id)
-	return err
-}
-
-const lockTagForDelete = `-- name: LockTagForDelete :one
-SELECT id FROM tags
+const tagOwner = `-- name: TagOwner :one
+SELECT owner_id FROM tags
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
-FOR UPDATE
 `
 
-type LockTagForDeleteParams struct {
+type TagOwnerParams struct {
 	ID    pgtype.UUID
 	Owner *int64
 }
 
-// LockTagForDelete is LockCorrespondentForDelete for a tag.
-func (q *Queries) LockTagForDelete(ctx context.Context, arg LockTagForDeleteParams) (pgtype.UUID, error) {
-	row := q.db.QueryRow(ctx, lockTagForDelete, arg.ID, arg.Owner)
-	var id pgtype.UUID
-	err := row.Scan(&id)
-	return id, err
+func (q *Queries) TagOwner(ctx context.Context, arg TagOwnerParams) (int64, error) {
+	row := q.db.QueryRow(ctx, tagOwner, arg.ID, arg.Owner)
+	var owner_id int64
+	err := row.Scan(&owner_id)
+	return owner_id, err
 }
 
 const tagRootNameConflict = `-- name: TagRootNameConflict :one

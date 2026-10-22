@@ -25,11 +25,14 @@ var migrationsFS embed.FS
 // from internal/store/queries (see sqlc.yaml).
 type Store struct {
 	pool *pgxpool.Pool
-	q    *db.Queries
+	// g is the pool behind the guard (locking.go): outside a transaction
+	// it refuses every writer of the owner tables. q runs on it.
+	g guardedDB
+	q *db.Queries
 	// sq runs the search queries as unnamed statements (search.go);
-	// searchDB wraps a transaction the same way.
+	// searchDB wraps a guarded transaction the same way.
 	sq       *db.Queries
-	searchDB func(db.DBTX) db.DBTX
+	searchDB func(guardedDB) db.DBTX
 	// userAgents caches the IDs of audit log user agents.
 	userAgents userAgentCache
 }
@@ -44,8 +47,9 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("connect to database: %w", err)
 	}
-	s := &Store{pool: pool, q: db.New(pool), searchDB: func(d db.DBTX) db.DBTX { return unnamedStatements{d} }}
-	s.sq = db.New(s.searchDB(pool))
+	g := guardedDB{d: pool}
+	s := &Store{pool: pool, g: g, q: db.New(g), searchDB: func(d guardedDB) db.DBTX { return unnamedStatements{d} }}
+	s.sq = db.New(s.searchDB(g))
 	return s, nil
 }
 

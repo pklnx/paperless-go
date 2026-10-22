@@ -43,15 +43,17 @@ FROM documents d
 WHERE sqlc.narg(owner)::bigint IS NULL OR d.owner_id = sqlc.narg(owner)
 ORDER BY d.created_at DESC, d.id;
 
--- name: UpdateDocument :execrows
-UPDATE documents
-SET title = sqlc.arg(title),
-    document_date = COALESCE(sqlc.narg(document_date)::timestamptz, document_date), notes = sqlc.arg(notes),
-    is_favorite = sqlc.arg(is_favorite), is_inbox = sqlc.arg(is_inbox),
-    archive_serial_number = sqlc.narg(archive_serial_number),
-    correspondent_id = sqlc.narg(correspondent_id), document_type_id = sqlc.narg(document_type_id),
-    modified_at = GREATEST(now(), modified_at + interval '1 microsecond')
+-- DocumentOwner and DocumentOwners read the owner of documents in the
+-- scope, without a lock, so a writer can take the owner's write lock
+-- (store.lockOwners) before it locks or writes the rows.
+-- name: DocumentOwner :one
+SELECT owner_id FROM documents
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner));
+
+-- name: DocumentOwners :many
+SELECT DISTINCT owner_id FROM documents
+WHERE id = ANY (sqlc.arg(ids)::uuid[]) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
+ORDER BY owner_id;
 
 -- LockDocument locks the document row for a change and returns its owner
 -- and modified_at (PatchDocument's precondition). FOR NO KEY UPDATE: no
@@ -72,12 +74,10 @@ SELECT sqlc.arg(owner_id)::bigint, sqlc.arg(document_id)::uuid, t
 FROM unnest(sqlc.arg(tag_ids)::uuid[]) AS t
 ON CONFLICT DO NOTHING;
 
--- name: TouchDocument :exec
-UPDATE documents SET modified_at = GREATEST(now(), modified_at + interval '1 microsecond') WHERE id = $1;
-
--- name: DeleteDocument :execrows
+-- name: DeleteDocument :one
 DELETE FROM documents
-WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner));
+WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
+RETURNING owner_id;
 
 -- name: PatchDocument :execrows
 -- Sets only the given columns: a NULL narg, or a false set_* flag, keeps
@@ -104,10 +104,9 @@ WHERE id = sqlc.arg(id);
 -- name: DocumentByASN :one
 SELECT id, title FROM documents WHERE owner_id = $1 AND archive_serial_number = $2;
 
--- LockDocuments locks the documents of ids in the scope, in id order, so
--- two bulk changes over overlapping sets wait for each other instead of
--- deadlocking. It returns the locked ids with their owners. FOR NO KEY
--- UPDATE as in LockDocument.
+-- LockDocuments locks the documents of ids in the scope, in id order, and
+-- returns the locked ids with their owners. FOR NO KEY UPDATE as in
+-- LockDocument.
 -- name: LockDocuments :many
 SELECT id, owner_id FROM documents
 WHERE id = ANY (sqlc.arg(ids)::uuid[]) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
@@ -116,25 +115,6 @@ FOR NO KEY UPDATE;
 
 -- name: CountOwnedTags :one
 SELECT count(*) FROM tags WHERE owner_id = sqlc.arg(owner_id) AND id = ANY (sqlc.arg(ids)::uuid[]);
--- KeyShareTags, KeyShareCorrespondent and KeyShareDocumentType take the
--- key share a link's foreign-key check takes, before a writer that links
--- documents to these rows locks the documents (store.lockLinkTargets): a
--- delete of one of them locks the row first, then its documents, so both
--- take the locks in one order. A row deleted meanwhile is skipped; the
--- link then fails as before (ErrOwnerMismatch).
--- name: KeyShareTags :exec
-SELECT id FROM tags WHERE id = ANY (sqlc.arg(ids)::uuid[])
-ORDER BY id
-FOR KEY SHARE;
-
--- name: KeyShareCorrespondent :exec
-SELECT id FROM correspondents WHERE id = sqlc.arg(id)::uuid
-FOR KEY SHARE;
-
--- name: KeyShareDocumentType :exec
-SELECT id FROM document_types WHERE id = sqlc.arg(id)::uuid
-FOR KEY SHARE;
-
 
 -- name: BulkRemoveDocumentTags :exec
 DELETE FROM document_tags

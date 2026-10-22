@@ -209,12 +209,12 @@ func (s *Store) SearchDocuments(ctx context.Context, sc Scope, q search.Query) (
 		// Measured on 100 000 documents with a term in half of them
 		// (searchbench): 2.0 s instead of 4.1 s on PostgreSQL 16.
 		var r []db.SearchDocumentsRelevanceRow
-		err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+		err := s.readTx(ctx, func(g guardedDB) error {
+			if _, err := g.Exec(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
 				return err
 			}
 			var err error
-			r, err = db.New(s.searchDB(tx)).SearchDocumentsRelevance(ctx, db.SearchDocumentsRelevanceParams{
+			r, err = db.New(s.searchDB(g)).SearchDocumentsRelevance(ctx, db.SearchDocumentsRelevanceParams{
 				Query: args.Query, Owner: args.Owner, TagGroupCount: args.TagGroupCount, TagGroups: args.TagGroups,
 				TagIds: args.TagIds, NotTagIds: args.NotTagIds, Correspondents: args.Correspondents,
 				NotCorrespondents: args.NotCorrespondents, Types: args.Types, NotTypes: args.NotTypes, Asns: args.Asns,

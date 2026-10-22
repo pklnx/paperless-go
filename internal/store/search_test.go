@@ -922,11 +922,13 @@ func TestSearchTsqueryOncePerSearch(t *testing.T) {
 	}
 }
 
-// A deadlock with a concurrent change gives ErrRetry. The test holds a lock
-// on the document's tag row, lets SetDocumentTags lock the document and
-// wait for it, then waits for the document itself: PostgreSQL aborts the
-// store's transaction, whose deadlock check runs first.
-func TestSetDocumentTagsDeadlockIsRetry(t *testing.T) {
+// A deadlock with SQL outside the store gives ErrRetry: the owner lock
+// keeps store writers apart, not raw SQL. The test holds a lock on the
+// document's tag row, lets PatchDocument (replacing the tags) lock the
+// document and wait for it, then waits for the document itself:
+// PostgreSQL aborts the store's transaction, whose deadlock check runs
+// first.
+func TestDeadlockWithSQLOutsideTheStoreIsRetry(t *testing.T) {
 	st, url := storetest.NewWithURL(t)
 	ctx := context.Background()
 	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
@@ -952,7 +954,10 @@ func TestSetDocumentTagsDeadlockIsRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- st.SetDocumentTags(ctx, alice, doc.ID, nil) }()
+	go func() {
+		_, err := st.PatchDocument(ctx, alice, doc.ID, store.DocumentPatch{SetTags: true})
+		done <- err
+	}()
 	// Wait until the store's transaction waits for the test's lock.
 	watch := connect(t, url)
 	for {
@@ -966,7 +971,7 @@ func TestSetDocumentTagsDeadlockIsRetry(t *testing.T) {
 		}
 		select {
 		case err := <-done:
-			t.Fatalf("SetDocumentTags returned without waiting: %v", err)
+			t.Fatalf("PatchDocument returned without waiting: %v", err)
 		default:
 		}
 	}
@@ -976,7 +981,7 @@ func TestSetDocumentTagsDeadlockIsRetry(t *testing.T) {
 		t.Fatalf("the test's transaction: %v", err)
 	}
 	if err := <-done; !errors.Is(err, store.ErrRetry) {
-		t.Fatalf("SetDocumentTags: %v, want ErrRetry", err)
+		t.Fatalf("PatchDocument: %v, want ErrRetry", err)
 	}
 }
 

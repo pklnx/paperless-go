@@ -6,7 +6,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/pklnx/paperless-go/internal/store/db"
@@ -72,19 +71,6 @@ type NewDocument struct {
 	CorrespondentID     *string
 	DocumentTypeID      *string
 	TagIDs              []string
-}
-
-// DocumentUpdate holds the fields a user edits. All of them are replaced;
-// a zero DocumentDate keeps the stored one.
-type DocumentUpdate struct {
-	Title               string
-	DocumentDate        time.Time
-	Notes               string
-	IsFavorite          bool
-	IsInbox             bool
-	ArchiveSerialNumber *int32
-	CorrespondentID     *string
-	DocumentTypeID      *string
 }
 
 func documentFromDB(r db.GetDocumentRow) *Document {
@@ -173,7 +159,8 @@ func (in *NewDocument) validate() error {
 // type that is not the owner's gives ErrOwnerMismatch; a taken ASN gives
 // ErrASNTaken; an owner that does not exist gives ErrUnknownUser. An entry
 // from WithAudit is written in the same transaction; a document target
-// without an ID gets the new document's.
+// without an ID gets the new document's. The transaction takes the
+// owner's write lock first (locking.go).
 func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*Document, error) {
 	owner, err := sc.creator()
 	if err != nil {
@@ -200,7 +187,11 @@ func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*
 	}
 
 	var id pgtype.UUID
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTxWith(ctx, func(t *writeTx) error {
+		if err := t.lockOwners(ctx, owner); err != nil {
+			return err
+		}
+		q := t.q
 		var err error
 		id, err = q.CreateDocument(ctx, db.CreateDocumentParams{
 			OwnerID: owner, Title: in.Title, DocumentDate: date, Notes: in.Notes,
@@ -280,75 +271,26 @@ func (s *Store) ListDocuments(ctx context.Context, sc Scope) ([]*Document, error
 	return out, nil
 }
 
-// UpdateDocument replaces the user-edited fields of a document. Links must
-// point at the document owner's rows (ErrOwnerMismatch otherwise), also in
-// an All scope.
-func (s *Store) UpdateDocument(ctx context.Context, sc Scope, id string, in DocumentUpdate) (*Document, error) {
-	u, ok := parseID(id)
-	if !ok {
-		return nil, ErrNotFound
-	}
-	corr, err := parseLink(in.CorrespondentID)
-	if err != nil {
-		return nil, err
-	}
-	typ, err := parseLink(in.DocumentTypeID)
-	if err != nil {
-		return nil, err
-	}
-	var date *time.Time
-	if !in.DocumentDate.IsZero() {
-		date = &in.DocumentDate
-	}
-	n, err := s.q.UpdateDocument(ctx, db.UpdateDocumentParams{
-		ID: u, Owner: sc.owner(), Title: in.Title, DocumentDate: date, Notes: in.Notes,
-		IsFavorite: in.IsFavorite, IsInbox: in.IsInbox, ArchiveSerialNumber: in.ArchiveSerialNumber,
-		CorrespondentID: corr, DocumentTypeID: typ,
-	})
-	if err := deleted(n, err); err != nil {
-		return nil, err
-	}
-	return s.GetDocument(ctx, sc, id)
-}
-
-// SetDocumentTags replaces a document's tags. Tags that are not the document
-// owner's give ErrOwnerMismatch and change nothing.
-func (s *Store) SetDocumentTags(ctx context.Context, sc Scope, id string, tagIDs []string) error {
-	u, ok := parseID(id)
-	if !ok {
-		return ErrNotFound
-	}
-	tags, err := parseLinks(tagIDs)
-	if err != nil {
-		return err
-	}
-	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		q := s.q.WithTx(tx)
-		locked, err := q.LockDocument(ctx, db.LockDocumentParams{ID: u, Owner: sc.owner()})
-		if err != nil {
-			return err
-		}
-		owner := locked.OwnerID
-		if err := q.ClearDocumentTags(ctx, u); err != nil {
-			return err
-		}
-		if len(tags) > 0 {
-			if err := q.AddDocumentTags(ctx, db.AddDocumentTagsParams{OwnerID: owner, DocumentID: u, TagIds: tags}); err != nil {
-				return err
-			}
-		}
-		return q.TouchDocument(ctx, u)
-	})
-	return mapErr(err)
-}
-
 // DeleteDocument removes a document row with its tag links. Its files stay
-// in the blob store; the orphan sweep comes with the trash (#12).
+// in the blob store; the orphan sweep comes with the trash (#12). It reads
+// the owner, takes the owner's write lock, then deletes.
 func (s *Store) DeleteDocument(ctx context.Context, sc Scope, id string) error {
 	u, ok := parseID(id)
 	if !ok {
 		return ErrNotFound
 	}
-	n, err := s.q.DeleteDocument(ctx, db.DeleteDocumentParams{ID: u, Owner: sc.owner()})
-	return deleted(n, err)
+	return mapErr(s.inTxWith(ctx, func(t *writeTx) error {
+		owner, err := t.q.DocumentOwner(ctx, db.DocumentOwnerParams{ID: u, Owner: sc.owner()})
+		if err != nil {
+			return err
+		}
+		if err := t.lockOwners(ctx, owner); err != nil {
+			return err
+		}
+		got, err := t.q.DeleteDocument(ctx, db.DeleteDocumentParams{ID: u, Owner: sc.owner()})
+		if err != nil {
+			return err
+		}
+		return t.holds(got)
+	}))
 }

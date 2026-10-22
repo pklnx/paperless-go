@@ -194,9 +194,10 @@ func (q *Queries) CreateDocument(ctx context.Context, arg CreateDocumentParams) 
 	return id, err
 }
 
-const deleteDocument = `-- name: DeleteDocument :execrows
+const deleteDocument = `-- name: DeleteDocument :one
 DELETE FROM documents
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+RETURNING owner_id
 `
 
 type DeleteDocumentParams struct {
@@ -205,11 +206,10 @@ type DeleteDocumentParams struct {
 }
 
 func (q *Queries) DeleteDocument(ctx context.Context, arg DeleteDocumentParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteDocument, arg.ID, arg.Owner)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+	row := q.db.QueryRow(ctx, deleteDocument, arg.ID, arg.Owner)
+	var owner_id int64
+	err := row.Scan(&owner_id)
+	return owner_id, err
 }
 
 const documentByASN = `-- name: DocumentByASN :one
@@ -252,6 +252,57 @@ func (q *Queries) DocumentByOriginal(ctx context.Context, arg DocumentByOriginal
 	var i DocumentByOriginalRow
 	err := row.Scan(&i.ID, &i.Title)
 	return i, err
+}
+
+const documentOwner = `-- name: DocumentOwner :one
+SELECT owner_id FROM documents
+WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+`
+
+type DocumentOwnerParams struct {
+	ID    pgtype.UUID
+	Owner *int64
+}
+
+// DocumentOwner and DocumentOwners read the owner of documents in the
+// scope, without a lock, so a writer can take the owner's write lock
+// (store.lockOwners) before it locks or writes the rows.
+func (q *Queries) DocumentOwner(ctx context.Context, arg DocumentOwnerParams) (int64, error) {
+	row := q.db.QueryRow(ctx, documentOwner, arg.ID, arg.Owner)
+	var owner_id int64
+	err := row.Scan(&owner_id)
+	return owner_id, err
+}
+
+const documentOwners = `-- name: DocumentOwners :many
+SELECT DISTINCT owner_id FROM documents
+WHERE id = ANY ($1::uuid[]) AND ($2::bigint IS NULL OR owner_id = $2)
+ORDER BY owner_id
+`
+
+type DocumentOwnersParams struct {
+	Ids   []pgtype.UUID
+	Owner *int64
+}
+
+func (q *Queries) DocumentOwners(ctx context.Context, arg DocumentOwnersParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, documentOwners, arg.Ids, arg.Owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var owner_id int64
+		if err := rows.Scan(&owner_id); err != nil {
+			return nil, err
+		}
+		items = append(items, owner_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getDocument = `-- name: GetDocument :one
@@ -331,43 +382,6 @@ func (q *Queries) GetDocument(ctx context.Context, arg GetDocumentParams) (GetDo
 		&i.TagIds,
 	)
 	return i, err
-}
-
-const keyShareCorrespondent = `-- name: KeyShareCorrespondent :exec
-SELECT id FROM correspondents WHERE id = $1::uuid
-FOR KEY SHARE
-`
-
-func (q *Queries) KeyShareCorrespondent(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, keyShareCorrespondent, id)
-	return err
-}
-
-const keyShareDocumentType = `-- name: KeyShareDocumentType :exec
-SELECT id FROM document_types WHERE id = $1::uuid
-FOR KEY SHARE
-`
-
-func (q *Queries) KeyShareDocumentType(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, keyShareDocumentType, id)
-	return err
-}
-
-const keyShareTags = `-- name: KeyShareTags :exec
-SELECT id FROM tags WHERE id = ANY ($1::uuid[])
-ORDER BY id
-FOR KEY SHARE
-`
-
-// KeyShareTags, KeyShareCorrespondent and KeyShareDocumentType take the
-// key share a link's foreign-key check takes, before a writer that links
-// documents to these rows locks the documents (store.lockLinkTargets): a
-// delete of one of them locks the row first, then its documents, so both
-// take the locks in one order. A row deleted meanwhile is skipped; the
-// link then fails as before (ErrOwnerMismatch).
-func (q *Queries) KeyShareTags(ctx context.Context, ids []pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, keyShareTags, ids)
-	return err
 }
 
 const listDocuments = `-- name: ListDocuments :many
@@ -501,10 +515,9 @@ type LockDocumentsRow struct {
 	OwnerID int64
 }
 
-// LockDocuments locks the documents of ids in the scope, in id order, so
-// two bulk changes over overlapping sets wait for each other instead of
-// deadlocking. It returns the locked ids with their owners. FOR NO KEY
-// UPDATE as in LockDocument.
+// LockDocuments locks the documents of ids in the scope, in id order, and
+// returns the locked ids with their owners. FOR NO KEY UPDATE as in
+// LockDocument.
 func (q *Queries) LockDocuments(ctx context.Context, arg LockDocumentsParams) ([]LockDocumentsRow, error) {
 	rows, err := q.db.Query(ctx, lockDocuments, arg.Ids, arg.Owner)
 	if err != nil {
@@ -577,58 +590,6 @@ func (q *Queries) PatchDocument(ctx context.Context, arg PatchDocumentParams) (i
 		arg.SetDocumentType,
 		arg.DocumentTypeID,
 		arg.ID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const touchDocument = `-- name: TouchDocument :exec
-UPDATE documents SET modified_at = GREATEST(now(), modified_at + interval '1 microsecond') WHERE id = $1
-`
-
-func (q *Queries) TouchDocument(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, touchDocument, id)
-	return err
-}
-
-const updateDocument = `-- name: UpdateDocument :execrows
-UPDATE documents
-SET title = $1,
-    document_date = COALESCE($2::timestamptz, document_date), notes = $3,
-    is_favorite = $4, is_inbox = $5,
-    archive_serial_number = $6,
-    correspondent_id = $7, document_type_id = $8,
-    modified_at = GREATEST(now(), modified_at + interval '1 microsecond')
-WHERE id = $9 AND ($10::bigint IS NULL OR owner_id = $10)
-`
-
-type UpdateDocumentParams struct {
-	Title               string
-	DocumentDate        *time.Time
-	Notes               string
-	IsFavorite          bool
-	IsInbox             bool
-	ArchiveSerialNumber *int32
-	CorrespondentID     pgtype.UUID
-	DocumentTypeID      pgtype.UUID
-	ID                  pgtype.UUID
-	Owner               *int64
-}
-
-func (q *Queries) UpdateDocument(ctx context.Context, arg UpdateDocumentParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateDocument,
-		arg.Title,
-		arg.DocumentDate,
-		arg.Notes,
-		arg.IsFavorite,
-		arg.IsInbox,
-		arg.ArchiveSerialNumber,
-		arg.CorrespondentID,
-		arg.DocumentTypeID,
-		arg.ID,
-		arg.Owner,
 	)
 	if err != nil {
 		return 0, err

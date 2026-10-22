@@ -85,8 +85,9 @@ func TestDocumentRoundTrip(t *testing.T) {
 		t.Errorf("document = %+v", got)
 	}
 
-	// Update replaces the edited fields; a zero date keeps the stored one.
-	up, err := st.UpdateDocument(ctx, alice, d.ID, store.DocumentUpdate{Title: "Strom", IsFavorite: true})
+	// A patch replaces the given fields and keeps the others.
+	up, err := st.PatchDocument(ctx, alice, d.ID, store.DocumentPatch{Title: ptr("Strom"), IsFavorite: ptr(true),
+		IsInbox: ptr(false), SetASN: true, SetCorrespondent: true, SetDocumentType: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +97,7 @@ func TestDocumentRoundTrip(t *testing.T) {
 		t.Errorf("updated = %+v", up)
 	}
 
-	if err := st.SetDocumentTags(ctx, alice, d.ID, nil); err != nil {
+	if _, err := st.PatchDocument(ctx, alice, d.ID, store.DocumentPatch{SetTags: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := st.GetDocument(ctx, alice, d.ID); len(got.TagIDs) != 0 {
@@ -185,7 +186,6 @@ func TestCheckViolationIsInvalid(t *testing.T) {
 	st := storetest.New(t)
 	ctx := context.Background()
 	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
-	d := mustDoc(t, st, alice, newDoc("a"))
 	for name, err := range map[string]error{
 		"blank correspondent": func() error {
 			_, err := st.CreateCorrespondent(ctx, alice, store.CorrespondentInput{Name: "  "})
@@ -197,10 +197,6 @@ func TestCheckViolationIsInvalid(t *testing.T) {
 		}(),
 		"bad colour": func() error {
 			_, err := st.CreateTag(ctx, alice, store.TagInput{Name: "x", ColorHex: "red"})
-			return err
-		}(),
-		"asn zero on update": func() error {
-			_, err := st.UpdateDocument(ctx, alice, d.ID, store.DocumentUpdate{ArchiveSerialNumber: ptr(int32(0))})
 			return err
 		}(),
 	} {
@@ -309,8 +305,8 @@ func TestOwnershipSeparation(t *testing.T) {
 	}
 	for name, err := range map[string]error{
 		"get document":      second(st.GetDocument(ctx, bob, ad.ID)),
-		"update document":   second(st.UpdateDocument(ctx, bob, ad.ID, store.DocumentUpdate{Title: "x"})),
-		"set tags":          st.SetDocumentTags(ctx, bob, ad.ID, nil),
+		"patch document":    second(st.PatchDocument(ctx, bob, ad.ID, store.DocumentPatch{Title: ptr("x")})),
+		"set tags":          second(st.PatchDocument(ctx, bob, ad.ID, store.DocumentPatch{SetTags: true})),
 		"delete document":   st.DeleteDocument(ctx, bob, ad.ID),
 		"get correspondent": second(st.GetCorrespondent(ctx, bob, ac.ID)),
 		"update corr.":      second(st.UpdateCorrespondent(ctx, bob, ac.ID, store.CorrespondentInput{Name: "x"})),
@@ -340,11 +336,11 @@ func TestOwnershipSeparation(t *testing.T) {
 	if ts, _ := st.ListTags(ctx, admin); len(ts) != 2 {
 		t.Errorf("admin sees %d tags, want 2", len(ts))
 	}
-	up, err := st.UpdateDocument(ctx, admin, ad.ID, store.DocumentUpdate{Title: "by admin", CorrespondentID: &ac.ID})
+	up, err := st.PatchDocument(ctx, admin, ad.ID, store.DocumentPatch{Title: ptr("by admin"), SetCorrespondent: true, CorrespondentID: &ac.ID})
 	if err != nil || up.Title != "by admin" || up.OwnerID != alice.UserID {
 		t.Errorf("admin update: %+v, %v", up, err)
 	}
-	if err := st.SetDocumentTags(ctx, admin, ad.ID, []string{at.ID}); err != nil {
+	if _, err := st.PatchDocument(ctx, admin, ad.ID, store.DocumentPatch{SetTags: true, TagIDs: []string{at.ID}}); err != nil {
 		t.Errorf("admin sets alice's tag: %v", err)
 	}
 	// A document an admin creates is the admin's own.
@@ -390,10 +386,10 @@ func TestOwnerMismatch(t *testing.T) {
 		"create with other's tag":           second(st.CreateDocument(ctx, alice, withTag)),
 		"create with missing tag":           second(st.CreateDocument(ctx, alice, withMissing)),
 		"create with malformed link":        second(st.CreateDocument(ctx, alice, withMalformed)),
-		"update with other's correspondent": second(st.UpdateDocument(ctx, alice, ad.ID, store.DocumentUpdate{CorrespondentID: &bc.ID})),
-		"admin links other owner's type":    second(st.UpdateDocument(ctx, admin, ad.ID, store.DocumentUpdate{DocumentTypeID: &bty.ID})),
-		"set other's tag":                   st.SetDocumentTags(ctx, alice, ad.ID, []string{bt.ID}),
-		"admin sets other owner's tag":      st.SetDocumentTags(ctx, admin, ad.ID, []string{bt.ID}),
+		"patch with other's correspondent":  second(st.PatchDocument(ctx, alice, ad.ID, store.DocumentPatch{SetCorrespondent: true, CorrespondentID: &bc.ID})),
+		"admin links other owner's type":    second(st.PatchDocument(ctx, admin, ad.ID, store.DocumentPatch{SetDocumentType: true, DocumentTypeID: &bty.ID})),
+		"set other's tag":                   second(st.PatchDocument(ctx, alice, ad.ID, store.DocumentPatch{SetTags: true, TagIDs: []string{bt.ID}})),
+		"admin sets other owner's tag":      second(st.PatchDocument(ctx, admin, ad.ID, store.DocumentPatch{SetTags: true, TagIDs: []string{bt.ID}})),
 		"tag under other's parent":          second(st.CreateTag(ctx, alice, store.TagInput{Name: "Sub", ParentID: &bt.ID})),
 		"tag under missing parent":          second(st.CreateTag(ctx, alice, store.TagInput{Name: "Sub", ParentID: &missing})),
 		"admin moves tag under other's tag": second(st.UpdateTag(ctx, admin, aliceTag.ID, store.TagInput{Name: "Alice", ParentID: &bt.ID})),
@@ -483,7 +479,7 @@ func TestASNUniquePerOwner(t *testing.T) {
 	// Documents without an ASN do not collide.
 	mustDoc(t, st, alice, newDoc("c"))
 	d := mustDoc(t, st, alice, newDoc("d"))
-	if _, err := st.UpdateDocument(ctx, alice, d.ID, store.DocumentUpdate{ArchiveSerialNumber: ptr(int32(1))}); !errors.Is(err, store.ErrASNTaken) {
+	if _, err := st.PatchDocument(ctx, alice, d.ID, store.DocumentPatch{SetASN: true, ArchiveSerialNumber: ptr(int32(1))}); !errors.Is(err, store.ErrASNTaken) {
 		t.Errorf("update to a taken ASN: %v, want ErrASNTaken", err)
 	}
 	zero := newDoc("e")
