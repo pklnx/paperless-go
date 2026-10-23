@@ -352,7 +352,9 @@ if out=$(sh "$notes_script" 1.0.0 ghcr.io/pklnx/paperless-go "" 2>&1); then
 	contains "release-notes: first, updater paragraph" "\`26.10\` stays on \`26.10-1\`" "$out"
 	contains "release-notes: first, earlier release wording" "The earlier release was named \`YY.MM-N\` (\`26.10-1\`); its tag and images stay." "$out"
 	lacks "release-notes: first, no plural earlier releases" "Earlier releases" "$out"
-	contains "release-notes: first, prefers the minor tag" "exact version or \`1.0\` (\`1\` also brings minor releases" "$out"
+	contains "release-notes: first, prefers the minor tag" "exact version or \`1.0\` (\`1\` also brings minor releases, which may include a migration; until \`./pgo migrate\` runs, the web server does not start)" "$out"
+	contains "release-notes: first, move the pin" "\`1.0\` gets nothing new once the next minor release is out: then move the tag to the next minor or major release (set \`PAPERLESS_GO_IMAGE\`, run \`./pgo migrate\`, then \`docker compose up -d web\`) after reading its notes." "$out"
+	lacks "release-notes: first, no migrations-stop wording" "whose migrations stop" "$out"
 	lacks "release-notes: first, no breaking-change sentence" "This release has a breaking change" "$out"
 	lacks "release-notes: first, no trusted proxies" "TRUSTED_PROXIES" "$out"
 else

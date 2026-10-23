@@ -525,9 +525,9 @@ stays until `00018` is rolled back too. Words of trashed documents stay in
 the list until the document is purged, so the trash's own search finds
 them inside compounds too; live searches never show trashed documents.
 
-**Session cookie of the request's scheme (#156).** Nothing to run. Over
-HTTPS (TLS, or `X-Forwarded-Proto: https` from loopback or a [trusted
-proxy](../reference/security#trusted-proxies)) only the
+**Session cookie of the request's scheme (#156).** Nothing to run. When
+a request counts as HTTPS (`X-Forwarded-Proto: https` from loopback or a [trusted
+proxy](../reference/security#trusted-proxies)), only the
 `__Host-paperless_go_session` cookie logs in; over plain HTTP, which
 includes a proxy that does not count, only `paperless_go_session`. Before,
 either name counted, so a plain cookie planted over plain HTTP or from
@@ -580,13 +580,18 @@ tags:
 | `1` | The newest `1.x.y` release. | Features, and migrations when there are any, so run `./pgo migrate` after each update; normally no breaking change. |
 | `latest` | The newest release. | Everything, breaking changes included. |
 
-Releases before 1.0.0 were named after the year and month, plus a build
-number: the earlier release was named `26.10-1`; its tag and images stay. The
+The release before 1.0.0 was named after the year and month, plus a build
+number: `26.10-1`; its tag and images stay. The
 image tag `26.10` stays on `26.10-1` and gets no more updates. Tools that
 update images automatically (Watchtower, Renovate, Diun) may rank `26.10`
 above `1.0.0`: switch them once to an exact version or `1.0` (patch releases,
-which normally have no migration). `1` also installs minor releases, whose
-migrations stop the web server until `./pgo migrate` runs. A tool on `latest`
+which normally have no migration). `1.0` gets nothing new once `1.1.0` is out:
+then move the tag to the next minor or major release (`1.1`, or `2` after its
+upgrade steps) after reading that release's notes. To move it, set
+`PAPERLESS_GO_IMAGE` in `.env`, run `./pgo migrate`, then
+`docker compose up -d web`. `1` also
+installs minor releases, which may include a migration; until `./pgo migrate`
+runs, the web server does not start. A tool on `latest`
 installs breaking changes without their upgrade steps.
 
 Set `PAPERLESS_GO_IMAGE` in `.env` to use another tag or your own build;

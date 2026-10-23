@@ -188,8 +188,11 @@ the `breaking` and `db-migration` pull requests first. Add manual upgrade notes
 only when a change needs more than these generic steps. The first semver
 release (no `vX.Y.Z` tag before it) also gets a paragraph for automatic image
 updaters: the tag `26.10` stays on `26.10-1`, and tools should switch to an
-exact version or `1.0` (`1` also brings minor releases, whose migrations stop
-the web server until `./pgo migrate` runs).
+exact version or `1.0` (`1` also brings minor releases, which may include a
+migration; until `./pgo migrate` runs, the web server does not start). `1.0`
+gets nothing new once `1.1.0` is out, so the notes tell users to move the tag
+to the next minor or major release (set `PAPERLESS_GO_IMAGE`, run
+`./pgo migrate`, then `docker compose up -d web`).
 
 `./pgo --version` and `paperless-go --version` show the version. The release
 image shows `X.Y.Z` (for example `1.0.0`). A build from a clone shows
@@ -208,4 +211,6 @@ docker compose up -d web
 
 In a clone `./pgo migrate` builds the image `paperless-go:local` from the
 checked-out sources before it migrates, and `docker compose up -d web` then
-starts that image.
+starts that image. This holds while `PAPERLESS_GO_IMAGE` is unset: with it
+set, the build is tagged with that name and replaces a pulled image of the
+same name on that machine.

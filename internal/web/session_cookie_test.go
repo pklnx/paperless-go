@@ -90,11 +90,11 @@ func TestSessionCookieOfTheScheme(t *testing.T) {
 		cookies []*http.Cookie
 		want    int
 	}
-	check := func(t *testing.T, remote, proto string, c cookieCase) {
+	check := func(t *testing.T, remote, proto string, tlsOn bool, c cookieCase) {
 		t.Helper()
 		for _, path := range []string{"/api/session", "/api/tags"} {
 			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, cookieRequest("GET", path, remote, proto, false, c.cookies...))
+			h.ServeHTTP(rec, cookieRequest("GET", path, remote, proto, tlsOn, c.cookies...))
 			if rec.Code != c.want {
 				t.Errorf("%s, %s: %d, want %d: %s", c.name, path, rec.Code, c.want, rec.Body)
 			}
@@ -114,7 +114,7 @@ func TestSessionCookieOfTheScheme(t *testing.T) {
 				{"own session in a plain cookie", []*http.Cookie{ownPlain}, 401},
 				{"own session in __Host- next to a planted plain", []*http.Cookie{planted, ownSecure}, 200},
 			} {
-				check(t, remote, "https", c)
+				check(t, remote, "https", false, c)
 			}
 		})
 	}
@@ -123,7 +123,7 @@ func TestSessionCookieOfTheScheme(t *testing.T) {
 			{"own session in a __Host- cookie", []*http.Cookie{ownSecure}, 401},
 			{"own session in a plain cookie next to a stale __Host-", []*http.Cookie{stale, ownPlain}, 200},
 		} {
-			check(t, "192.0.2.1:1234", "", c)
+			check(t, "192.0.2.1:1234", "", false, c)
 		}
 	})
 	// The header from an untrusted peer does not count: the request is a
@@ -133,31 +133,21 @@ func TestSessionCookieOfTheScheme(t *testing.T) {
 			{"own session in a plain cookie", []*http.Cookie{ownPlain}, 200},
 			{"own session in a __Host- cookie", []*http.Cookie{ownSecure}, 401},
 		} {
-			check(t, "192.0.2.1:1234", "https", c)
+			check(t, "192.0.2.1:1234", "https", false, c)
 		}
 	})
 	// Completes the matrix: a request with r.TLS set counts as HTTPS without
 	// any header (secureRequest checks it first). The server has no TLS
 	// listener today, so no deployment reaches this; the test pins the
-	// function, not a setup.
+	// function, not a setup. /api/tags needs a session, so the plain cookies
+	// get 401 there too.
 	t.Run("direct TLS", func(t *testing.T) {
-		for _, c := range []struct {
-			name    string
-			cookies []*http.Cookie
-			want    int
-		}{
+		for _, c := range []cookieCase{
 			{"own session in __Host- next to a planted plain", []*http.Cookie{planted, ownSecure}, 200},
 			{"planted plain alone", []*http.Cookie{planted}, 401},
 			{"own session in a plain cookie", []*http.Cookie{ownPlain}, 401},
 		} {
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, cookieRequest("GET", "/api/session", "192.0.2.1:1234", "", true, c.cookies...))
-			if rec.Code != c.want {
-				t.Errorf("%s: %d, want %d: %s", c.name, rec.Code, c.want, rec.Body)
-			}
-			if strings.Contains(rec.Body.String(), "mallory") {
-				t.Errorf("%s: logged in as the planter: %s", c.name, rec.Body)
-			}
+			check(t, "192.0.2.1:1234", "", true, c)
 		}
 	})
 	// A logout over an HTTPS request ends the session of the planted plain
@@ -190,10 +180,13 @@ func TestSessionCookieOfTheScheme(t *testing.T) {
 		if !expired[secureCookieName] || !expired[cookieName] {
 			t.Errorf("expired cookies %v, want both %s and %s", expired, secureCookieName, cookieName)
 		}
+		// The planted plain cookie, sent as a plain request from a peer that is
+		// not a trusted proxy, is where the session would still log in if the
+		// logout had ended only the scheme's cookie session.
 		rec = httptest.NewRecorder()
-		h.ServeHTTP(rec, cookieRequest("GET", "/api/session", "10.1.2.3:4000", "https", false, plantedC))
+		h.ServeHTTP(rec, cookieRequest("GET", "/api/session", "192.0.2.1:1234", "", false, plantedC))
 		if rec.Code != http.StatusUnauthorized || strings.Contains(rec.Body.String(), "mallory") {
-			t.Errorf("planted cookie after the logout over HTTPS: %d: %s", rec.Code, rec.Body)
+			t.Errorf("planted cookie after the logout over plain HTTP: %d: %s", rec.Code, rec.Body)
 		}
 	})
 }
