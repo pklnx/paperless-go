@@ -75,6 +75,9 @@ const en = {
   correspondentFilter: (name: string) => `Correspondent: ${name}`,
   typeFilter: (name: string) => `Type: ${name}`,
   removeFilter: (label: string) => `Remove filter ${label}`,
+  filterGone: (kind: "tag" | "corr" | "type", fromView: boolean) =>
+    `${fromView ? "This saved view's" : "This"} ${kind === "tag" ? "tag" : kind === "corr" ? "correspondent" : "document type"} no longer exists.` +
+    (fromView ? " To repair the view, choose a filter and use “Update to the current filter” in its menu." : ""),
   loadMore: "Load more",
   sortBy: "Sort",
   sortRelevance: "Best match",
@@ -199,6 +202,27 @@ const en = {
   asnTakenTrashed: "A document in the trash has this archive serial number.",
   uploadInTrash: "already there, in the trash",
   uploadInTrashOf: (title: string) => `already there, in the trash → ${title}`,
+
+  // Saved views (#12, part 4)
+  savedViews: "Saved views",
+  saveView: "Save view…",
+  saveViewTitle: "Save this view",
+  saveViewHint: "Saves the search, the filter and the sort of the list under a name, for the sidebar.",
+  viewName: "Name",
+  viewActions: (name: string) => `Actions for ${name}`,
+  renameView: "Rename",
+  updateView: "Update to the current filter",
+  updateViewHint: "Search or filter the list first; then this saves what the list shows now.",
+  moveViewUp: "Move up",
+  moveViewDown: "Move down",
+  deleteView: "Delete",
+  deleteViewTitle: (name: string) => `Delete “${name}”?`,
+  deleteViewText: "Only the saved view is deleted; the documents stay.",
+  viewSaved: (name: string) => `View “${name}” saved.`,
+  viewUpdated: (name: string) => `View “${name}” updated.`,
+  viewDeleted: (name: string) => `View “${name}” deleted.`,
+  viewGone: "This saved view no longer exists.",
+  loadViewsFailed: (err: string) => `Saved views could not be loaded: ${err}`,
   uploadRestoreLabel: (name: string) => `Restore ${name} from the trash`,
   uploadRestored: "restored from the trash",
   uploadRetryAfter: (seconds: number) =>
@@ -559,6 +583,9 @@ const en = {
       "document.bulk_purge": "Deleted several documents permanently",
       "api_key.create": "Created API key",
       "api_key.revoke": "Revoked API key",
+      "saved_view.create": "Saved a view",
+      "saved_view.update": "Changed a saved view",
+      "saved_view.delete": "Deleted a saved view",
     })[a] ?? a,
 };
 
@@ -636,6 +663,9 @@ const de: Messages = {
   correspondentFilter: (name: string) => `Korrespondent: ${name}`,
   typeFilter: (name: string) => `Typ: ${name}`,
   removeFilter: (label: string) => `Filter ${label} entfernen`,
+  filterGone: (kind: "tag" | "corr" | "type", fromView: boolean) =>
+    `${kind === "tag" ? "Den Tag" : kind === "corr" ? "Den Korrespondenten" : "Den Dokumenttyp"} ${fromView ? "dieser gespeicherten Ansicht " : ""}gibt es nicht mehr.` +
+    (fromView ? " Um die Ansicht zu reparieren, wähle einen Filter und dann „Auf aktuellen Filter setzen“ in ihrem Menü." : ""),
   loadMore: "Mehr laden",
   sortBy: "Sortierung",
   sortRelevance: "Beste Treffer",
@@ -761,6 +791,26 @@ const de: Messages = {
   asnTakenTrashed: "Ein Dokument im Papierkorb hat diese Archivnummer.",
   uploadInTrash: "schon vorhanden, im Papierkorb",
   uploadInTrashOf: (title) => `schon vorhanden, im Papierkorb → ${title}`,
+
+  savedViews: "Gespeicherte Ansichten",
+  saveView: "Ansicht speichern…",
+  saveViewTitle: "Diese Ansicht speichern",
+  saveViewHint: "Speichert die Suche, den Filter und die Sortierung der Liste unter einem Namen für die Seitenleiste.",
+  viewName: "Name",
+  viewActions: (name) => `Aktionen für ${name}`,
+  renameView: "Umbenennen",
+  updateView: "Auf den aktuellen Filter setzen",
+  updateViewHint: "Suche oder filtere zuerst die Liste; dann speichert dies, was die Liste jetzt zeigt.",
+  moveViewUp: "Nach oben",
+  moveViewDown: "Nach unten",
+  deleteView: "Löschen",
+  deleteViewTitle: (name) => `„${name}“ löschen?`,
+  deleteViewText: "Nur die gespeicherte Ansicht wird gelöscht; die Dokumente bleiben.",
+  viewSaved: (name) => `Ansicht „${name}“ gespeichert.`,
+  viewUpdated: (name) => `Ansicht „${name}“ aktualisiert.`,
+  viewDeleted: (name) => `Ansicht „${name}“ gelöscht.`,
+  viewGone: "Diese gespeicherte Ansicht gibt es nicht mehr.",
+  loadViewsFailed: (err) => `Gespeicherte Ansichten konnten nicht geladen werden: ${err}`,
   uploadRestoreLabel: (name) => `${name} aus dem Papierkorb wiederherstellen`,
   uploadRestored: "aus dem Papierkorb wiederhergestellt",
   uploadRetryAfter: (seconds) =>
@@ -1111,6 +1161,9 @@ const de: Messages = {
       "document.bulk_purge": "Mehrere Dokumente endgültig gelöscht",
       "api_key.create": "API-Schlüssel erstellt",
       "api_key.revoke": "API-Schlüssel widerrufen",
+      "saved_view.create": "Ansicht gespeichert",
+      "saved_view.update": "Gespeicherte Ansicht geändert",
+      "saved_view.delete": "Gespeicherte Ansicht gelöscht",
     })[a] ?? a,
 };
 

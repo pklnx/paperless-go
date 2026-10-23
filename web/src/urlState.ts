@@ -2,7 +2,7 @@ import { useCallback, useSyncExternalStore } from "react";
 import type { DocumentQuery, DocumentSort } from "./api";
 
 // The UI state lives in the URL query
-// (?q=&inbox=&fav=&trash=&tag=&corr=&type=&sort=&order=&all=&doc=&view=), so the
+// (?q=&inbox=&fav=&trash=&tag=&corr=&type=&sort=&order=&all=&doc=&view=&sv=), so the
 // back button, reloads and bookmarks work without a router library, and the
 // server serves every view from "/".
 
@@ -29,9 +29,11 @@ export interface ViewState {
   doc: string;
   /** "" for the documents, or a page: "metadata", "profile", "log", "users". */
   view: string;
+  /** The saved view last opened (#12, part 4); the sidebar marks it while the list still shows its filter. */
+  sv: string;
 }
 
-const keys: (keyof ViewState)[] = ["q", "inbox", "fav", "trash", "tag", "corr", "type", "sort", "order", "all", "doc", "view"];
+const keys: (keyof ViewState)[] = ["q", "inbox", "fav", "trash", "tag", "corr", "type", "sort", "order", "all", "doc", "view", "sv"];
 
 const flag = (v: string | null) => (v === "1" ? "1" : "");
 const sorts: readonly string[] = ["relevance", "added", "date", "deleted"];
@@ -52,6 +54,7 @@ export function parseState(search: string): ViewState {
     all: flag(p.get("all")),
     doc: p.get("doc") ?? "",
     view: p.get("view") ?? "",
+    sv: p.get("sv") ?? "",
   };
 }
 
@@ -78,9 +81,9 @@ export function filterPatch(f: Filter | null): Partial<ViewState> {
 }
 
 /**
- * The state's sidebar filter. A URL with several (typed by hand) counts
+ * The state's sidebar filter. A URL or saved view with several counts
  * the first in this order, as the sidebar marks it; the list still uses
- * all of them.
+ * all of them and shows each (activeFilters).
  */
 export function activeFilter(s: ViewState): Filter | null {
   if (s.trash) return { kind: "trash" };
@@ -90,6 +93,28 @@ export function activeFilter(s: ViewState): Filter | null {
   if (s.corr) return { kind: "corr", id: s.corr };
   if (s.type) return { kind: "type", id: s.type };
   return null;
+}
+
+/**
+ * Every filter the list applies, in activeFilter's order: the trash alone
+ * (it takes none of the others), else each of inbox, favourites, tag,
+ * correspondent and type that is set. A saved view or a URL may combine
+ * them; the list shows a chip for each (#143).
+ */
+export function activeFilters(s: ViewState): Filter[] {
+  if (s.trash) return [{ kind: "trash" }];
+  const out: Filter[] = [];
+  if (s.inbox) out.push({ kind: "inbox" });
+  if (s.fav) out.push({ kind: "fav" });
+  if (s.tag) out.push({ kind: "tag", id: s.tag });
+  if (s.corr) out.push({ kind: "corr", id: s.corr });
+  if (s.type) out.push({ kind: "type", id: s.type });
+  return out;
+}
+
+/** The patch that removes filter f and keeps the others. */
+export function withoutFilter(f: Filter): Partial<ViewState> {
+  return { [f.kind]: "" };
 }
 
 /**

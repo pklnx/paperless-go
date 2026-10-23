@@ -86,6 +86,7 @@ beforeEach(() => {
     if (path === "/api/tags") return json(200, { tags: server.tags });
     if (path === "/api/correspondents") return json(200, { correspondents: server.correspondents });
     if (path === "/api/document-types") return json(200, { documentTypes: server.types });
+    if (path === "/api/saved-views") return json(200, { savedViews: [] });
     if (path === "/api/documents" && method === "GET") {
       lists.push(p);
       const r = server.documents(p);
@@ -191,6 +192,37 @@ describe("sidebar", () => {
     fireEvent.click(screen.getByRole("button", { name: t.removeFilter(t.favorites) }));
     await waitFor(() => expect(params(lastList())).toBe(""));
     expect(window.location.search).toBe("");
+  });
+
+  it("shows a chip for every filter the list applies, and each chip removes only its own (#143)", async () => {
+    server.tags = [tag("t1", "Steuer")];
+    server.correspondents = [named("c1", "Amt")];
+    window.history.replaceState(null, "", "/?inbox=1&tag=t1&corr=c1");
+    await start();
+    await waitFor(() => expect(params(lastList())).toBe("inbox=true&tag=t1&correspondent=c1"));
+    expect(await screen.findByRole("heading", { level: 2, name: `${t.inbox} · Steuer · Amt` })).toBeTruthy();
+    for (const chip of [t.inbox, t.tagFilter("Steuer"), t.correspondentFilter("Amt")]) {
+      expect(screen.getByRole("button", { name: t.removeFilter(chip) })).toBeTruthy();
+    }
+    expect(screen.queryByText(t.filterGone("tag", false))).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: t.removeFilter(t.tagFilter("Steuer")) }));
+    await waitFor(() => expect(params(lastList())).toBe("inbox=true&correspondent=c1"));
+    expect(window.location.search).toBe("?inbox=1&corr=c1");
+    expect(screen.getByRole("button", { name: t.removeFilter(t.inbox) })).toBeTruthy();
+    expect(screen.getByRole("button", { name: t.removeFilter(t.correspondentFilter("Amt")) })).toBeTruthy();
+  });
+
+  it("says when a filter's tag or correspondent no longer exists, with the repair for a saved view (#143)", async () => {
+    server.tags = [tag("t1", "Steuer")];
+    window.history.replaceState(null, "", "/?tag=gone&sv=v1");
+    await start();
+    expect(await screen.findByText(t.filterGone("tag", true))).toBeTruthy();
+    expect(screen.getByRole("button", { name: t.removeFilter(t.tagFilter(t.unknownEntry)) })).toBeTruthy();
+    cleanup();
+    window.history.replaceState(null, "", "/?corr=gone&tag=t1");
+    await start();
+    expect(await screen.findByText(t.filterGone("corr", false))).toBeTruthy();
+    expect(screen.queryByText(t.filterGone("tag", false))).toBeNull();
   });
 
   it("keeps a typed search with a filter, and All documents clears both", async () => {

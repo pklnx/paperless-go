@@ -9,6 +9,44 @@ import (
 	"context"
 )
 
+const lockBlob = `-- name: LockBlob :exec
+SELECT pg_advisory_xact_lock($1::int, $2::int)
+`
+
+type LockBlobParams struct {
+	Class int32
+	Key   int32
+}
+
+func (q *Queries) LockBlob(ctx context.Context, arg LockBlobParams) error {
+	_, err := q.db.Exec(ctx, lockBlob, arg.Class, arg.Key)
+	return err
+}
+
+const lockBlobShared = `-- name: LockBlobShared :exec
+
+SELECT pg_advisory_xact_lock_shared($1::int, $2::int)
+`
+
+type LockBlobSharedParams struct {
+	Class int32
+	Key   int32
+}
+
+// The per-hash blob lock (store.holdBlobs and the sweeper's queue pass;
+// docs/development/architecture.md, "Blob removal"). It uses the two-int4
+// form, whose key space is separate from the single-bigint keys of the
+// owner lock and the other advisory locks of the code base, so a blob key
+// can never equal an owner key. class is store.blobLockClass, key the
+// first four bytes of the SHA-256 (store.blobLockKey): two hashes with the
+// same key only serialise. Writers take it shared, after their owner
+// locks, in ascending key; the sweeper takes one key exclusively and no
+// owner lock.
+func (q *Queries) LockBlobShared(ctx context.Context, arg LockBlobSharedParams) error {
+	_, err := q.db.Exec(ctx, lockBlobShared, arg.Class, arg.Key)
+	return err
+}
+
 const lockOwner = `-- name: LockOwner :exec
 
 SELECT pg_advisory_xact_lock(hashtextextended($1::text || $2::bigint::text, 0))
@@ -29,4 +67,47 @@ type LockOwnerParams struct {
 func (q *Queries) LockOwner(ctx context.Context, arg LockOwnerParams) error {
 	_, err := q.db.Exec(ctx, lockOwner, arg.Prefix, arg.OwnerID)
 	return err
+}
+
+const sweepLockHeld = `-- name: SweepLockHeld :one
+SELECT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_locks
+    WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted
+      AND classid = $1::int::oid AND objid = 0 AND objsubid = 2)
+`
+
+// Whether this session still holds the sweep lock (a terminated or timed
+// out session has lost it with its connection).
+func (q *Queries) SweepLockHeld(ctx context.Context, class int32) (bool, error) {
+	row := q.db.QueryRow(ctx, sweepLockHeld, class)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const sweepUnlock = `-- name: SweepUnlock :one
+SELECT pg_advisory_unlock($1::int, 0)
+`
+
+func (q *Queries) SweepUnlock(ctx context.Context, class int32) (bool, error) {
+	row := q.db.QueryRow(ctx, sweepUnlock, class)
+	var pg_advisory_unlock bool
+	err := row.Scan(&pg_advisory_unlock)
+	return pg_advisory_unlock, err
+}
+
+const trySweepLock = `-- name: TrySweepLock :one
+
+SELECT pg_try_advisory_lock($1::int, 0)
+`
+
+// The sweep lock (store.ExclusiveSweep): a session-level advisory lock in
+// its own class (store.sweepLockClass), held on one connection for a whole
+// queue pass or walk, so at most one of them runs at a time across
+// processes. A crash releases it with the connection.
+func (q *Queries) TrySweepLock(ctx context.Context, class int32) (bool, error) {
+	row := q.db.QueryRow(ctx, trySweepLock, class)
+	var pg_try_advisory_lock bool
+	err := row.Scan(&pg_try_advisory_lock)
+	return pg_try_advisory_lock, err
 }

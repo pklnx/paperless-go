@@ -19,7 +19,8 @@ export interface Notice {
   /**
    * Move the keyboard focus into the notice (its action, else its close
    * button): after a row action the focused row is gone, and Undo stays
-   * one key away.
+   * one key away. Only for keyboard users: after a pointer click the focus
+   * stays where the click left it, and the notice keeps its time.
    */
   focus?: boolean;
 }
@@ -31,9 +32,9 @@ export interface Notices {
   notice: Notice | null;
   show: Notify;
   close: () => void;
-  /** Stops the timer while the notice has the focus or the pointer (WCAG 2.2.1). */
+  /** Stops the timer while the notice has the keyboard focus or the pointer (WCAG 2.2.1). */
   pause: () => void;
-  /** Starts the full time again once focus and pointer left. */
+  /** Starts the full time again once keyboard focus and pointer left. */
   resume: () => void;
 }
 
@@ -106,8 +107,46 @@ export function Toast({ notice, close, pause, resume }: Pick<Notices, "notice" |
   const box = useRef<HTMLDivElement>(null);
   // Where the focus was before the notice took it.
   const returnTo = useRef<Element | null>(null);
+  // Whether the last input was a key (not a pointer), as :focus-visible
+  // decides it: until a pointer is used, the keyboard is assumed.
+  const keyboard = useRef(true);
   useEffect(() => {
-    if (!notice?.focus) return;
+    // A shortcut with a modifier (Ctrl+C) is no keyboard navigation.
+    const onKey = (e: KeyboardEvent) => void (e.ctrlKey || e.metaKey || e.altKey || (keyboard.current = true));
+    const onPointer = () => void (keyboard.current = false);
+    document.addEventListener("keydown", onKey, true);
+    document.addEventListener("pointerdown", onPointer, true);
+    document.addEventListener("mousedown", onPointer, true);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("pointerdown", onPointer, true);
+      document.removeEventListener("mousedown", onPointer, true);
+    };
+  }, []);
+  // The pause has two reasons, keyboard focus and pointer; the time runs
+  // again only once both are gone.
+  const focused = useRef(false);
+  const hovered = useRef(false);
+  const update = () => (focused.current || hovered.current ? pause() : resume());
+  const kind = useRef<boolean | null>(null);
+  useEffect(() => {
+    // A notice of the other kind, or none, is another element (or none):
+    // the pointer is not on it, and neither is the focus. One of the same
+    // kind keeps its element, and the pause with it (as useNotice does).
+    const now = notice ? Boolean(notice.error) : null;
+    if (now !== kind.current) hovered.current = false;
+    kind.current = now;
+    if (!box.current?.contains(document.activeElement)) {
+      // A focused notice replaced without a blur (its Undo gone with it)
+      // ends the focus reason of the pause here, or the time would stay
+      // stopped for good (#143).
+      if (focused.current) {
+        focused.current = false;
+        update();
+      }
+      returnTo.current = null;
+    }
+    if (!notice?.focus || !keyboard.current) return;
     const button = box.current?.querySelector("button");
     if (!button) return;
     if (!box.current?.contains(document.activeElement)) returnTo.current = document.activeElement;
@@ -125,12 +164,25 @@ export function Toast({ notice, close, pause, resume }: Pick<Notices, "notice" |
     <div
       ref={box}
       data-testid="notice"
-      onFocus={pause}
-      onBlur={(e) => {
-        if (!box.current?.contains(e.relatedTarget as Node | null)) resume();
+      onFocus={() => {
+        // Focus from a pointer click does not stop the time; the pointer on it does.
+        if (!keyboard.current || focused.current) return;
+        focused.current = true;
+        update();
       }}
-      onMouseEnter={pause}
-      onMouseLeave={resume}
+      onBlur={(e) => {
+        if (box.current?.contains(e.relatedTarget as Node | null) || !focused.current) return;
+        focused.current = false;
+        update();
+      }}
+      onMouseEnter={() => {
+        hovered.current = true;
+        update();
+      }}
+      onMouseLeave={() => {
+        hovered.current = false;
+        update();
+      }}
       className="pointer-events-auto flex max-w-lg items-center gap-3 rounded-lg bg-ink py-1.5 pr-1.5 pl-4 text-sm text-bg shadow-lg"
     >
       <span className="min-w-0 wrap-anywhere">{notice.text}</span>

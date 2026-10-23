@@ -127,12 +127,12 @@ func TestConcurrentMigrate(t *testing.T) {
 	ctx := context.Background()
 	// Two stores on a fresh schema: roll back first, then migrate from both
 	// at once. The session lock lets one apply and the other find nothing.
-	a, err := store.Open(ctx, url)
+	a, err := store.Open(ctx, url, storetest.AnyBlob)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	b, err := store.Open(ctx, url)
+	b, err := store.Open(ctx, url, storetest.AnyBlob)
 	if err != nil {
 		t.Fatal(err)
 	}

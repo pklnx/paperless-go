@@ -96,6 +96,12 @@ func (s *Server) routes() []route {
 		h("PATCH /api/document-types/{id}", s.handlePatchDocumentType, accessWrite),
 		h("DELETE /api/document-types/{id}", s.handleDeleteDocumentType, accessWrite),
 
+		// Saved views are the caller's own, also for an admin.
+		h("GET /api/saved-views", s.handleListSavedViews, accessRead),
+		h("POST /api/saved-views", s.handleCreateSavedView, accessWrite),
+		h("PATCH /api/saved-views/{id}", s.handlePatchSavedView, accessWrite),
+		h("DELETE /api/saved-views/{id}", s.handleDeleteSavedView, accessWrite),
+
 		h("GET /api/users", s.handleListUsers, accessSession),
 		h("POST /api/users", s.handleCreateUser, accessSession),
 		h("PATCH /api/users/{name}", s.handleUpdateUser, accessSession),

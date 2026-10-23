@@ -27,6 +27,30 @@ example `tag:Steuer correspondent:Finanzamt` (see [Search](./search)).
 Your log, your profile, the user management (admins) and logging out are
 at the foot of the sidebar.
 
+## Saved views
+
+A saved view keeps a search, a filter and a sort under a name, in the
+sidebar's "Saved views" section.
+
+- **Save view…** next to the sort menu saves what the list shows now: the
+  search, the sidebar's filter, the sort and its direction, and for an
+  admin "Everyone's documents". It is there while a search, a filter or a
+  sort is chosen, not in the trash.
+- A click on a view opens the list with its search, filter and sort; the
+  view is marked as long as the list shows them. A view that combines
+  several filters shows one chip for each. If a view's tag, correspondent
+  or document type was deleted, the list says so; "Update to the current
+  filter" repairs the view.
+- The **⋯** next to a view renames it, sets it to what the list shows now
+  ("Update to the current filter"), moves it up or down, or deletes it
+  (asked first; only the view is deleted, never documents). The views keep
+  the order you give them, not an alphabetical one.
+
+Saved views are your own: nobody else sees them, admins neither. Names may
+repeat. Views made in the Document Archive app use the app's own format
+and are not shown here yet; importing them comes with the archive
+import. A view saved here keeps the app's settings it already had.
+
 ## The list
 
 Each row shows the thumbnail of the first page, the title (the file name
@@ -84,11 +108,16 @@ exist yet can be created right there ("Create …").
   not inside `` `code` ``, a code block or a link's text. A link ends
   before punctuation that ends the sentence (`.`, `,`, `!`, `?`, a quote)
   and before a closing bracket it did not open, so `(https://a.example).`
-  links `https://a.example`. Links open in a new tab and work only for
-  `http`, `https`, `mailto` and `tel` addresses; any other link shows its
-  text. Entities such as `&amp;` or `&#228;` show as their character
-  (`&`, `ä`) in the text, never in a link's address. Everything else, HTML
-  included, shows as you typed it.
+  links `https://a.example`. A link written right after an address
+  (`https://a.example/[text](https://b.example)`) stays a link of its own,
+  and `https://a.example's` links `https://a.example`. Links open in a new
+  tab and work only for `http`, `https`, `mailto` and `tel` addresses; any
+  other link shows its text. Entities such as `&amp;` or `&#228;` show as
+  their character (`&`, `ä`) in the text and in an `http`, `https` or
+  `www.` address written without Markdown, so an address copied from an
+  HTML e-mail (`?a=1&amp;b=2`) works. An entity never makes an address:
+  `&#104;ttps://…` and an encoded e-mail address (`name&#64;example.com`)
+  stay text. Everything else, HTML included, shows as you typed it.
 - Leaving a document with unsaved changes (another document, Back, logging
   out, closing the tab) asks first.
 
@@ -145,8 +174,9 @@ so before anything is sent: "Tags…" explains the rule, and
 **Delete** in a row, in a document's form or in the bar of checked
 documents moves documents to the trash. Deleting one document asks
 nothing: a notice "… moved to the trash" offers **Undo** for 8 seconds,
-also when another page is opened meanwhile; the keyboard focus moves to it,
-and its time stands still while it has the focus or the pointer.
+also when another page is opened meanwhile. Deleted with the keyboard, the
+focus moves to Undo; deleted with a mouse click, the focus stays put. Its
+time stands still while it has the keyboard focus or the pointer.
 Deleting checked documents, or every match of a search, asks first with
 their number.
 
@@ -176,8 +206,9 @@ the documents again).
   together; deleting permanently asks with the number.
 
 Opened from the trash, a document shows "In the trash since …" with
-Restore and Delete permanently; its form is read-only until it is
-restored. Previous and next walk the trash. If the document was moved to
+Restore and Delete permanently; its form is read-only (dimmed) until it
+is restored. After Restore there the focus stays in the form, on the
+title. Previous and next walk the trash. If the document was moved to
 the trash elsewhere while you edited it, saving is refused, your changes
 stay in the form, and after Restore you can save them.
 

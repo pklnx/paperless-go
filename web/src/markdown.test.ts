@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { cleanup, render } from "@testing-library/react";
 import markdownSource from "./markdown.ts?raw";
 import detailSource from "./DocumentDetail.tsx?raw";
 import entitiesSource from "./htmlEntities.ts?raw";
 import { namedEntities } from "./htmlEntities";
-import { maxInlineDepth, parseInline, parseNotes, renderNotes, safeHref, type Block, type Inline, type Steps } from "./markdown";
+import { entitiesLoaded, loadEntities, maxInlineDepth, needsEntities, parseInline, parseNotes, renderNotes, safeHref, type Block, type Inline, type Steps } from "./markdown";
 
 // The notes' Markdown: the app's subset (MarkdownNotes.swift), links only
 // to http, https, mailto and tel, and work bounded by the input's length.
@@ -18,6 +18,9 @@ function show(md: string): HTMLElement {
 }
 
 afterEach(cleanup);
+// The named entities are a chunk of their own (#134); NotesView.test.tsx
+// covers the rendering before they are loaded.
+beforeAll(loadEntities);
 
 describe("blocks", () => {
   it("renders headings # to ###, deeper ones as level 3, and drops a closing run", () => {
@@ -322,11 +325,12 @@ describe("entities (#131)", () => {
     expect(parseInline("\\&amp;")).toEqual([text("&amp;")]);
   });
 
-  it("decodes in link text and emphasis, never in code, URLs or destinations", () => {
+  it("decodes in link text, emphasis and bare URLs, never in code or destinations", () => {
     expect(parseInline("[a &amp; b](https://a.example/?x=1&amp;y=2)")).toEqual([link("https://a.example/?x=1&amp;y=2", "a & b")]);
     expect(parseInline("*&lt;b&gt;*")).toEqual([{ t: "em", c: [text("<b>")] }]);
     expect(parseInline("`&amp;`")).toEqual([{ t: "code", v: "&amp;" }]);
-    expect(parseInline("https://a.example/?x=1&amp;y=2")).toEqual([link("https://a.example/?x=1&amp;y=2", "https://a.example/?x=1&amp;y=2")]);
+    // A bare URL is found as written, then decoded (#134).
+    expect(parseInline("https://a.example/?x=1&amp;y=2")).toEqual([link("https://a.example/?x=1&y=2", "https://a.example/?x=1&y=2")]);
     expect(parseNotes("```\n&amp;\n```")).toEqual([{ kind: "code", text: "&amp;" }]);
   });
 
@@ -405,6 +409,157 @@ describe("bare addresses: hostile input (#131)", () => {
     expect(links[0]![1]).toBe(long);
     const mail = "a".repeat(50_000) + "@" + "b".repeat(50_000) + ".example";
     expect(linksOf(parseInline(mail))).toEqual([["mailto:" + mail, mail]]);
+  });
+});
+
+describe("bare URLs and entities, written links after URLs (#134)", () => {
+  it("decodes entities in a bare http(s) or www. URL after finding it, and checks the result again", () => {
+    const cases: [string, string, string][] = [
+      // input, href, linked text
+      ["https://a.example/?a=1&amp;b=2&amp;c=3", "https://a.example/?a=1&b=2&c=3", "https://a.example/?a=1&b=2&c=3"],
+      ["http://a.example/?q=M&uuml;ller", "http://a.example/?q=M%C3%BCller", "http://a.example/?q=Müller"],
+      ["www.a.example/?a=1&#38;b=2", "http://www.a.example/?a=1&b=2", "www.a.example/?a=1&b=2"],
+      ["https://a.example/x&#x2F;y", "https://a.example/x/y", "https://a.example/x/y"],
+      // A trailing entity still comes off first.
+      ["https://a.example/?a=1&amp;b=2&gt;", "https://a.example/?a=1&b=2", "https://a.example/?a=1&b=2"],
+      // What is no entity stays as written.
+      ["https://a.example/?a=1&b=2&unknown;c&amp", "https://a.example/?a=1&b=2&unknown;c&amp", "https://a.example/?a=1&b=2&unknown;c&amp"],
+      // The decoded host is what the browser follows: as if typed.
+      ["https://bank.example&#64;evil.example/", "https://bank.example@evil.example/", "https://bank.example@evil.example/"],
+    ];
+    for (const [md, href, v] of cases) expect(linksOf(parseInline(md)), md).toEqual([[href, v]]);
+    // mailto: and tel: stay as written, as do e-mail addresses.
+    expect(linksOf(parseInline("mailto:a@b.example?subject=a&amp;b"))).toEqual([["mailto:a@b.example?subject=a&amp;b", "mailto:a@b.example?subject=a&amp;b"]]);
+  });
+
+  it("an entity never makes a URL or a scheme, and a decoded character that ends an address is never linked", () => {
+    for (const md of ["&#104;ttps://a.example", "https&#58;//a.example", "https:&#47;&#47;a.example", "www&#46;a.example", "w&#119;w.a.example", "www.a&#46;example"]) {
+      expect(linksOf(parseInline(md)), md).toEqual([]);
+    }
+    // White space, controls, format characters and <>" from an entity:
+    // the URL stays as written, so none of them is in the link.
+    for (const ent of ["&#32;", "&Tab;", "&NewLine;", "&#x202E;", "&#x200B;", "&shy;", "&lt;", "&quot;", "&#x85;", "&nbsp;"]) {
+      const md = `https://a.example/x${ent}y`;
+      const links = linksOf(parseInline(md));
+      expect(links, md).toEqual([[`https://a.example/x${ent}y`, md]]);
+      expect(links[0]![0], md).toBe(safeHref(md));
+    }
+    // A decoded URL that does not parse is no link.
+    expect(linksOf(parseInline("https://a.example:&#57;9999/"))).toEqual([]);
+    // Decoded into another scheme's look: still the http(s) host as typed.
+    for (const md of ["https://a.example/&#106;avascript:alert(1)", "https://&#106;avascript:alert(1)"]) {
+      for (const [href] of linksOf(parseInline(md))) expect(href, md).toMatch(/^https:\/\//);
+    }
+  });
+
+  it("before the table is loaded, a named entity in a bare URL stays as written", async () => {
+    vi.resetModules();
+    const fresh = await import("./markdown");
+    expect(fresh.entitiesLoaded()).toBe(false);
+    expect(linksOf(fresh.parseInline("https://a.example/?a=1&amp;b=2&#38;c"))).toEqual([["https://a.example/?a=1&amp;b=2&c", "https://a.example/?a=1&amp;b=2&c"]]);
+    await fresh.loadEntities();
+    expect(linksOf(fresh.parseInline("https://a.example/?a=1&amp;b=2&#38;c"))).toEqual([["https://a.example/?a=1&b=2&c", "https://a.example/?a=1&b=2&c"]]);
+  });
+
+  it("keeps a written link right after a bare URL", () => {
+    expect(parseInline("https://a.example/[x](https://b.example)")).toEqual([link("https://a.example/", "https://a.example/"), link("https://b.example/", "x")]);
+    expect(parseInline('https://a.example/path[x y](https://b.example "t") z')).toEqual([
+      link("https://a.example/path", "https://a.example/path"),
+      link("https://b.example/", "x y"),
+      text(" z"),
+    ]);
+    expect(parseInline("www.a.example/![Bild](x.png)")).toEqual([link("http://www.a.example/", "www.a.example/"), { t: "plain", c: [text("Bild")] }]);
+    // A written link with a refused destination: its text shows.
+    expect(parseInline("https://a.example/[x](javascript:alert(1))")).toEqual([link("https://a.example/", "https://a.example/"), { t: "plain", c: [text("x")] }]);
+    // Brackets that are no written link stay in the URL.
+    for (const md of ["https://a.example/[x]", "https://a.example/[x](", "https://a.example/[x] (y)", "https://a.example/a[1]b"]) {
+      const links = linksOf(parseInline(md));
+      expect(links.length, md).toBeGreaterThanOrEqual(1);
+      expect(links[0]![1].length, md).toBeGreaterThan("https://a.example/".length);
+    }
+  });
+
+  it("ends a URL at a ' in its host", () => {
+    expect(parseInline("https://s.example's page")).toEqual([link("https://s.example/", "https://s.example"), text("'s page")]);
+    expect(parseInline("www.s.example’s")).toEqual([link("http://www.s.example/", "www.s.example"), text("’s")]);
+    expect(parseInline("https://s.example:8080's")).toEqual([link("https://s.example:8080/", "https://s.example:8080"), text("'s")]);
+    // After the host, a ' belongs to the path as before.
+    expect(linksOf(parseInline("https://a.example/it's/x"))).toEqual([["https://a.example/it's/x", "https://a.example/it's/x"]]);
+    expect(linksOf(parseInline("https://a.example?q=it's"))).toEqual([["https://a.example/?q=it%27s", "https://a.example?q=it's"]]);
+  });
+
+  it("a quote in the user info does not end the URL; one in the host after it does", () => {
+    expect(parseInline("https://o'brien@a.example/")).toEqual([link("https://o'brien@a.example/", "https://o'brien@a.example/")]);
+    expect(parseInline("https://o’brien:pw@a.example/x")).toEqual([link("https://o%E2%80%99brien:pw@a.example/x", "https://o’brien:pw@a.example/x")]);
+    expect(parseInline("https://o'brien@s.example's")).toEqual([link("https://o'brien@s.example/", "https://o'brien@s.example"), text("'s")]);
+    expect(parseInline("https://a'b@c'd@e.example/")).toEqual([link("https://a'b%40c'd@e.example/", "https://a'b@c'd@e.example/")]);
+    // Ends at the first quote after the last "@", whatever follows in the host.
+    expect(parseInline("https://s.example's'x/y")).toEqual([link("https://s.example/", "https://s.example"), text("'s'x/y")]);
+  });
+
+  it("a quote or @ written as an entity in the host counts as typed", () => {
+    expect(parseInline("https://s.example&rsquo;s page")).toEqual([link("https://s.example/", "https://s.example"), text("’s page")]);
+    expect(parseInline("https://s.example&#39;s")).toEqual([link("https://s.example/", "https://s.example"), text("'s")]);
+    expect(parseInline("www.s.example&apos;s")).toEqual([link("http://www.s.example/", "www.s.example"), text("'s")]);
+    expect(parseInline("https://o&#39;brien&#64;a.example/")).toEqual([link("https://o'brien@a.example/", "https://o'brien@a.example/")]);
+    expect(parseInline("https://o&#39;brien@a.example/")).toEqual([link("https://o'brien@a.example/", "https://o'brien@a.example/")]);
+    // After the host it is part of the URL, decoded.
+    expect(linksOf(parseInline("https://a.example/it&#39;s"))).toEqual([["https://a.example/it's", "https://a.example/it's"]]);
+  });
+
+  it("keeps a complete entity at the end of a URL and decodes it, unless it stands for what would come off", () => {
+    const cases: [string, string, string][] = [
+      ["https://a.example/id&#49;", "https://a.example/id1", "https://a.example/id1"],
+      ["https://a.example/id&#x31;.", "https://a.example/id1", "https://a.example/id1"],
+      ["https://a.example/M&uuml;ller", "https://a.example/M%C3%BCller", "https://a.example/Müller"],
+      ["https://a.example/?a=1&amp;", "https://a.example/?a=1&", "https://a.example/?a=1&"],
+      ["https://a.example/&#x1F600;", "https://a.example/%F0%9F%98%80", "https://a.example/😀"],
+      // What comes off: punctuation, closing brackets, address-ending characters, no entity.
+      ["https://a.example/x&#41;", "https://a.example/x", "https://a.example/x"],
+      ["https://a.example/x&rpar;&#93;&#125;", "https://a.example/x", "https://a.example/x"],
+      ["https://a.example/x&#46;&period;&excl;&#39;", "https://a.example/x", "https://a.example/x"],
+      ["https://a.example/x&gt;&quot;&#32;&nbsp;&ThickSpace;&#x202E;", "https://a.example/x", "https://a.example/x"],
+      ["https://a.example/x&foo;", "https://a.example/x", "https://a.example/x"],
+      ["https://a.example/x&#;", "https://a.example/x&#", "https://a.example/x&#"],
+      // A kept entity before one that comes off.
+      ["https://a.example/id&#49;&#41;", "https://a.example/id1", "https://a.example/id1"],
+    ];
+    for (const [md, href, v] of cases) expect(linksOf(parseInline(md)), md).toEqual([[href, v]]);
+    // What came off shows as text, decoded.
+    expect(parseInline("(https://a.example/x&#41;")).toEqual([text("("), link("https://a.example/x", "https://a.example/x"), text(")")]);
+    expect(parseInline("https://a.example/x&#41;")).toEqual([link("https://a.example/x", "https://a.example/x"), text(")")]);
+    // mailto: keeps its entities as written.
+    expect(linksOf(parseInline("mailto:a@b.example?x=&#49;"))).toEqual([["mailto:a@b.example?x=&#49;", "mailto:a@b.example?x=&#49;"]]);
+  });
+
+  it("does not link an entity-encoded e-mail address", () => {
+    for (const md of ["a&#64;b.example", "a&commat;b.example", "a&#x40;b.example"]) {
+      expect(linksOf(parseInline(md)), md).toEqual([]);
+    }
+    expect(parseInline("a&#64;b.example")).toEqual([text("a@b.example")]);
+  });
+
+  it("counts letters outside the basic plane as word characters", () => {
+    expect(linksOf(parseInline("x𝐚@example.com"))).toEqual([["mailto:x%F0%9D%90%9A@example.com", "x𝐚@example.com"]]);
+    expect(linksOf(parseInline("𠀀@example.com"))).toEqual([["mailto:%F0%A0%80%80@example.com", "𠀀@example.com"]]);
+    // An address does not start in the middle of a word.
+    expect(linksOf(parseInline("𝐚https://a.example"))).toEqual([]);
+    expect(linksOf(parseInline("𝐚www.a.example"))).toEqual([]);
+    // Not a letter (an emoji) or a lone surrogate: the address starts after it.
+    expect(linksOf(parseInline("😀a@example.com"))).toEqual([["mailto:a@example.com", "a@example.com"]]);
+    expect(linksOf(parseInline("\ud835a@example.com"))).toEqual([["mailto:a@example.com", "a@example.com"]]);
+    expect(linksOf(parseInline("a\udc00@example.com"))).toEqual([]);
+  });
+
+  it("the entity table is not in the main bundle: markdown.ts imports it only dynamically", () => {
+    expect(markdownSource).not.toMatch(/^\s*import\s[^(]*["']\.\/htmlEntities/m);
+    expect(markdownSource).toContain('import("./htmlEntities")');
+  });
+
+  it("needsEntities: whether a text has a named entity", () => {
+    for (const md of ["&amp;", "a &uuml; b", "&x;", "&" + "a".repeat(32) + ";", "& &a;"]) expect(needsEntities(md), md).toBe(true);
+    for (const md of ["", "a & b", "&;", "&#228;", "&#x1F;", "&amp", "& amp;", "&" + "a".repeat(33) + ";", "&a-b;"]) expect(needsEntities(md), md).toBe(false);
+    expect(entitiesLoaded()).toBe(true);
   });
 });
 
@@ -554,6 +709,35 @@ describe("work bound", () => {
     ["entities", repeat("&amp;&#228;&#x1F600;")],
     ["entity starts", repeat("&")],
     ["long entity names", repeat("&" + "a".repeat(40))],
+    // Entities in bare URLs, written links after URLs, hosts with ', astral letters (#134).
+    ["entities in one bare URL", "https://a.example/?" + "a=1&amp;".repeat(Math.ceil((size - 19) / 8))],
+    ["entities in bare URLs", repeat("https://a.example/?a=1&amp;b=&#38;&#x26; ")],
+    ["entity starts in one bare URL", "https://a.example/" + "&".repeat(size - 18)],
+    ["long entity names in one bare URL", "https://a.example/" + ("&" + "a".repeat(31)).repeat(Math.ceil((size - 18) / 32))],
+    ["entities that end an address in bare URLs", repeat("https://a.example/&#32;&lt; ")],
+    ["written links after bare URLs", repeat("https://a.example/[x](https://b.example)")],
+    ["brackets in one bare URL", "https://a.example/" + "[".repeat(size - 18)],
+    ["bracket pairs without a destination in one bare URL", "https://a.example/" + "[x]".repeat(Math.ceil((size - 18) / 3))],
+    ["bracket pairs and unclosed destinations in one bare URL", "https://a.example/" + "[x](".repeat(Math.ceil((size - 18) / 4))],
+    ["nested brackets around one bare URL's written link", "https://a.example/" + "[".repeat((size - 40) / 2) + "x](https://b.example)" + "]".repeat((size - 40) / 2)],
+    ["one long written link after a bare URL", "https://a.example/[x](https://b.example/" + "a".repeat(size - 40) + ")"],
+    ["hosts with '", repeat("https://s.example's ")],
+    ["quotes in one host", "https://" + "'".repeat(size - 8)],
+    ["astral letters before one @", "𝐚".repeat(size / 2 - 5) + "@b.example"],
+    ["astral letters and @", repeat("𝐚@")],
+    ["astral letters", repeat("𝐚")],
+    ["lone surrogates", repeat("\ud835@")],
+    ["entity-encoded e-mail addresses", repeat("a&#64;b.example ")],
+    ["quotes in user info", "https://" + "a'@".repeat(Math.ceil((size - 8) / 3))],
+    ["quotes then one @ in a host", "https://" + "'".repeat(size - 20) + "@a.example/"],
+    ["quote entities in one host", "https://" + "&#39;".repeat(Math.ceil((size - 8) / 5))],
+    ["@ entities in one host", "https://" + "a&#64;".repeat(Math.ceil((size - 8) / 6))],
+    ["long entity names in one host", "https://" + ("&" + "a".repeat(31)).repeat(Math.ceil((size - 8) / 32))],
+    ["hosts with quote entities", repeat("https://s.example&rsquo;s ")],
+    ["kept entities at the ends of URLs", repeat("https://a.example/id&#49; ")],
+    ["trailing entities that come off", "https://a.example/x" + "&#41;".repeat(Math.ceil((size - 19) / 5))],
+    ["trailing numeric entities that are kept", "https://a.example/" + "&#49;".repeat(Math.ceil((size - 18) / 5))],
+    ["trailing hex entities that come off", "https://a.example/" + "&#x2E;".repeat(Math.ceil((size - 18) / 6))],
   ];
 
   it.each(inputs)("%s: at most 10 steps per character", (_, md) => {
@@ -565,6 +749,14 @@ describe("work bound", () => {
     const inline: Steps = { n: 0 };
     parseInline(md.split("\n").join(" "), inline);
     expect(inline.n).toBeLessThanOrEqual(10 * md.length);
+  });
+
+  it("needsEntities: at most 40 steps per character", () => {
+    for (const md of [repeat("&"), repeat("&" + "a".repeat(31)), repeat("&" + "a".repeat(40)), repeat("a")]) {
+      const steps: Steps = { n: 0 };
+      expect(needsEntities(md, steps)).toBe(false);
+      expect(steps.n).toBeLessThanOrEqual(40 * md.length);
+    }
   });
 
   it("the counter counts: a longer input takes more steps", () => {

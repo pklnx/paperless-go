@@ -30,11 +30,6 @@ import (
 // PAPERLESS_GO_TRASH_RETENTION is not set: 30 days.
 const DefaultTrashRetention = 720 * time.Hour
 
-// blobGrace is how long a queued file removal waits (blob_removals.due_at):
-// a writer that stored the same file meanwhile takes the row away (#12,
-// part 2).
-const blobGrace = time.Hour
-
 // trashClock returns the time of a trash decision, in the database's
 // precision (microseconds, no monotonic reading), and the retention.
 func (s *Store) trashClock() (time.Time, time.Duration) {
@@ -227,7 +222,7 @@ type PurgeResult struct {
 // that each is still due (a restore may have come first), deletes those
 // with their tag links, deadlines and jobs (cascades), queues their
 // original, archive and thumbnail hashes in blob_removals (due after
-// blobGrace) and writes a document.purge entry by the system for each
+// BlobGrace) and writes a document.purge entry by the system for each
 // document whose retention passed (a requested purge was audited when it
 // was asked for). Between the owners' transactions it gives up when ctx
 // ends. Callers loop until Scanned is 0.
@@ -316,7 +311,7 @@ func (s *Store) purgeOwner(ctx context.Context, owner int64, ids []pgtype.UUID, 
 				entries = append(entries, e)
 			}
 		}
-		if err := t.q.QueueBlobRemovals(ctx, db.QueueBlobRemovalsParams{DueAt: now.Add(blobGrace), Hashes: hashes}); err != nil {
+		if err := t.q.QueueBlobRemovals(ctx, db.QueueBlobRemovalsParams{DueAt: now.Add(BlobGrace), Hashes: hashes}); err != nil {
 			return err
 		}
 		if len(entries) > 0 {

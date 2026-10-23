@@ -680,3 +680,45 @@ export const metadataEditApi = {
   /** Deletes a row; the documents stay, a tag's sub-tags become top-level tags. */
   remove: (kind: MetadataKind, id: string) => send("DELETE", metadataPath(kind, id)),
 };
+
+/**
+ * A saved view (#12, part 4): a name and the app's filter object. The
+ * web's own list parameters are under the "paperless-go" key
+ * (savedViews.ts); the other keys are the app's and are sent back as they
+ * came.
+ */
+export interface SavedView {
+  id: string;
+  name: string;
+  /** The app's SF Symbol name, kept as stored. */
+  symbol: string;
+  sortIndex: number;
+  filter: Record<string, unknown>;
+  createdAt: string;
+  modifiedAt: string;
+}
+
+/**
+ * A change of a saved view: only the fields sent change. filter replaces
+ * the whole object; paperlessGo replaces only the web's part of it (the
+ * paperless-go key) on the server, under the row lock, so keys another
+ * client changed meanwhile are kept (#143). Not both at once.
+ */
+export interface SavedViewPatch {
+  name?: string;
+  filter?: Record<string, unknown>;
+  paperlessGo?: Record<string, unknown>;
+  sortIndex?: number;
+}
+
+const savedViewsPath = "/api/saved-views";
+const savedViewPath = (id: string) => `${savedViewsPath}/${encodeURIComponent(id)}`;
+
+export const savedViewsApi = {
+  /** The caller's own views, in their manual order. */
+  list: async (signal?: AbortSignal): Promise<SavedView[]> => (await getJSON<{ savedViews: SavedView[] }>(savedViewsPath, signal)).savedViews,
+  /** A new view, after the others. */
+  create: async (name: string, filter: Record<string, unknown>): Promise<SavedView> => (await send<SavedView>("POST", savedViewsPath, { name, filter }))!,
+  patch: async (id: string, patch: SavedViewPatch): Promise<SavedView> => (await send<SavedView>("PATCH", savedViewPath(id), patch))!,
+  remove: (id: string) => send("DELETE", savedViewPath(id)),
+};
