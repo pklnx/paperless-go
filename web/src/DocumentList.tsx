@@ -12,7 +12,7 @@ import { button, input } from "./styles";
 import { chipInk } from "./tagTree";
 import type { Notice, Notify } from "./Toast";
 import { EmptyTrash, foreignOwners, PurgeConfirm, trashDay, trashErrorText } from "./Trash";
-import { activeFilter, filterPatch, formatState, parseState, type UpdateState, type ViewState } from "./urlState";
+import { activeFilters, filterPatch, formatState, parseState, withoutFilter, type UpdateState, type ViewState } from "./urlState";
 
 /** How many documents a page of the list holds. */
 export const pageSize = 50;
@@ -69,7 +69,7 @@ interface Props {
 }
 
 /**
- * The document list: the search field, the active filter as a chip, the
+ * The document list: the search field, the active filters as chips, the
  * sort, the documents with "Load more" (keyset paging), and an empty state
  * for each case. The trash (state.trash) is the same list of trashed
  * documents, with Restore and Delete permanently instead of Delete, and
@@ -409,18 +409,22 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   // An admin's checked documents of other users: the confirmations name their owners.
   const ownerNames = "ids" in (target ?? {}) ? foreignOwners((loaded ?? []).filter((d) => selected.has(d.id)), user) : [];
 
-  const filter = activeFilter(state);
-  // The chip says what kind of filter it is ("Tag: Steuer"); the heading names the list.
-  const [filterName, listName] = (() => {
-    if (!filter) return ["", ""];
-    if (filter.kind === "inbox") return [t.inbox, t.inbox];
-    if (filter.kind === "fav") return [t.favorites, t.favorites];
-    if (filter.kind === "trash") return [t.trash, t.trash];
-    const rows = filter.kind === "tag" ? metadata?.tags : filter.kind === "corr" ? metadata?.correspondents : metadata?.documentTypes;
-    const name = rows?.find((r) => r.id === filter.id)?.name ?? t.unknownEntry;
-    return [filter.kind === "tag" ? t.tagFilter(name) : filter.kind === "corr" ? t.correspondentFilter(name) : t.typeFilter(name), name];
-  })();
-  const title = trash ? t.trash : query.q ? t.searchResults : filter ? listName : t.allDocuments;
+  // Every filter the list applies gets a chip that says what kind it is
+  // ("Tag: Steuer"); the heading names the list. A tag, correspondent or
+  // type that is not among the loaded ones (deleted since a saved view or
+  // a link named it) shows as "unknown" with a hint.
+  const filters = activeFilters(state).map((f) => {
+    if (f.kind === "inbox") return { f, chip: t.inbox, name: t.inbox, gone: false };
+    if (f.kind === "fav") return { f, chip: t.favorites, name: t.favorites, gone: false };
+    if (f.kind === "trash") return { f, chip: t.trash, name: t.trash, gone: false };
+    const rows = f.kind === "tag" ? metadata?.tags : f.kind === "corr" ? metadata?.correspondents : metadata?.documentTypes;
+    const row = rows?.find((r) => r.id === f.id);
+    const name = row?.name ?? t.unknownEntry;
+    const chip = f.kind === "tag" ? t.tagFilter(name) : f.kind === "corr" ? t.correspondentFilter(name) : t.typeFilter(name);
+    return { f, chip, name, gone: rows !== undefined && !row };
+  });
+  const chips = filters.filter((x) => x.f.kind !== "trash");
+  const title = trash ? t.trash : query.q ? t.searchResults : filters.length > 0 ? filters.map((x) => x.name).join(" · ") : t.allDocuments;
   const docs = list.key === key ? list.docs : null;
 
   const detail = state.doc !== "" && state.view === "";
@@ -470,15 +474,27 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
           }}
         />
       )}
-      {filter && filter.kind !== "trash" && (
+      {chips.length > 0 && (
         <div className="flex flex-wrap gap-2">
-          <span className="flex h-8 items-center gap-1 rounded-full border border-accent-soft bg-accent-soft pl-3 text-[13px] font-medium text-accent-soft-ink pointer-coarse:h-11">
-            <span className="wrap-anywhere">{filterName}</span>
-            <button type="button" aria-label={t.removeFilter(filterName)} title={t.removeFilter(filterName)} className="grid size-7 place-items-center rounded-full pointer-coarse:size-11" onClick={() => update(filterPatch(null))}>
-              <CloseIcon />
-            </button>
-          </span>
+          {chips.map(({ f, chip }) => (
+            <span
+              key={f.kind}
+              className="flex h-8 items-center gap-1 rounded-full border border-accent-soft bg-accent-soft pl-3 text-[13px] font-medium text-accent-soft-ink pointer-coarse:h-11"
+            >
+              <span className="wrap-anywhere">{chip}</span>
+              <button type="button" aria-label={t.removeFilter(chip)} title={t.removeFilter(chip)} className="grid size-7 place-items-center rounded-full pointer-coarse:size-11" onClick={() => update(withoutFilter(f))}>
+                <CloseIcon />
+              </button>
+            </span>
+          ))}
         </div>
+      )}
+      {chips.map(({ f, gone }) =>
+        gone && f.kind !== "inbox" && f.kind !== "fav" && f.kind !== "trash" ? (
+          <p key={`gone-${f.kind}`} role="status" className="text-sm text-ink-muted">
+            {t.filterGone(f.kind, state.sv !== "")}
+          </p>
+        ) : null,
       )}
       {list.error && (
         <p role="alert" className="text-sm text-danger">

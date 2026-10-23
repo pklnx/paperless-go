@@ -1,7 +1,7 @@
 import { useId, useState, type FormEvent } from "react";
 import { ApiError, savedViewsApi, type SavedView } from "./api";
 import { t } from "./i18n";
-import { applyView, canSave, moveView, paramsOf, showsView, shownViews, withParams, viewKey } from "./savedViews";
+import { applyView, canSave, moveView, paramsOf, showsView, shownViews, viewKey } from "./savedViews";
 import { Sheet } from "./Sheet";
 import { button, danger, input, primary } from "./styles";
 import type { Notify } from "./Toast";
@@ -147,7 +147,8 @@ function ViewMenu({
             className={button}
             disabled={busy || !canSave(state)}
             title={canSave(state) ? undefined : t.updateViewHint}
-            onClick={() => run(savedViewsApi.patch(view.id, { filter: withParams(view.filter, paramsOf(state)) }), t.viewUpdated(view.name))}
+            // Only the web's part: the server keeps the app's keys as they are now, not as loaded.
+            onClick={() => run(savedViewsApi.patch(view.id, { paperlessGo: { ...paramsOf(state) } }), t.viewUpdated(view.name))}
           >
             {t.updateView}
           </button>

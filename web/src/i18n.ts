@@ -74,6 +74,9 @@ const en = {
   correspondentFilter: (name: string) => `Correspondent: ${name}`,
   typeFilter: (name: string) => `Type: ${name}`,
   removeFilter: (label: string) => `Remove filter ${label}`,
+  filterGone: (kind: "tag" | "corr" | "type", fromView: boolean) =>
+    `${fromView ? "This saved view's" : "This"} ${kind === "tag" ? "tag" : kind === "corr" ? "correspondent" : "document type"} no longer exists.` +
+    (fromView ? " To repair the view, choose a filter and use “Update to the current filter” in its menu." : ""),
   loadMore: "Load more",
   sortBy: "Sort",
   sortRelevance: "Best match",
@@ -658,6 +661,9 @@ const de: Messages = {
   correspondentFilter: (name: string) => `Korrespondent: ${name}`,
   typeFilter: (name: string) => `Typ: ${name}`,
   removeFilter: (label: string) => `Filter ${label} entfernen`,
+  filterGone: (kind: "tag" | "corr" | "type", fromView: boolean) =>
+    `${kind === "tag" ? "Den Tag" : kind === "corr" ? "Den Korrespondenten" : "Den Dokumenttyp"} ${fromView ? "dieser gespeicherten Ansicht " : ""}gibt es nicht mehr.` +
+    (fromView ? " Um die Ansicht zu reparieren, wähle einen Filter und dann „Auf aktuellen Filter setzen“ in ihrem Menü." : ""),
   loadMore: "Mehr laden",
   sortBy: "Sortierung",
   sortRelevance: "Beste Treffer",

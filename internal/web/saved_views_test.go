@@ -8,6 +8,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/pklnx/paperless-go/internal/store"
 )
@@ -396,4 +399,124 @@ func TestSavedViewsFilterBadText(t *testing.T) {
 	if names := viewNames(t, f); len(names) != 1 {
 		t.Errorf("views after refusals: %v", names)
 	}
+}
+
+// PATCH with paperlessGo replaces only the web's part of the filter and
+// keeps the app's keys as stored at the write, also when another client
+// changes them while the request waits for the row (#143). The full
+// replace of filter stays as it was.
+func TestSavedViewsPatchPaperlessGo(t *testing.T) {
+	f := newAuthFixtureDB(t, Options{}, map[string]string{"application_name": "web-views"})
+	f.addUser("alice", viewPassword, false)
+	f.loginOK("alice", viewPassword)
+	n := len(auditLog(t, f.st))
+	filter := webFilter(map[string]any{"q": "old"})
+	filter["app"] = 1.0
+	view := f.expect("POST", "/api/saved-views", map[string]any{"name": "View", "filter": filter}, 201)
+	id := view["id"].(string)
+	path := "/api/saved-views/" + id
+
+	got := f.expect("PATCH", path, map[string]any{"paperlessGo": map[string]any{"v": 1, "q": "new", "inbox": true}}, 200)
+	if want := map[string]any{"app": 1, savedViewKey: map[string]any{"v": 1, "q": "new", "inbox": true}}; !sameValue(t, got["filter"], want) {
+		t.Errorf("filter %v, want %v", got["filter"], want)
+	}
+	entries := newEntries(t, f.st, n)
+	if d := fmt.Sprint(details(t, entries[len(entries)-1])); d != "map[fields:[paperlessGo] name:View]" {
+		t.Errorf("audit details %s", d)
+	}
+
+	code := func(body string) {
+		t.Helper()
+		status, out := rawJSON(t, f, "PATCH", path, body)
+		if status != 400 || out["code"] != codeInvalidFilter {
+			t.Errorf("%s: %d %v, want 400 invalid_filter", body, status, out)
+		}
+	}
+	for _, bad := range []string{
+		`{"paperlessGo": null}`,
+		`{"paperlessGo": []}`,
+		`{"paperlessGo": "x"}`,
+		`{"paperlessGo": {"q": "x"}}`,
+		`{"paperlessGo": {"v": 2}}`,
+		`{"paperlessGo": {"v": 1, "sort": "deleted"}}`,
+		`{"paperlessGo": {"v": 1, "Q": "((("}}`,
+		`{"paperlessGo": {"v": 1, "q": "\ud800"}}`,
+		`{"paperlessGo": {"v": 1, "q": "` + strings.Repeat("x", maxSavedViewFilter) + `"}}`,
+		`{"paperlessGo": {"v": 1}, "filter": {}}`,
+	} {
+		code(bad)
+	}
+
+	// Another client holds the row while it changes the app's key; the
+	// web's update waits for it and merges into what it wrote.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	holder, err := pgx.Connect(ctx, f.dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Close(context.Background()) }()
+	watch, err := pgx.Connect(ctx, f.dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = watch.Close(context.Background()) }()
+	tx, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `UPDATE saved_views SET filter = jsonb_set(filter, '{app}', '2') WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	go func() {
+		status, _, body, err := f.call(ctx, "PATCH", path, map[string]any{"paperlessGo": map[string]any{"v": 1, "q": "newer"}})
+		if err != nil || status != 200 {
+			t.Errorf("waiting patch: %d %s %v", status, body, err)
+		}
+		done <- status
+	}()
+	for {
+		var waiting bool
+		if err := watch.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE datname = current_database() AND application_name = 'web-views' AND wait_event_type = 'Lock')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case status := <-done:
+			t.Fatalf("the patch finished while the row was held: %d", status)
+		case <-ctx.Done():
+			t.Fatal("the patch never waited for the row")
+		default:
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	got = f.expect("GET", "/api/saved-views", nil, 200)
+	row := got["savedViews"].([]any)[0].(map[string]any)
+	if want := map[string]any{"app": 2, savedViewKey: map[string]any{"v": 1, "q": "newer"}}; !sameValue(t, row["filter"], want) {
+		t.Errorf("after the concurrent change: %v, want %v", row["filter"], want)
+	}
+
+	// filter still replaces the whole object.
+	got = f.expect("PATCH", path, map[string]any{"filter": webFilter(nil)}, 200)
+	if !sameValue(t, got["filter"], webFilter(nil)) {
+		t.Errorf("filter replace: %v", got["filter"])
+	}
+}
+
+// "q": null is the same as no search, as the web reads it (#143).
+func TestSavedViewsNullSearch(t *testing.T) {
+	f := newAuthFixture(t)
+	f.addUser("alice", viewPassword, false)
+	f.loginOK("alice", viewPassword)
+	filter := webFilter(map[string]any{"q": nil, "sort": nil, "order": nil, "everyone": nil})
+	view := f.expect("POST", "/api/saved-views", map[string]any{"name": "Null", "filter": filter}, 201)
+	f.expect("PATCH", "/api/saved-views/"+view["id"].(string), map[string]any{"paperlessGo": filter[savedViewKey]}, 200)
 }

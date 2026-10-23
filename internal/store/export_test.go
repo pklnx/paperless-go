@@ -71,7 +71,9 @@ func SetReindexLockTimeout(t *testing.T, d time.Duration) {
 // type or document, a bulk change of documents and a delete of a tag,
 // correspondent or document type call f once it holds the owner's write
 // lock and its row locks, before it writes: a test holds the change there
-// to make a concurrent one wait for the lock.
+// to make a concurrent one wait for the lock. A patch of a saved view
+// calls it after its row lock, an appending create of one after the
+// owner's saved-view order lock.
 func WithAfterLock(ctx context.Context, f func()) context.Context {
 	return context.WithValue(ctx, afterLockKey{}, f)
 }

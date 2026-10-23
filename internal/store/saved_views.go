@@ -105,7 +105,8 @@ func hasNUL(v any) bool {
 // audit entry of ctx (target saved_view, with the view's name). A filter
 // that is not a JSON object gives ErrInvalidFilter. With SortLast the view
 // goes after the owner's others (the highest sort index + 1) and SortIndex
-// is ignored.
+// is ignored; appending creates of one owner take a per-owner lock, so
+// parallel ones get distinct indexes.
 func (s *Store) CreateSavedView(ctx context.Context, sc Scope, in SavedViewInput) (*SavedView, error) {
 	owner, err := sc.creator()
 	if err != nil {
@@ -119,6 +120,10 @@ func (s *Store) CreateSavedView(ctx context.Context, sc Scope, in SavedViewInput
 	err = s.inTx(ctx, func(q *db.Queries) error {
 		sortIndex := in.SortIndex
 		if in.SortLast {
+			if err := q.LockSavedViewOrder(ctx, owner); err != nil {
+				return err
+			}
+			afterLock(ctx)
 			if sortIndex, err = q.NextSavedViewSortIndex(ctx, owner); err != nil {
 				return err
 			}
@@ -193,6 +198,12 @@ type SavedViewPatch struct {
 	SortIndex *int64
 	// Filter replaces the whole filter object; nil keeps it.
 	Filter json.RawMessage
+	// FilterKeys replaces only these top-level keys of the filter (after
+	// Filter, if both are given) and keeps every other key as stored at
+	// the time of the write: the web's "Update to the current filter"
+	// sends its own key this way, so app keys another client changed in
+	// the meantime are not lost. Each value must be valid JSON.
+	FilterKeys map[string]json.RawMessage
 }
 
 // PatchSavedView changes the given fields of a saved view, with the audit
@@ -234,6 +245,11 @@ func (s *Store) PatchSavedView(ctx context.Context, sc Scope, id string, p Saved
 		if filter != nil {
 			in.Filter = filter
 		}
+		if len(p.FilterKeys) > 0 {
+			if in.Filter, err = mergeFilterKeys(in.Filter, p.FilterKeys); err != nil {
+				return err
+			}
+		}
 		r, err := q.UpdateSavedView(ctx, in)
 		if err != nil {
 			return err
@@ -246,6 +262,27 @@ func (s *Store) PatchSavedView(ctx context.Context, sc Scope, id string, p Saved
 		return nil, mapFilterErr(err)
 	}
 	return out, nil
+}
+
+// mergeFilterKeys is the filter object f with the given top-level keys
+// set to their values; ErrInvalidFilter if a value is not valid JSON or
+// the result is no filter jsonb accepts (filterJSON).
+func mergeFilterKeys(f []byte, keys map[string]json.RawMessage) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(f, &m); err != nil || m == nil {
+		return nil, ErrInvalidFilter
+	}
+	for k, v := range keys {
+		if !json.Valid(v) {
+			return nil, ErrInvalidFilter
+		}
+		m[k] = v
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return nil, ErrInvalidFilter
+	}
+	return filterJSON(out)
 }
 
 // DeleteSavedView removes a saved view, with the audit entry of ctx

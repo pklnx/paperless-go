@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { act, cleanup, renderHook } from "@testing-library/react";
-import { activeFilter, confirmLeave, documentQuery, filterPatch, formatState, parseState, setNavigationGuard, useViewState, type ViewState } from "./urlState";
+import { activeFilter, activeFilters, confirmLeave, documentQuery, filterPatch, formatState, parseState, setNavigationGuard, useViewState, withoutFilter, type ViewState } from "./urlState";
 
 const empty = parseState("");
 
@@ -34,6 +34,14 @@ describe("filters", () => {
     expect(activeFilter(s)).toEqual({ kind: "trash" });
     expect({ ...s, ...filterPatch({ kind: "fav" }) }).toEqual({ ...empty, fav: "1" });
     expect(formatState(s)).toBe("?trash=1");
+  });
+  it("list every filter a URL or saved view combines, and remove one at a time (#143)", () => {
+    const s = parseState("?inbox=1&fav=1&tag=t1&corr=c1&type=d1");
+    const all = activeFilters(s);
+    expect(all).toEqual([{ kind: "inbox" }, { kind: "fav" }, { kind: "tag", id: "t1" }, { kind: "corr", id: "c1" }, { kind: "type", id: "d1" }]);
+    expect(formatState({ ...s, ...withoutFilter({ kind: "tag", id: "t1" }) })).toBe("?inbox=1&fav=1&corr=c1&type=d1");
+    expect(activeFilters(empty)).toEqual([]);
+    expect(activeFilters({ ...s, trash: "1" })).toEqual([{ kind: "trash" }]);
   });
 });
 

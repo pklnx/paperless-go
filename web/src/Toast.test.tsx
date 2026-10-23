@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, renderHook } from "@testing-library/react";
-import { noticeDuration, noticeTimer, useNotice } from "./Toast";
+import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
+import { Toast, noticeDuration, noticeTimer, useNotice, type Notify } from "./Toast";
 
 afterEach(() => {
   cleanup();
@@ -37,6 +37,27 @@ describe("useNotice", () => {
     // And back from an error to a status, likewise.
     act(() => result.current.pause());
     act(() => result.current.show({ text: "ok" }));
+    expect(active()).toEqual([noticeDuration]);
+  });
+});
+
+describe("Toast", () => {
+  it("runs the time again when a notice with a focused Undo is replaced by one without it (#143)", () => {
+    const active = timers();
+    let show!: Notify;
+    function Harness() {
+      const n = useNotice();
+      show = n.show;
+      return <Toast notice={n.notice} close={n.close} pause={n.pause} resume={n.resume} />;
+    }
+    render(<Harness />);
+    // A keyboard user's row action: the focus moves to Undo and the time stops.
+    act(() => show({ text: "moved", action: { label: "Undo", run: () => {} }, focus: true }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Undo" }));
+    expect(active()).toEqual([]);
+    // The next notice of the same kind has no Undo: the focused button goes without a blur.
+    act(() => show({ text: "restored" }));
+    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
     expect(active()).toEqual([noticeDuration]);
   });
 });
