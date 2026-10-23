@@ -6,9 +6,9 @@ import { DocumentsUpload, WindowDrop, useQueue } from "./Documents";
 import { fetchHealth, type Health } from "./health";
 import { t } from "./i18n";
 import { MenuIcon, iconButton } from "./icons";
-import logo from "./logo.svg";
 import { LogPage } from "./LogPage";
 import { MetadataPage } from "./MetadataPage";
+import { ProductMark } from "./ProductMark";
 import { ProfilePage } from "./Profile";
 import { SaveViewButton, SavedViewList } from "./SavedViews";
 import { Sheet } from "./Sheet";
@@ -186,7 +186,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
       />
       <aside className="hidden w-64 shrink-0 flex-col overflow-y-auto border-r border-line bg-surface-sunken md:flex" data-testid="sidebar">
         <div className="flex items-center gap-2 px-5 pt-4">
-          <img src={logo} alt="" className="size-7" />
+          <ProductMark className="size-7" />
           <h1 className="text-base font-semibold">{t.appName}</h1>
         </div>
         {sidebar}
@@ -196,7 +196,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
           <button type="button" className={iconButton} aria-label={t.openMenu} title={t.openMenu} aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}>
             <MenuIcon />
           </button>
-          <img src={logo} alt="" className="size-6" />
+          <ProductMark className="size-6" />
           <span className="text-base font-semibold">{t.appName}</span>
         </header>
         <main className="flex-1 overflow-y-auto">

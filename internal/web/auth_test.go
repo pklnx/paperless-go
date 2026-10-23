@@ -356,14 +356,17 @@ func TestRouteTable(t *testing.T) {
 			}
 		}
 	}
-	// The public routes are exactly these three.
+	// The public routes are exactly these: the health check, the UI code
+	// and the web app manifest with its icons.
 	var public []string
 	for _, rt := range s.routes() {
 		if rt.access == accessPublic {
 			public = append(public, rt.pattern)
 		}
 	}
-	if got := strings.Join(public, ","); got != "GET /healthz,GET /{$},GET /assets/" {
+	if got := strings.Join(public, ","); got != "GET /healthz,GET /{$},GET /assets/,"+
+		"GET /apple-touch-icon.png,GET /favicon-32.png,GET /icon-192.png,GET /icon-512.png,"+
+		"GET /icon-maskable-512.png,GET /manifest.webmanifest" {
 		t.Errorf("public routes: %s", got)
 	}
 	if seen[accessSession] == 0 || seen[accessLogin] != 6 {

@@ -114,3 +114,17 @@ needs a fix by hand. `./pgo migrate` then prints a warning with the command:
   host: `docker run --rm --user 0 -v "$PWD/data:/data" alpine chown -R 65532:65532 /data`
 - Podman (untested): `podman unshare chown -R 65532:65532 data`
 :::
+
+## Install as an app
+
+The web UI can be added to the home screen or the dock and then opens in
+its own window, without the browser's address bar.
+
+- **iPhone and iPad (Safari):** Share, then **Add to Home Screen**.
+- **Android and desktop (Chrome):** **Install** in the browser menu or in the
+  address bar.
+
+Browsers offer this only when the site is served over HTTPS (or opened as
+`localhost` on the same computer); see
+[Running on the internet](./internet). The app is the same web page: it
+needs the server and stores nothing for offline use.

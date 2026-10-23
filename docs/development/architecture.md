@@ -1720,7 +1720,10 @@ Ported from mail-archive (`internal/auth`, the auth parts of `internal/web`
 and `internal/store`, `cmd/paperless-go/users.go`).
 
 - **Route table.** `internal/web/routes.go` lists every route with its
-  `access`: `accessPublic` (`GET /healthz`, `GET /{$}`, `GET /assets/`),
+  `access`: `accessPublic` (`GET /healthz`, `GET /{$}`, `GET /assets/`,
+  `GET /manifest.webmanifest` and the app icons `GET /favicon-32.png`,
+  `GET /apple-touch-icon.png`, `GET /icon-192.png`, `GET /icon-512.png`,
+  `GET /icon-maskable-512.png`, one route per `ui.RootPaths()` entry),
   `accessLogin` (`/api/session`: read, log in, log out, and `/api/session/2fa`),
   `accessSession`, `accessRead`, `accessUpload` or `accessWrite` (a
   session, or an API key with that scope: the document and metadata

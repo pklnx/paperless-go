@@ -151,7 +151,9 @@ only over HTTPS or on `localhost`, so they do not work this way.
 ## Login
 
 - **Everything needs a login or an API key** except `/healthz`, the UI page
-  `/` and its code under `/assets/`; none of them contain data. Which route
+  `/`, its code under `/assets/`, `/manifest.webmanifest` and the app icons
+  (`/favicon-32.png`, `/apple-touch-icon.png`, `/icon-192.png`,
+  `/icon-512.png`, `/icon-maskable-512.png`); none of them contain data. Which route
   needs what is set in one table (`internal/web/routes.go`); a route not
   listed there, or a new one without an access level, needs a session.
 - **Users** are created by admins in the web UI or with `./pgo user add

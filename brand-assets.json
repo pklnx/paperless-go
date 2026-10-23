@@ -1,0 +1,76 @@
+{
+  "repository": "https://github.com/pklnx/design-system",
+  "commit": "a2201c2fdb7dd2dabb594a9c7aa945b5c9ea3180",
+  "files": [
+    {
+      "path": "web/src/brand/paperless-go-tile.svg",
+      "source": "project/assets/Logos/products/paperless-go-tile.svg",
+      "sha256": "fc7d8a73d57e064565addc2a9ae86ae7652e13cda3d07139f5c62d83499cafac"
+    },
+    {
+      "path": "web/src/brand/paperless-go-mark-dark.svg",
+      "source": "project/assets/Logos/products/paperless-go-mark-dark.svg",
+      "sha256": "b3ac5536561b32082ea3a41af7fe6384c418c9546d77f2a0deb338c01f0929e7"
+    },
+    {
+      "path": "web/src/brand/paperless-go-mark-light.svg",
+      "source": "project/assets/Logos/products/paperless-go-mark-light.svg",
+      "sha256": "31a3ade8d71b238efbcd6c88ccd1106634458194d53ef86f6bc0388876394fa1"
+    },
+    {
+      "path": "web/public/favicon-32.png",
+      "source": "project/assets/Logos/products/paperless-go-favicon-32.png",
+      "sha256": "7ad16c667a8c1069371ea5e0df7a898c567df819859d15d6ca222fa62f3055c9"
+    },
+    {
+      "path": "web/public/apple-touch-icon.png",
+      "source": "project/assets/Logos/products/paperless-go-apple-touch-icon.png",
+      "sha256": "140142dd6887c94e5129cab2dd8f301673478ef0b6282d6977d93c034023f45b"
+    },
+    {
+      "path": "web/public/icon-192.png",
+      "source": "project/assets/Logos/products/paperless-go-icon-192.png",
+      "sha256": "5bb73120ebaf3edd55ab58b4b7fe1af6e844a62b2a7f872269147b448d6ec474"
+    },
+    {
+      "path": "web/public/icon-512.png",
+      "source": "project/assets/Logos/products/paperless-go-icon-512.png",
+      "sha256": "aa02e7306841bcec7bf56813b9bd2338fdd0435f43f5d42a2363407b6ab43225"
+    },
+    {
+      "path": "web/public/icon-maskable-512.png",
+      "source": "project/assets/Logos/products/paperless-go-icon-maskable-512.png",
+      "sha256": "796fcfc8cf4a958e42259b3b9e5c4b77c317723ce048ef6b19331c91b63cbb0a"
+    },
+    {
+      "path": "docs/public/paperless-go-tile.svg",
+      "source": "project/assets/Logos/products/paperless-go-tile.svg",
+      "sha256": "fc7d8a73d57e064565addc2a9ae86ae7652e13cda3d07139f5c62d83499cafac"
+    },
+    {
+      "path": "docs/public/paperless-go-favicon-32.png",
+      "source": "project/assets/Logos/products/paperless-go-favicon-32.png",
+      "sha256": "7ad16c667a8c1069371ea5e0df7a898c567df819859d15d6ca222fa62f3055c9"
+    },
+    {
+      "path": "docs/public/paperless-go-mark-dark.svg",
+      "source": "project/assets/Logos/products/paperless-go-mark-dark.svg",
+      "sha256": "b3ac5536561b32082ea3a41af7fe6384c418c9546d77f2a0deb338c01f0929e7"
+    },
+    {
+      "path": "docs/public/paperless-go-mark-light.svg",
+      "source": "project/assets/Logos/products/paperless-go-mark-light.svg",
+      "sha256": "31a3ade8d71b238efbcd6c88ccd1106634458194d53ef86f6bc0388876394fa1"
+    },
+    {
+      "path": "docs/public/paperless-go-lockup-dark.svg",
+      "source": "project/assets/Logos/products/paperless-go-lockup-dark.svg",
+      "sha256": "71fa1f3e1ffa802b516cf451c2e13a5ca0371f50d16add803cd6d82018597648"
+    },
+    {
+      "path": "docs/public/paperless-go-lockup-light.svg",
+      "source": "project/assets/Logos/products/paperless-go-lockup-light.svg",
+      "sha256": "06d4d488f5c2e517bf2ef33ed3980defb04e8bb77aa38d989d57216e942313ee"
+    }
+  ]
+}

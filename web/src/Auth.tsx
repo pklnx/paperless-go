@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { ApiError, UNAUTHORIZED_EVENT, passkeyApi, retryAfter, sessionApi, unknownPasskey, type SessionState, type User } from "./api";
+import { ProductMark } from "./ProductMark";
 import { PasswordForm, TwoFactorSettings } from "./Profile";
 import { ThemeToggle } from "./ThemeToggle";
 import { t } from "./i18n";
-import logo from "./logo.svg";
 import { button, input, primary } from "./styles";
 import { autofillSupported, browserError, credentialJSON, forgetPasskey, passkeysSupported, requestOptions } from "./webauthn";
 
@@ -98,7 +98,7 @@ function Centered({ children }: { children: ReactNode }) {
 function Brand() {
   return (
     <div className="flex items-center gap-3">
-      <img src={logo} alt="" width={40} height={40} />
+      <ProductMark className="size-10" />
       <h1 className="text-lg font-semibold">{t.appName}</h1>
     </div>
   );

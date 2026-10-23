@@ -1,6 +1,9 @@
-<img src="docs/public/logo.svg" alt="" width="80">
-
-# paperless-go
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/public/paperless-go-lockup-dark.svg">
+    <img src="docs/public/paperless-go-lockup-light.svg" alt="paperless-go" height="48">
+  </picture>
+</h1>
 
 > [!WARNING]
 > **This project is entirely vibe-coded.** All code, configuration and
@@ -78,4 +81,5 @@ documentation sources are in [`docs/`](docs/).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The logo and app icons are not under the MIT License; they are
+covered by [BRAND-ASSETS.md](BRAND-ASSETS.md).
