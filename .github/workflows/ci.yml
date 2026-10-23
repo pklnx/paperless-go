@@ -212,6 +212,105 @@ jobs:
       # 'unsafe-eval'); a missing or incomplete build fails too.
       - run: pnpm check:dist
 
+  changes:
+    # Whether a pull request changes documentation only (docs/*, .claude/*,
+    # *.md): web-e2e skips those. Copied from mail-archive.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history, so the base commit is reachable for the diff.
+          fetch-depth: 0
+      - run: sh scripts/ci-docs-only-test.sh
+      - id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          docs_only=false
+          if [ "$EVENT_NAME" = pull_request ]; then
+            # --no-renames: a code file moved into docs/ lists its old path too.
+            # quotePath=false: non-ASCII names are not quoted. The diff goes to a
+            # file first, so a git failure stops the step and shows in the log.
+            git -c core.quotePath=false diff --name-only --no-renames \
+              "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed-paths"
+            if sh scripts/ci-docs-only.sh < "$RUNNER_TEMP/changed-paths"; then
+              docs_only=true
+            fi
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
+  web-e2e:
+    # Playwright end-to-end tests of the web UI against the demo server
+    # (tools/demo: generated documents, stand-in OCR tools, a temporary
+    # database, no network). Skipped on docs-only pull requests. Fail
+    # closed: it runs unless this is a pull request, `changes` succeeded and
+    # said docs_only. !cancelled() (not always()) is needed because a failed
+    # `changes` would otherwise skip this job, and a skipped job passes a
+    # required check; it also keeps a cancelled (superseded) run from
+    # starting e2e.
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    runs-on: ubuntu-latest
+    # About 3-4 min; the 20 covers the apt fallback of
+    # scripts/ci-playwright-chromium.sh (8-13 min in mail-archive when its
+    # mirror was slow). Lower it once the fallback is seen not to run.
+    timeout-minutes: 20
+    services:
+      postgres:
+        # As in the test job (see there): on mirror.gcr.io, with the locale
+        # of new installations. The user is the superuser, so the demo can
+        # create and drop its own database.
+        image: mirror.gcr.io/library/postgres:18
+        env:
+          POSTGRES_USER: paperless
+          POSTGRES_PASSWORD: paperless
+          POSTGRES_DB: paperless
+          POSTGRES_INITDB_ARGS: --locale-provider=builtin --locale=C.UTF-8
+        ports: ["127.0.0.1::5432"]
+        options: >-
+          --health-cmd "pg_isready -U paperless"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      # Node 25+ no longer bundles corepack; keep the version in sync with the Dockerfile.
+      - run: npm install -g corepack@0.36.0 && corepack enable
+      - run: pnpm install --frozen-lockfile
+      # The headless Chromium of the pinned Playwright, without apt unless
+      # the runner image lacks one of its libraries (then with a warning).
+      - run: sh ../scripts/ci-playwright-chromium-test.sh
+      - run: sh ../scripts/ci-playwright-chromium.sh
+      # The config builds the UI, then builds and starts the demo (it embeds
+      # the built UI), and stops it at the end so it drops its database.
+      - run: pnpm e2e
+        env:
+          DEMO_DATABASE_URL: postgres://paperless:paperless@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/paperless?sslmode=disable
+      # Traces of the failed tests (demo data only), for 7 days.
+      - if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-traces
+          path: web/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
   audit:
     # pnpm audit of the UI's production dependencies. Not a required check:
     # it asks the npm registry, which can time out, and Dependabot covers the

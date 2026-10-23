@@ -65,6 +65,9 @@ export default defineConfig({
     proxy: { "/api": "http://localhost:8080", "/healthz": "http://localhost:8080" },
   },
   test: {
+    // The unit tests only: web/e2e/*.spec.ts are Playwright's (pnpm e2e).
+    // scripts/ holds the test of the build's eval guard (noEval.test.ts).
+    include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.ts"],
     environment: "jsdom",
     testTimeout: 5_000,
     setupFiles: ["src/testSetup.ts"],
