@@ -20,14 +20,50 @@ login fail, and each user then needs `./pgo user reset-2fa NAME`.
 
 ### Restore
 
-Stop the web server, restore the data directory, then the dump:
+Stop the web server and keep it stopped until the dump and the data
+directory are both back, so nothing writes in between:
 
 ```sh
 docker compose stop web
-docker compose exec -T postgres pg_restore --clean --if-exists -U paperless -d paperless < backups/paperless-YYYYMMDDTHHMMSSZ.dump
+./pgo restore --yes backups/paperless-YYYYMMDDTHHMMSSZ.dump
+# now restore the data directory from the same backup
 ./pgo migrate
 docker compose up -d web
 ```
+
+`./pgo restore` loads the dump into a new database and swaps it in only
+when the whole dump is in. If it fails (a damaged dump, a full disk),
+nothing was changed: it says so, and the old database is still in use.
+It refuses while the web server runs or restarts, or while another `./pgo`
+command (an import, `process`, a cron job) uses the database. Without
+`--yes` it only says what it would do.
+
+The database it replaces stays, renamed to
+`paperless_replaced_YYYYMMDDTHHMMSSZ`, and the command prints its name and
+the command that drops it:
+
+```sh
+docker compose exec postgres dropdb -U paperless paperless_replaced_YYYYMMDDTHHMMSSZ
+```
+
+Until then it takes disk space, and the restore needs free space for one
+more copy of the database (it prints the size of the current one). If the
+disk fills up during the restore, the restore stops and the old database
+stays in use; PostgreSQL may restart.
+
+Move the current data directory aside instead of overwriting it, and keep
+it until the restored server works: going back to the replaced database
+needs the files that belong to it. To go back, stop the web server and
+swap the names again:
+
+```sh
+docker compose stop web
+docker compose exec postgres psql -U paperless -d postgres \
+  -c 'ALTER DATABASE paperless RENAME TO paperless_unwanted' \
+  -c 'ALTER DATABASE paperless_replaced_YYYYMMDDTHHMMSSZ RENAME TO paperless'
+```
+
+Then move the old data directory back and start the web server.
 
 ## Upgrades
 
@@ -197,13 +233,15 @@ docker compose stop web
 docker compose rm -sf postgres
 docker volume rm paperless-go_pgdata   # the database; ./backups has it
 docker compose up -d --wait postgres   # a new, empty database with the new locale
-docker compose exec -T postgres pg_restore --clean --if-exists --single-transaction --exit-on-error \
-  -U paperless -d paperless < backups/paperless-YYYYMMDDTHHMMSSZ.dump
+./pgo restore --yes backups/paperless-YYYYMMDDTHHMMSSZ.dump
 ./pgo migrate
 docker compose up -d web
 ```
 
-If `pg_restore` fails, nothing was restored; the error names the cause.
+If the restore fails, nothing was restored; the error names the cause.
+The database it replaces is the empty one of the new volume: drop it right
+away with the `dropdb` command it prints. The data directory stays as it
+is.
 
 To go back to an older version on the Alpine image, first roll back this
 version's migration with this version, as the older one refuses a newer
