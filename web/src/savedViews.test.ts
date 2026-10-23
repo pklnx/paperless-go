@@ -21,7 +21,7 @@ const params = (more: Partial<ViewParams> = {}): ViewParams => ({
 describe("viewParams", () => {
   it("reads the web's part of a filter, with defaults for what is missing", () => {
     expect(viewParams({ [viewKey]: { v: 1 } })).toEqual(params());
-    expect(viewParams({ tags: [{ id: "x" }], [viewKey]: { v: 1, q: "Rechnung", tag: ["t1"], inbox: true, favorite: false, sort: "date", order: "asc", everyone: true } })).toEqual(
+    expect(viewParams({ tags: [{ id: "x" }], [viewKey]: { v: 1, q: "Rechnung", tag: ["t1"], inbox: true, favorite: null, sort: "date", order: "asc", everyone: true } })).toEqual(
       params({ q: "Rechnung", tag: ["t1"], inbox: true, sort: "date", order: "asc", everyone: true }),
     );
   });
@@ -38,6 +38,15 @@ describe("viewParams", () => {
       { [viewKey]: { v: 1, q: 3 } },
       { [viewKey]: { v: 1, sort: "deleted" } },
       { [viewKey]: { v: 1, order: "up" } },
+      // What the web cannot open exactly.
+      { [viewKey]: { v: 1, tag: ["t1", "t2"] } },
+      { [viewKey]: { v: 1, correspondent: ["c1", "c2"] } },
+      { [viewKey]: { v: 1, type: ["d1", "d2"] } },
+      { [viewKey]: { v: 1, inbox: false } },
+      { [viewKey]: { v: 1, favorite: false } },
+      // Keys it does not know, also in another case.
+      { [viewKey]: { v: 1, Q: "x" } },
+      { [viewKey]: { v: 1, later: true } },
     ]) {
       expect(viewParams(f), JSON.stringify(f)).toBeNull();
     }
@@ -101,6 +110,16 @@ describe("moveView", () => {
   it("does nothing at either end", () => {
     expect(moveView(views, 0, -1)).toEqual([]);
     expect(moveView(views, 2, 1)).toEqual([]);
+  });
+  it("numbers the views anew when any two have the same index, so a move lands one place off", () => {
+    // B and C are tied: swapping A and B would put A level with C, which
+    // the server orders by creation, so A could land two places off.
+    const someTied = [savedView("a", "A", { sortIndex: 1 }), savedView("b", "B", { sortIndex: 2 }), savedView("c", "C", { sortIndex: 2 })];
+    expect(moveView(someTied, 0, 1)).toEqual([
+      { id: "b", sortIndex: 1 },
+      { id: "a", sortIndex: 2 },
+      { id: "c", sortIndex: 3 },
+    ]);
   });
   it("numbers the views anew when the two have the same index", () => {
     const tied = [savedView("a", "A", { sortIndex: 0 }), savedView("b", "B", { sortIndex: 0 }), savedView("c", "C", { sortIndex: 0 })];

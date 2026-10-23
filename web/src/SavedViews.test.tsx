@@ -56,11 +56,16 @@ describe("the Saved views section", () => {
       savedView("v1", "Steuern", { sortIndex: 0, filter: web({ q: "Steuer" }) }),
       savedView("v2", "From the app", { sortIndex: 1, filter: { inbox: true, sort: "documentDate" } }),
       savedView("v3", "Bank", { sortIndex: 2, filter: { tags: [], ...web({ correspondent: ["c1"] }) } }),
+      // Views the web would open with another filter.
+      savedView("v4", "Two tags", { sortIndex: 3, filter: web({ tag: ["t1", "t2"] }) }),
+      savedView("v5", "Not in the inbox", { sortIndex: 4, filter: web({ inbox: false }) }),
     ];
     await start();
     const list = within(await sidebar().findByRole("list", { name: t.savedViews }));
     expect(list.getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Steuern⋯", "Bank⋯"]);
     expect(sidebar().queryByText("From the app")).toBeNull();
+    expect(sidebar().queryByText("Two tags")).toBeNull();
+    expect(sidebar().queryByText("Not in the inbox")).toBeNull();
   });
 
   it("shows no section without views", async () => {

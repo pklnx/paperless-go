@@ -15,18 +15,20 @@ export const viewKey = "paperless-go";
 export interface ViewParams {
   v: 1;
   q: string;
+  /** At most one ID each: the URL holds one. */
   tag: string[];
   correspondent: string[];
   type: string[];
-  /** true lists the inbox only; null does not filter (false, which the URL cannot hold, is read as null). */
-  inbox: boolean | null;
-  favorite: boolean | null;
+  /** true lists the inbox only; null does not filter. */
+  inbox: true | null;
+  favorite: true | null;
   sort: "" | "relevance" | "added" | "date";
   order: "" | "asc" | "desc";
   everyone: boolean;
 }
 
 const sorts = ["", "relevance", "added", "date"] as const;
+const known = ["v", "q", "tag", "correspondent", "type", "inbox", "favorite", "sort", "order", "everyone"];
 const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
 
 /** The web's parameters of a filter, or null for a view the web does not show (no key, another version, another shape). */
@@ -35,8 +37,12 @@ export function viewParams(filter: Record<string, unknown>): ViewParams | null {
   if (typeof p !== "object" || p === null || Array.isArray(p)) return null;
   const r = p as Record<string, unknown>;
   if (r.v !== 1) return null;
-  const list = (k: string) => (r[k] === undefined || r[k] === null ? [] : isStrings(r[k]) ? r[k] : null);
-  const flag = (k: string) => (r[k] === true ? true : r[k] === false || r[k] === null || r[k] === undefined ? null : undefined);
+  // The web shows one ID per kind and the inbox or favourites only as a
+  // filter: a view it would open differently (the server refuses such
+  // views, but an older or other writer may have stored one) is hidden.
+  const list = (k: string) => (r[k] === undefined || r[k] === null ? [] : isStrings(r[k]) && r[k].length <= 1 ? r[k] : null);
+  const flag = (k: string) => (r[k] === true ? true : r[k] === null || r[k] === undefined ? null : undefined);
+  for (const k of Object.keys(r)) if (!known.includes(k)) return null;
   const tag = list("tag");
   const correspondent = list("correspondent");
   const type = list("type");
@@ -134,17 +140,18 @@ export function showsView(s: ViewState, id: string, p: ViewParams, admin: boolea
 
 /**
  * The sort indexes to send to move the shown view at index i one place up
- * (-1) or down (+1): the two views swap their indexes. When both have the
- * same index (views from the app may), the shown views are numbered anew
- * from the lowest index in their new order. Only changed indexes are
- * returned; none at either end.
+ * (-1) or down (+1): the two views swap their indexes. When any two shown
+ * views have the same index (views from the app may), a swap could move a
+ * view past its tie, so the shown views are numbered anew from the lowest
+ * index in their new order instead. Only changed indexes are returned;
+ * none at either end.
  */
 export function moveView(shown: readonly SavedView[], i: number, dir: -1 | 1): { id: string; sortIndex: number }[] {
   const j = i + dir;
   const a = shown[i];
   const b = shown[j];
   if (!a || !b) return [];
-  if (a.sortIndex !== b.sortIndex) {
+  if (new Set(shown.map((v) => v.sortIndex)).size === shown.length) {
     return [
       { id: a.id, sortIndex: b.sortIndex },
       { id: b.id, sortIndex: a.sortIndex },

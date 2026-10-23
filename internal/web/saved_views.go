@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -52,6 +53,42 @@ type savedViewParams struct {
 	Everyone      bool     `json:"everyone"`
 }
 
+// savedViewFields are the exact keys of savedViewParams.
+var savedViewFields = map[string]bool{
+	"v": true, "q": true, "tag": true, "correspondent": true, "type": true,
+	"inbox": true, "favorite": true, "sort": true, "order": true, "everyone": true,
+}
+
+// exactKeys reports whether raw is one JSON object whose keys are all in
+// allowed, each at most once, by exact name.
+func exactKeys(raw json.RawMessage, allowed map[string]bool) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return false
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		k, ok := tok.(string)
+		if !ok || !allowed[k] || seen[k] {
+			return false
+		}
+		seen[k] = true
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return false
+		}
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return false
+	}
+	_, err := dec.Token()
+	return err == io.EOF
+}
+
 var uuidPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
 
 // checkSavedViewFilter checks a filter: a JSON object of at most
@@ -69,14 +106,28 @@ func checkSavedViewFilter(f json.RawMessage) string {
 	if !ok {
 		return ""
 	}
+	// The keys are checked by their exact names first: encoding/json
+	// matches field names case-insensitively, so "Q" next to "q" would
+	// otherwise pass unchecked and one of them win.
+	if !exactKeys(raw, savedViewFields) {
+		return "invalid " + savedViewKey + " filter"
+	}
 	var p savedViewParams
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if t := bytes.TrimSpace(raw); len(t) == 0 || t[0] != '{' || dec.Decode(&p) != nil || dec.More() {
+	if json.Unmarshal(raw, &p) != nil {
 		return "invalid " + savedViewKey + " filter"
 	}
 	if p.V != 1 {
 		return "unknown " + savedViewKey + " filter version"
+	}
+	// Only what the web can show exactly: one ID per kind, and the inbox
+	// and favourites as a filter or not at all (the web's URL holds no
+	// "not in the inbox"). A view the web would open differently is
+	// refused rather than shown wrong.
+	if len(p.Tag) > 1 || len(p.Correspondent) > 1 || len(p.Type) > 1 {
+		return "at most one tag, correspondent and type"
+	}
+	if p.Inbox != nil && !*p.Inbox || p.Favorite != nil && !*p.Favorite {
+		return "inbox and favorite must be true or null"
 	}
 	v := url.Values{}
 	set := func(k, s string) {

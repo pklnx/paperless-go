@@ -1392,13 +1392,18 @@ so another user's view answers `404` to everybody.
   back with only its own key replaced. `store.PatchSavedView` locks the row
   (`LockSavedView`, `FOR UPDATE`), merges and writes in one transaction.
   `saved_views` is not an owner table (nothing links to it), so no owner
-  lock. Reordering is two `PATCH`es swapping `sortIndex`, or, for views of
-  equal index (from the app), new indexes for the web's views.
+  lock. Reordering is two `PATCH`es swapping `sortIndex`, or, while any two
+  of the web's views share an index (views from the app may), new indexes
+  for the web's views in their new order.
 - **Filter check** (`400` `invalid_filter`): a JSON object of at most
   16 KiB; its `paperless-go` part, if present, must be a version-1 object
-  of the fields above (unknown fields refused), the IDs UUIDs, and its
-  parameters must pass `listQuery`, the parser of `GET /api/documents`.
-  Every other key is kept unchecked.
+  of the fields above, matched by their exact names and each at most once
+  (`encoding/json` alone matches names case-insensitively, so `"Q"` next
+  to `"q"` would slip past the check), the IDs UUIDs, and its parameters
+  must pass `listQuery`, the parser of `GET /api/documents`. Only what the
+  web can open exactly is accepted: at most one tag, correspondent and
+  type, and `inbox`/`favorite` `true` or `null`; the sidebar hides any
+  other view as well. Every other key is kept unchecked.
 - **Audit.** `saved_view.create`, `saved_view.update`, `saved_view.delete`
   in the transaction of the change (`503` and no change without the log):
   the view's UUID and name as target, `name`, `oldName` on a rename and

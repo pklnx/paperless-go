@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -35,6 +36,22 @@ func viewNames(t *testing.T, f *authFixture) []string {
 		names = append(names, r.(map[string]any)["name"].(string))
 	}
 	return names
+}
+
+// rawJSON sends body as it is, as the browser of f.
+func rawJSON(t *testing.T, f *authFixture, method, path, body string) (int, map[string]any) {
+	t.Helper()
+	req, _ := http.NewRequest(method, f.srv.URL+path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", f.srv.URL)
+	resp, err := f.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	out := map[string]any{}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
 }
 
 // sameValue reports whether two decoded JSON values are equal.
@@ -152,12 +169,42 @@ func TestSavedViewsValidation(t *testing.T) {
 		webFilter(map[string]any{"type": []string{strings.Repeat("a", 36)}}), // not an ID
 		webFilter(map[string]any{"inbox": "yes"}),                            // not a boolean
 		webFilter(map[string]any{"q": strings.Repeat("a ", 3000)}),           // over the parser's limits
+		// What the web cannot show exactly: several IDs of a kind, and
+		// "not in the inbox" or "not a favourite".
+		webFilter(map[string]any{"tag": []string{"6F9619FF-8B86-D011-B42D-00C04FC964FF", "7F9619FF-8B86-D011-B42D-00C04FC964FF"}}),
+		webFilter(map[string]any{"correspondent": []string{"6F9619FF-8B86-D011-B42D-00C04FC964FF", "7F9619FF-8B86-D011-B42D-00C04FC964FF"}}),
+		webFilter(map[string]any{"type": []string{"6F9619FF-8B86-D011-B42D-00C04FC964FF", "7F9619FF-8B86-D011-B42D-00C04FC964FF"}}),
+		webFilter(map[string]any{"inbox": false}),
+		webFilter(map[string]any{"favorite": false}),
 		tooLarge,
 	} {
 		code("POST", "/api/saved-views", map[string]any{"name": "Bad", "filter": bad}, codeInvalidFilter)
 		code("PATCH", path, map[string]any{"filter": bad}, codeInvalidFilter)
 	}
 	code("PATCH", path, map[string]any{"filter": nil}, codeInvalidFilter)
+
+	// Keys are matched by their exact names: encoding/json would match "Q"
+	// to the q field case-insensitively, and a repeated key would win
+	// over the checked one.
+	for _, raw := range []string{
+		`{"paperless-go": {"v": 1, "Sort": "deleted", "sort": "date"}}`,
+		`{"paperless-go": {"v": 1, "Order": "up", "order": "asc"}}`,
+		`{"paperless-go": {"v": 1, "Q": "(((", "q": "ok"}}`,
+		`{"paperless-go": {"V": 1}}`,
+		`{"paperless-go": {"v": 1, "Tag": ["not-a-uuid"]}}`,
+		`{"paperless-go": {"v": 1, "order": "up", "order": "asc"}}`,
+		`{"paperless-go": {"v": 1, "sort": "deleted", "sort": "date"}}`,
+	} {
+		for _, c := range []struct{ method, path, body string }{
+			{"POST", "/api/saved-views", `{"name": "Bad", "filter": ` + raw + `}`},
+			{"PATCH", path, `{"filter": ` + raw + `}`},
+		} {
+			status, out := rawJSON(t, f, c.method, c.path, c.body)
+			if status != 400 || out["code"] != codeInvalidFilter {
+				t.Errorf("%s %s: %d %v, want 400 invalid_filter", c.method, raw, status, out)
+			}
+		}
+	}
 
 	// Within the limit, any keys of the app are kept as they are, and a
 	// filter without the web's part is valid (a view made by the app).
@@ -171,7 +218,7 @@ func TestSavedViewsValidation(t *testing.T) {
 	// The parameters the list accepts.
 	good := webFilter(map[string]any{
 		"q": "correspondent:Bank added:2026", "tag": []string{"6F9619FF-8B86-D011-B42D-00C04FC964FF"}, "correspondent": []string{}, "type": nil,
-		"inbox": false, "favorite": true, "sort": "relevance", "order": "desc", "everyone": true,
+		"inbox": nil, "favorite": true, "sort": "relevance", "order": "desc", "everyone": true,
 	})
 	f.expect("PATCH", path, map[string]any{"filter": good}, 200)
 	if names := viewNames(t, f); !reflect.DeepEqual(names, []string{"View", "Large"}) {
