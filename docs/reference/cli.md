@@ -60,9 +60,12 @@ Only in the wrapper:
 
 `import PATH` reads the files below `PATH` and never changes, moves or
 deletes them; symbolic links are skipped. It prints one line per file
-(`imported`, `duplicate of "TITLE"` or `failed: REASON`) and a summary, and
-exits with status 1 if any file failed. Running it again reports the imported
-files as duplicates.
+(`imported`, `duplicate of "TITLE"`, `restored "TITLE" from the trash` or
+`failed: REASON`) and a summary, and exits with status 1 if any file failed.
+Running it again reports the imported files as duplicates. A file whose
+document is in the user's trash restores it (audited as `document.restore`
+with `via: import`); one whose document is being removed permanently fails,
+and a run a minute later imports it as new.
 
 | Flag | Does |
 |---|---|

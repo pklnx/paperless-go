@@ -366,6 +366,23 @@ drops the list, and `pg_trgm` too if the paperless-go database user owns
 it (it created it) and nothing else uses it; one an administrator created
 stays. No document data changes either way.
 
+**Trash (#12, `00020_trash.sql`).** Run `./pgo migrate` before `docker
+compose up -d web`. The migration adds two columns to `documents`, three
+indexes (one on the trash, two on the file hashes for the coming file
+removal) and the queue table `blob_removals`, and lets the audit log record
+saved views; no row is rewritten. Building the two hash indexes reads the
+documents table once, with writes to it waiting meanwhile (the web server
+does not run while migrations are pending anyway). Deleting a document now moves it to the trash; after
+`PAPERLESS_GO_TRASH_RETENTION` (default 30 days), or at once after "delete
+permanently", `serve` removes the row within a minute and records it in
+the audit log. Its files stay on disk for now; removing them comes with
+the next part of #12 (about an hour after the purge). A user who has
+documents in the trash cannot be removed until they are purged. Rolling
+the migration back (`migrate down`) brings every trashed document back as
+a live one and forgets the queued file removals (the files stay); it works
+only until the first audit entry about a saved view, after which going
+back needs a backup restore.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build

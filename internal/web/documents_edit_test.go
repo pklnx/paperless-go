@@ -44,7 +44,11 @@ func (f *searchFixture) confirmed(body map[string]any) map[string]any {
 	if body["match"] == nil || dry || has {
 		return body
 	}
-	resp, out := f.do("POST", "/api/documents/bulk", map[string]any{"match": body["match"], "dryRun": true})
+	dryRun := map[string]any{"match": body["match"], "dryRun": true}
+	if a, ok := body["action"]; ok {
+		dryRun["action"] = a // the fingerprint is bound to the action
+	}
+	resp, out := f.do("POST", "/api/documents/bulk", dryRun)
 	if fp, ok := out["fingerprint"].(string); resp.StatusCode == 200 && ok {
 		body["fingerprint"] = fp
 	}
@@ -286,7 +290,7 @@ func TestBulkDocumentsByMatch(t *testing.T) {
 
 	// Alice: the search and her own documents only, with filters.
 	if out := bulk(map[string]any{"match": map[string]any{"q": "rechnung"}, "dryRun": true}, 200); out["matched"] != float64(2) ||
-		out["owners"] != float64(1) || out["limit"] != float64(store.MaxBulkMatches) || !strings.HasPrefix(fmt.Sprint(out["fingerprint"]), "v1.") {
+		out["owners"] != float64(1) || out["limit"] != float64(store.MaxBulkMatches) || !strings.HasPrefix(fmt.Sprint(out["fingerprint"]), "v2.") {
 		t.Errorf("dry run: %v", out)
 	}
 	if got := favorites(); len(got) != 0 {
@@ -419,7 +423,7 @@ func TestBulkDryRunFingerprintEveryPath(t *testing.T) {
 	f := newSearchFixture(t)
 	f.expect("POST", "/api/documents/bulk", map[string]any{"match": map[string]any{"owner": fmt.Sprint(f.bob.UserID)}, "dryRun": true}, 403)
 	empty := f.expect("POST", "/api/documents/bulk", map[string]any{"match": map[string]any{"q": "nirgends"}, "dryRun": true}, 200)
-	if fp, _ := empty["fingerprint"].(string); empty["matched"] != float64(0) || !strings.HasPrefix(fp, "v1.") {
+	if fp, _ := empty["fingerprint"].(string); empty["matched"] != float64(0) || !strings.HasPrefix(fp, "v2.") {
 		t.Errorf("empty dry run: %v", empty)
 	}
 	// An empty confirmation that is still empty: {updated: 0}.

@@ -8,20 +8,23 @@ INSERT INTO jobs (document_id) SELECT unnest(@document_ids::uuid[])
 ON CONFLICT (document_id, kind) WHERE state IN ('queued', 'running') DO NOTHING;
 
 -- name: EnqueueAllDocuments :execrows
-INSERT INTO jobs (document_id) SELECT id FROM documents
+-- Every live document; trashed ones are left alone.
+INSERT INTO jobs (document_id) SELECT id FROM documents WHERE deleted_at IS NULL
 ON CONFLICT (document_id, kind) WHERE state IN ('queued', 'running') DO NOTHING;
 
 -- name: EnqueueFailedDocuments :execrows
--- Queues the documents whose latest job failed.
+-- Queues the live documents whose latest job failed.
 INSERT INTO jobs (document_id)
 SELECT l.document_id
 FROM (SELECT DISTINCT ON (document_id) document_id, state FROM jobs
       WHERE kind = 'process' ORDER BY document_id, id DESC) l
+JOIN documents d ON d.id = l.document_id AND d.deleted_at IS NULL
 WHERE l.state = 'failed'
 ON CONFLICT (document_id, kind) WHERE state IN ('queued', 'running') DO NOTHING;
 
 -- name: ExistingDocumentIDs :many
-SELECT id FROM documents WHERE id = ANY(@ids::uuid[]);
+-- The documents of ids that exist, and whether each is in the trash.
+SELECT id, (deleted_at IS NOT NULL)::boolean AS trashed FROM documents WHERE id = ANY(@ids::uuid[]);
 
 -- name: NotifyJobs :exec
 -- Wakes listening workers when the transaction commits.

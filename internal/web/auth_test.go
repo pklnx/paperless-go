@@ -66,7 +66,7 @@ func newAuthFixture(t *testing.T) *authFixture {
 }
 
 // newAuthFixtureOpts is newAuthFixture with TrustedProxies, Require2FA,
-// PublicURL and MaxUploadSize from opts. The blob store is a temporary
+// PublicURL, MaxUploadSize and SweepWake from opts. The blob store is a temporary
 // directory.
 func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 	t.Helper()
@@ -91,7 +91,7 @@ func newAuthFixtureDB(t *testing.T, opts Options, params map[string]string) *aut
 	s := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{
 		AllowedHosts: []string{"127.0.0.1"}, Hasher: storetest.Hasher, Now: clock.Now, TrustedProxies: opts.TrustedProxies,
 		Sealer: sealer, SecretKey: key, Require2FA: opts.Require2FA, PublicURL: opts.PublicURL,
-		Blobs: blobs, MaxUploadSize: opts.MaxUploadSize,
+		Blobs: blobs, MaxUploadSize: opts.MaxUploadSize, SweepWake: opts.SweepWake,
 	})
 	h := s.Handler()
 	srv := httptest.NewServer(h)

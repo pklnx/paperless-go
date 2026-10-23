@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/pklnx/paperless-go/internal/blobstore"
 	"github.com/pklnx/paperless-go/internal/ingest"
@@ -473,5 +474,59 @@ func TestImportConcurrentIdentical(t *testing.T) {
 	}
 	if n := len(e.documents(t)); n != 1 {
 		t.Errorf("%d documents, want 1", n)
+	}
+}
+
+// missFirst answers the first duplicate check with "no document", as if
+// the import raced another one that created the row right after.
+type missFirst struct {
+	ingest.Store
+	calls int
+}
+
+func (m *missFirst) FindDocumentByOriginal(ctx context.Context, owner int64, hash string) (*store.DocumentRef, error) {
+	m.calls++
+	if m.calls == 1 {
+		return nil, store.ErrNotFound
+	}
+	return m.Store.FindDocumentByOriginal(ctx, owner, hash)
+}
+
+// The file of a trashed document is a duplicate that says so, and nothing
+// is restored; once the document is due for purge the import is a
+// transient error on both duplicate paths (the check and the insert's
+// collision), and after the purge the file imports as new.
+func TestImportTrashedDuplicate(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	im := e.importer(t, 1<<20)
+	pdf := pdfOfSize(300, 't')
+	first := run(t, im, e.user.ID, "Brief.pdf", pdf)
+	owner := store.Scope{UserID: e.user.ID}
+	if err := e.st.TrashDocument(ctx, owner, first.Document.ID); err != nil {
+		t.Fatal(err)
+	}
+	again := run(t, im, e.user.ID, "Brief.pdf", pdf)
+	if again.Outcome != ingest.Duplicate || again.Existing.ID != first.Document.ID || !again.Existing.Trashed || again.Existing.Due {
+		t.Errorf("trashed duplicate: %+v", again)
+	}
+	if d, err := e.st.GetDocument(ctx, owner, first.Document.ID); err != nil || d.DeletedAt == nil {
+		t.Errorf("after the duplicate: %+v, %v", d, err)
+	}
+
+	if err := e.st.PurgeDocument(ctx, owner, first.Document.ID); err != nil {
+		t.Fatal(err)
+	}
+	for name, im := range map[string]*ingest.Importer{"check": im, "collision": e.importerWith(t, &missFirst{Store: e.st}, e.blobs, 1<<20)} {
+		res, err := im.Import(ctx, ingest.Request{OwnerID: e.user.ID, FileName: "Brief.pdf", Body: bytes.NewReader(pdf)})
+		if !errors.Is(err, store.ErrPurgePending) || res.Document != nil {
+			t.Errorf("%s, due for purge: %+v, %v", name, res, err)
+		}
+	}
+	if _, err := e.st.PurgeDueDocuments(ctx, time.Now(), store.DefaultTrashRetention, 100); err != nil {
+		t.Fatal(err)
+	}
+	if res := run(t, im, e.user.ID, "Brief.pdf", pdf); res.Outcome != ingest.Imported || res.Document.ID == first.Document.ID {
+		t.Errorf("after the purge: %+v", res)
 	}
 }

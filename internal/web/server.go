@@ -69,6 +69,8 @@ type Server struct {
 	// it; without blobs the document routes answer 503.
 	blobs    *blobstore.Store
 	importer *ingest.Importer
+	// sweepWake wakes the sweeper after a purge request (nil: none).
+	sweepWake func()
 }
 
 // Options configure a Server.
@@ -104,6 +106,10 @@ type Options struct {
 	// MaxUploadSize is the largest upload in bytes
 	// (PAPERLESS_GO_MAX_UPLOAD_SIZE); 0 means config.DefaultMaxUploadSize.
 	MaxUploadSize int64
+	// SweepWake wakes the sweeper of this process after a purge was
+	// asked for, so "delete permanently" takes effect within seconds; nil
+	// leaves it to the sweeper's next round. It must not block.
+	SweepWake func()
 }
 
 // New creates a Server.
@@ -154,7 +160,7 @@ func New(st *store.Store, log *slog.Logger, opts Options) *Server {
 		store: st, db: pinger, log: log, allowedHosts: hosts, hasher: hasher, now: now, limiter: limiter,
 		trustedProxies: opts.TrustedProxies, sealer: opts.Sealer, secretKey: opts.SecretKey, require2FA: opts.Require2FA,
 		webauthn: wa, publicOrigin: origin, passkeyBegins: passkeyBegins, apiKeyRate: apiKeyRate, badKeyRate: badKeyRate,
-		unknownKeyAudit: unknownKeyAudit, openLoginLog: openLoginLog,
+		unknownKeyAudit: unknownKeyAudit, openLoginLog: openLoginLog, sweepWake: opts.SweepWake,
 	}
 	if opts.Blobs != nil && st != nil {
 		maxSize := opts.MaxUploadSize
@@ -196,6 +202,10 @@ func (s *Server) Handler() http.Handler {
 // about five bulk changes of MaxBulkMatches queued ahead, well below a
 // reverse proxy's usual timeout. It is no setting.
 const ownerWait = 15 * time.Second
+
+// purgeRetryAfter is the Retry-After, in seconds, of an upload whose
+// duplicate is due for purge: the sweeper deletes it within a minute.
+const purgeRetryAfter = "60"
 
 // busyRetryAfter is the Retry-After of that 503, in seconds.
 const busyRetryAfter = "5"
@@ -403,6 +413,11 @@ func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
 		s.log.Warn("request busy: another change of the owner is still running", "method", r.Method, "path", r.URL.Path, "err", err)
 		w.Header().Set("Retry-After", busyRetryAfter)
 		s.writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "another change of these documents is still running; try again"})
+	case errors.Is(err, store.ErrPurgePending):
+		// The owner's document with this file is being removed for good:
+		// not a duplicate any more, not importable yet.
+		w.Header().Set("Retry-After", purgeRetryAfter)
+		s.writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "the document with this file is being removed permanently; try again in a minute"})
 	case errors.Is(err, store.ErrUnknownUser):
 		// The user was removed while the request ran; the session is gone
 		// with it.

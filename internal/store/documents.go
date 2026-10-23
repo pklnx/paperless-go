@@ -47,6 +47,13 @@ type Document struct {
 	CorrespondentID     *string
 	DocumentTypeID      *string
 	TagIDs              []string
+	// DeletedAt is when the document was moved to the trash; nil while it
+	// is live.
+	DeletedAt *time.Time
+	// PurgeAt is when a trashed document is removed for good: when its
+	// purge was asked for, else DeletedAt plus the store's retention at
+	// the time of the read. nil while it is live.
+	PurgeAt *time.Time
 }
 
 // NewDocument holds the fields of a new document. A zero DocumentDate means
@@ -73,7 +80,9 @@ type NewDocument struct {
 	TagIDs              []string
 }
 
-func documentFromDB(r db.GetDocumentRow) *Document {
+// documentFromDB is the document of r, with PurgeAt computed for the
+// retention ret.
+func documentFromDB(r db.GetDocumentRow, ret time.Duration) *Document {
 	tags := make([]string, len(r.TagIds))
 	for i, t := range r.TagIds {
 		tags[i] = idString(t)
@@ -87,6 +96,7 @@ func documentFromDB(r db.GetDocumentRow) *Document {
 		OriginalSize: r.OriginalSize, OriginalMIME: r.OriginalMime, ArchiveSHA256: r.ArchiveSha256,
 		ArchiveSize: r.ArchiveSize, ThumbnailSHA256: r.ThumbnailSha256, ProcessingNote: r.ProcessingNote,
 		CorrespondentID: idPtr(r.CorrespondentID), DocumentTypeID: idPtr(r.DocumentTypeID), TagIDs: tags,
+		DeletedAt: r.DeletedAt, PurgeAt: purgeTime(r.DeletedAt, r.PurgeAt, ret),
 	}
 }
 
@@ -94,6 +104,11 @@ func documentFromDB(r db.GetDocumentRow) *Document {
 type DocumentRef struct {
 	ID    string
 	Title string
+	// Trashed: the document is in the trash.
+	Trashed bool
+	// Due: the document is in the trash and due for purge, hidden from
+	// every read; the sweeper deletes it shortly.
+	Due bool
 }
 
 // isSHA256 reports whether s is a lowercase hex SHA-256, as the blob store
@@ -229,7 +244,9 @@ func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*
 // FindDocumentByOriginal returns the document of ownerID whose original file
 // has the SHA-256 hash, or ErrNotFound. It looks only at that owner's
 // documents, never through a scope: an admin's duplicate check must not
-// find another user's document. A malformed hash gives a *ValidationError
+// find another user's document. A trashed document is found too (it still
+// holds the owner's copy of the file), with Trashed and, once it is due
+// for purge, Due set. A malformed hash gives a *ValidationError
 // (ErrInvalid).
 func (s *Store) FindDocumentByOriginal(ctx context.Context, ownerID int64, hash string) (*DocumentRef, error) {
 	if !isSHA256(hash) {
@@ -239,37 +256,44 @@ func (s *Store) FindDocumentByOriginal(ctx context.Context, ownerID int64, hash 
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	return &DocumentRef{ID: idString(r.ID), Title: r.Title}, nil
+	now, ret := s.trashClock()
+	st := trashStateOf(r.DeletedAt, r.PurgeAt, now, ret)
+	return &DocumentRef{ID: idString(r.ID), Title: r.Title, Trashed: st != stateLive, Due: st == stateDue}, nil
 }
 
-// GetDocument returns one document in the scope, with its tags.
+// GetDocument returns one document in the scope, with its tags. A
+// trashed document is returned too (with DeletedAt and PurgeAt), so a
+// link still opens it, until it is due for purge: then it is ErrNotFound.
 func (s *Store) GetDocument(ctx context.Context, sc Scope, id string) (*Document, error) {
 	u, ok := parseID(id)
 	if !ok {
 		return nil, ErrNotFound
 	}
-	r, err := s.q.GetDocument(ctx, db.GetDocumentParams{ID: u, Owner: sc.owner()})
+	now, ret := s.trashClock()
+	r, err := s.q.GetDocument(ctx, db.GetDocumentParams{ID: u, Owner: sc.owner(), Now: now, RetentionUs: ret.Microseconds()})
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	return documentFromDB(r), nil
+	return documentFromDB(r, ret), nil
 }
 
-// ListDocuments returns the scope's documents, newest first.
+// ListDocuments returns the scope's live documents, newest first (for
+// tests).
 func (s *Store) ListDocuments(ctx context.Context, sc Scope) ([]*Document, error) {
 	rows, err := s.q.ListDocuments(ctx, sc.owner())
 	if err != nil {
 		return nil, err
 	}
+	_, ret := s.trashClock()
 	out := make([]*Document, len(rows))
 	for i, r := range rows {
-		out[i] = documentFromDB(db.GetDocumentRow(r))
+		out[i] = documentFromDB(db.GetDocumentRow(r), ret)
 	}
 	return out, nil
 }
 
-// DeleteDocument removes a document row with its tag links. Its files stay
-// in the blob store; the orphan sweep comes with the trash (#12). It reads
+// DeleteDocument removes a document row with its tag links at once,
+// without the trash, for tests. Its files stay in the blob store. It reads
 // the owner, takes the owner's gate and write lock (ownerTx), then
 // deletes.
 func (s *Store) DeleteDocument(ctx context.Context, sc Scope, id string) error {

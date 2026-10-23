@@ -78,6 +78,9 @@ func (s *Server) routes() []route {
 		h("GET /api/documents/{id}/file", s.handleDocumentFile, accessRead),
 		h("GET /api/documents/{id}/thumbnail", s.handleThumbnail, accessRead),
 		h("POST /api/documents/{id}/reprocess", s.handleReprocess, accessWrite),
+		h("DELETE /api/documents/{id}", s.handleTrashDocument, accessWrite),
+		h("POST /api/documents/{id}/restore", s.handleRestoreDocument, accessWrite),
+		h("POST /api/documents/{id}/purge", s.handlePurgeDocument, accessWrite),
 		h("GET /api/documents/counts", s.handleDocumentCounts, accessRead),
 
 		h("GET /api/tags", s.handleListTags, accessRead),

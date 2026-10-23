@@ -32,6 +32,7 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 | `internal/blobstore` | Content-addressed document files: named by their SHA-256 without extension (`documents/ab/cd/<sha256>`), published and removed durably (see [Blob durability](#blob-durability)). |
 | `internal/ingest` | Imports one file as a document: type detection from the content (PDF, JPEG, PNG, HEIC/HEIF), the size and 50-megapixel limits, then the blob store, the duplicate check and the row (see [Ingest](#ingest)). |
 | `internal/consume` | The consume folder: polls `consume/<user>/`, imports settled files through `internal/ingest`, deletes or moves them (see [Consume folder](#consume-folder)). |
+| `internal/sweep` | The trash's sweeper: deletes the documents due for purge and queues their files for removal (see [Trash](#trash)). |
 | `internal/process` | The processing queue's worker: claims jobs, runs the tools (`Runner`) in a work directory, stores text, page count and archive PDF (see [Processing](#processing)). |
 | `internal/store` | PostgreSQL access: migrations (goose, embedded), queries (sqlc, generated into `internal/store/db`). |
 | `internal/store/storetest` | A throwaway, migrated database per test. |
@@ -52,7 +53,7 @@ app and the server through the app's archive folder format:
 | App (SwiftData) | Server table |
 |---|---|
 | — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`, `webauthn_handle` in `00008_passkeys.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges`, `passkeys`, `webauthn_ceremonies` (network columns in `00014_ceremony_networks.sql`), `api_keys` (`00009_api_keys.sql`) |
-| — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; actor `system` in `00015_audit_system_actor.sql`; metadata targets in `00016_audit_metadata_targets.sql`; see [Audit log](#audit-log)) |
+| — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; actor `system` in `00015_audit_system_actor.sql`; metadata targets in `00016_audit_metadata_targets.sql`, the saved-view target in `00020_trash.sql`; see [Audit log](#audit-log)) |
 | `Document`: id (UUID), title, documentDate, createdAt, modifiedAt, notes, isFavorite, isInbox, archiveSerialNumber, pageCount, fileSize, extractedText, source, originalFileName, textSource, contentHash | `documents`, with the UUID as primary key; the original file (`original_sha256`, size, MIME type) and the archive PDF (`archive_sha256`, size) |
 | `Tag`: name, colorHex, symbol, parent, matchText, matchMode | `tags`, `document_tags` (nested through `parent_id`) |
 | `Correspondent`, `DocumentType`: name, matchText, matchMode | `correspondents`, `document_types` |
@@ -61,6 +62,7 @@ app and the server through the app's archive folder format:
 | — | `jobs` (`00007_jobs.sql`; see [Processing](#processing)); `documents.thumbnail_sha256`, `documents.processing_note` |
 | — | `documents.search_text`, `documents.search_links` (`00011_search.sql`; see [Search index](#search-index)) |
 | — | `search_vocabulary` (`00018_search_vocabulary.sql`): per owner, the lexemes of `search_text` and how many documents hold each (see [Search index](#search-index), Vocabulary) |
+| (the app's `Deleted/` folder, 30 days) | `documents.deleted_at`, `documents.purge_at`, `blob_removals` (`00020_trash.sql`; see [Trash](#trash)) |
 
 UUIDs as keys (not serials) keep imported and exported records stable across
 the app and the server.
@@ -94,14 +96,17 @@ the new document would get, never through a scope: an admin's upload is
 checked only against the admin's own documents.
 `archive_sha256` is the PDF with a text layer from OCR, `NULL` until
 processed and equal to the original for a PDF that already has text. Export
-writes the archive PDF, or the original when there is none. Deleting a row
-leaves its files; the orphan sweep comes with the trash.
+writes the archive PDF, or the original when there is none. Deleting a
+document moves it to the [trash](#trash); the sweeper's purge of the row
+queues its files in `blob_removals`, and the file removal comes with #12,
+part 2.
 
 **Deletes.** Deleting a correspondent or document type leaves its documents
 without one; deleting a tag removes it from its documents and makes its
 children root tags (refused with `ErrTagNameConflict` when a child would
 collide with a root tag of the same name; nothing is renamed). Deleting a
-document removes its tag links and its deadlines. The trigger `tags_no_cycle` refuses a parent
+document moves it to the trash with everything it has; purging the row
+(the sweeper) removes its tag links, its deadlines and its jobs. The trigger `tags_no_cycle` refuses a parent
 that would make a tag its own ancestor (`ErrTagCycle`); a per-owner advisory
 lock keeps two concurrent changes from building a cycle together.
 
@@ -488,7 +493,9 @@ first) and its retry loop.
   recheck only removes; under READ COMMITTED the match inside the
   transaction ran on its own snapshot before the locks too).
 - **Every writer:** `CreateDocument` (upload, consume folder, import),
-  `DeleteDocument`, `PatchDocument`, `BulkUpdateDocuments`,
+  `DeleteDocument`, `PatchDocument`, `BulkUpdateDocuments` (also its
+  trash actions), `TrashDocument`, `RestoreDocument`, `PurgeDocument`,
+  `PurgeDueDocuments` (the sweeper, one owner per transaction),
   `Create/Update/Patch/Delete` of tags, correspondents and document
   types, and `CompleteJob` (OCR results; it reads the document's owner
   without a scope). The triggers (`tags_no_cycle`, the `00011` search
@@ -587,6 +594,107 @@ first) and its retry loop.
   `pool_max_conns` in `PAPERLESS_GO_DATABASE_URL`
   (`docs/reference/configuration.md`).
 
+## Trash
+
+#12, part 1 (`00020_trash.sql`, `internal/store/documents_trash.go`,
+`internal/sweep`). Deleting a document is two steps. **Trash** sets
+`documents.deleted_at`: the row stays with everything it has (tags, ASN,
+the unique `(owner_id, original_sha256)`, deadlines, the search vectors and
+its words in the vocabulary), so a restore only clears the column and never
+conflicts, and the duplicate check keeps finding it. The document leaves
+every list, search, count (the sidebar's and the metadata lists', the tag
+counts through a join to `documents`) and bulk match, and shows only in the
+trash, which lists and searches with the same endpoint and filter code
+(`trashed=true`). **Purge** happens when the document is *due*:
+`coalesce(purge_at, deleted_at + retention) <= now`. "Delete permanently"
+and "empty trash" set `purge_at = now`, which makes it due at once; the
+retention is `PAPERLESS_GO_TRASH_RETENTION` (default 720 h). A due document
+is hidden from every read (`GET` and the file routes are `404`, restore and
+purge too), and the sweeper deletes its row.
+
+- **One clock.** The store has `Now` (the wall clock in `serve`, injected
+  in tests) and `TrashRetention` (every command sets it from the
+  configuration). Every trash write takes `now` as a parameter (`deleted_at`,
+  `purge_at`) and every read of the state compares against it, also the
+  sweeper's scan, which gets the same clock and retention. The retention is
+  read at every decision: shortening it applies at once to documents
+  already in the trash; with `0` a trashed document is due at once (the
+  UI's Undo then fails).
+- **The filter** is two explicit branches in every copy of the search's
+  filter block (the six search queries, `SearchDocumentsDeletedDesc` and
+  `MatchDocumentIDs`; `TestSearchFilterCopies`): `(NOT trashed AND
+  deleted_at IS NULL) OR (trashed AND deleted_at IS NOT NULL AND not
+  due)`. The queries run as unnamed statements, so the constant folds one
+  branch away: the trash list uses the partial index `documents_trash_idx
+  (owner_id, deleted_at DESC, id) WHERE deleted_at IS NOT NULL`, and the
+  live lists keep `documents_owner_created_idx`, `documents_owner_date_idx`
+  and `documents_search_idx` (`TestTrashFilterUsesIndexes`, with
+  `EXPLAIN`). The sort `deleted` (descending only, keyset over
+  `(deleted_at, id)`) is the trash's default without ranked text and
+  refused outside it.
+- **Writers** (all through `ownerTx`, with the row lock and a state check
+  under it): `TrashDocument` (a trashed one is `ErrInTrash`, `409
+  in_trash`), `RestoreDocument` and `PurgeDocument` (a live one is
+  `ErrNotInTrash`, `409 not_in_trash`: permanent deletion is always two
+  steps); a due document is `ErrNotFound` for all three. None of them
+  touches a column of the search triggers, and `modified_at` stays (the
+  document did not change; a `PATCH` of a trashed document is refused, so
+  the precondition loses nothing). `PatchDocument`, a bulk `update`, and
+  `reprocess` of one document refuse a trashed one (`ErrInTrash`);
+  `reprocess --all`/`--failed` skip trashed documents; a queued or running
+  job of a trashed document finishes normally, so a restored document has
+  its text. `GetDocument` returns a trashed document with `DeletedAt` and
+  `PurgeAt` (the due time), so a link and the file and thumbnail routes
+  keep working for the preview. `OwnedRowCounts` counts trashed rows: a
+  user with documents in the trash cannot be deleted until they are
+  purged.
+- **Bulk.** `BulkSelection.Action` is `update` (the field change), `trash`,
+  `restore` or `purge`; the trash actions take no fields and are one
+  `UPDATE … WHERE id = ANY` each. By IDs every locked document must be in
+  the action's state (else the whole change fails with `409`); by search
+  the match must select the trash (`trashed`) for restore and purge and
+  the live documents otherwise, and a purge by search needs an owner, so
+  "empty trash" is always one user's trash, also for an admin who sees
+  everyone's documents. The fingerprint (`v2.`) covers the action and the
+  sorted IDs, so a dry run confirmed for `restore` is no confirmation of a
+  `purge` of the same set; a `v1.` fingerprint never matches.
+- **The sweeper** (`sweep.Sweeper`, in `serve` every minute and at once
+  after a purge request in the same process, through `web.Options.SweepWake`).
+  `RunOnce` loops `store.PurgeDueDocuments` in batches of 100 until a
+  scan finds fewer: it scans due rows on the pool without a lock (`ORDER
+  BY owner_id, id`), then per owner one `ownerTx` locks them, checks again
+  that each is still due (a restore may have come first), deletes them
+  (`RETURNING` the three hashes; cascades to `document_tags`, `deadlines`,
+  `jobs`; the vocabulary trigger runs, about 12 ms per row, so the owner
+  lock is held for about 1.5 s per batch at most), queues the original,
+  archive and thumbnail hashes in `blob_removals` (`ON CONFLICT DO
+  NOTHING`, `due_at = now + 1 h`) and writes `document.purge` by `system`
+  with `reason: retention` and `ownerId` for each document whose retention
+  passed (a requested purge was audited when it was asked for). Measured
+  on the test machine: trashing 1 000 documents by search takes 91 ms,
+  marking them for purge 104 ms, the row purge of all 1 000 330 ms.
+- **Re-ingesting a trashed file.** `ingest.Import` reports a duplicate
+  with `Existing.Trashed`; the callers decide (maintainer decision on
+  #12). A web upload and a key with `read` answer `duplicate` with
+  `trashed: true`, and the UI offers Restore. Where nobody sees a Restore
+  button, the caller restores the document at once, audited as
+  `document.restore` with `via`: an upload with a key without `read`
+  (`upload`, the iPhone Shortcut; its answer stays `{"duplicate": true}`),
+  the consume folder (`system`, then the file is deleted and counted under
+  `restored`) and `import` (the operator; counted as `restored`). A
+  duplicate whose document is due for purge is neither duplicate nor new:
+  `store.ErrPurgePending`, a transient error on every path (`503` with
+  `Retry-After: 60` for every upload, the consume folder keeps the file,
+  `import` reports a failure), because a client that heard "duplicate"
+  would not retry while the only copy goes. The same holds when the
+  restore itself finds the document due (`ErrNotFound`, a window of at
+  most a minute).
+- **Not yet.** The files of a purged row stay until #12, part 2 removes
+  the queued ones that no document references (with a per-hash lock
+  against a concurrent upload of the same file). #10's export decides
+  what to do with trashed documents (the app's format has `Deleted/`), and
+  #11's upcoming deadlines must leave them out.
+
 ## Blob durability
 
 `internal/blobstore` keeps document files under the data directory, named by
@@ -633,8 +741,9 @@ about durability.
   before the barrier. If shard directories are missing, it synchronizes the
   nearest existing one and its ancestors through the store root; a missing
   store root is an error. The caller makes sure no row refers to the file;
-  deleting a document row leaves its file, and the orphan sweep that removes
-  unreferenced files comes with the trash (#12).
+  purging a document row (the [trash](#trash)) queues its files in
+  `blob_removals`, and the pass that removes unreferenced files comes with
+  #12, part 2.
 
 Every call that takes a hash (`OpenHash`, `Exists`, `Remove`) accepts only
 a lowercase hex SHA-256 and builds the path itself, so no input reaches a
@@ -934,7 +1043,10 @@ another user's document answers `404` and an admin sees all.
   `400` for a body that broke off, `503` without the audit log, `503`
   with `Retry-After: 5` when another change of the caller's documents ran
   longer than 15 s (Write locking, bounded wait; the body must be sent
-  again).
+  again). A duplicate of a trashed document adds `trashed: true` for a
+  caller that may read; for a key without `read` the server restores it
+  instead (see [Trash](#trash)); one due for purge answers `503` with
+  `Retry-After: 60`.
 - **`GET /api/documents`** lists and searches the scope's documents
   through `store.SearchDocuments`, without their text, with
   `maxUploadSize` for the UI. Parameters (`listQuery`):
@@ -945,7 +1057,8 @@ another user's document answers `404` and an admin sees all.
   | `tag`, `correspondent`, `type` | UUIDs, repeatable (at most 100 each), any of them; joined with `q` by AND. |
   | `inbox`, `favorite` | `true` or `false`: an `is:inbox` or `is:favorite` filter. |
   | `owner` | `me`: only the caller's own documents (an admin's default view; without it an admin lists everyone's, the "Everyone's documents" switch). For an admin also a user ID: only that user's. A non-admin may name only themselves (`403`). The same `listScope` as the metadata lists. |
-  | `sort` | `relevance` (the default with free text that is not only negated), `added` (the default otherwise: with only negated words every match ranks 0, and ranking them all took 4–5 s on 100 000 documents) or `date`. |
+  | `trashed` | `true`: the trash instead of the live documents (trashed documents not yet due for purge), with every other parameter. |
+  | `sort` | `relevance` (the default with free text that is not only negated), `added` (the default otherwise: with only negated words every match ranks 0, and ranking them all took 4–5 s on 100 000 documents), `date`, or `deleted` (the trash only, descending; its default without ranked text). |
   | `order` | `desc` (default) or `asc`; relevance has no ascending order. |
   | `tz` | An IANA zone (`time.LoadLocation`, zones built in through `time/tzdata`) for the days of `date:` and `added:`; default UTC. `Local` is refused. |
   | `limit` | 1 to 100, default 100 (the start page asks for 10, the search for 25); more is capped. |
@@ -976,7 +1089,17 @@ another user's document answers `404` and an admin sees all.
   searches (maintainer decision on #7).
 - **Document JSON** has `ownerId`; for admins also `ownerName`, the
   owner's user name, so the UI can mark other users' documents and load
-  that owner's metadata.
+  that owner's metadata. `deletedAt` and `purgeAt` (when it is removed for
+  good) are `null` while the document is live.
+- **`DELETE /api/documents/{id}`** (write) moves a document to the trash
+  (`204`; `409` `in_trash` when it is there already), **`POST
+  /api/documents/{id}/restore`** brings it back (`200` with the document
+  as `GET`; `409` `not_in_trash`), **`POST /api/documents/{id}/purge`**
+  asks for its permanent deletion (`204`; `409` `not_in_trash`) and wakes
+  the sweeper. A document due for purge is `404` for all three. Audit:
+  `document.delete`, `document.restore`, `document.purge`, target the
+  document, `ownerId` for an admin's change of another user's (see
+  [Trash](#trash)).
 - **`GET /api/documents/{id}`** returns one document with its text.
 - **`GET /api/documents/{id}/file?kind=original|archive`** sends the file
   from the blob store (`OpenHash`) with `Content-Disposition: attachment`
@@ -1002,7 +1125,8 @@ another user's document answers `404` and an admin sees all.
   transaction, with the document as target and `selection: ids`, like
   `reprocess ID`. Answers: `202` with the document when it was queued,
   `200` when it was queued or running already, `404` outside the scope,
-  `503` without the audit log.
+  `409` `in_trash` for a document in the trash, `503` without the audit
+  log.
 - **`PATCH /api/documents/{id}`** (write) changes only the fields sent
   (`store.PatchDocument`): `title` (at most 1 024 characters and no
   control characters (Unicode Cc: NUL, tab, line breaks, escape …), like
@@ -1035,7 +1159,9 @@ another user's document answers `404` and an admin sees all.
   document owner's, also for an admin), `invalid_title`, `invalid_notes`,
   `invalid_asn`, `404` outside the scope, `409` `asn_taken` with
   `documentId` of the document that has the number, `409`
-  `document_changed` with `modifiedAt`, `503` without the
+  `document_changed` with `modifiedAt`, `409` `in_trash` for a document
+  in the trash (`asn_taken` adds `trashed: true` when the document with
+  the number is in the trash, where it keeps it), `503` without the
   audit log or after a deadlock with SQL outside the store (`Retry-After:
   1`), `503` with `Retry-After: 5` when another change of the owner ran
   longer than 15 s (nothing changes). Without
@@ -1056,8 +1182,10 @@ another user's document answers `404` and an admin sees all.
   `modified_at` alone, so OCR finishing causes no false conflict. A new
   writer (classification, an import into existing documents) must use the
   same form; `TestDocumentUpdatesAdvanceModifiedAt` checks every `UPDATE
-  documents` in `internal/store/queries` with `SetDocumentProcessed` as
-  the only exception. Foreign-key actions (a deleted correspondent, type
+  documents` in `internal/store/queries` with `SetDocumentProcessed` and
+  the trash's three writes (`TrashDocuments`, `RestoreDocuments`,
+  `PurgeDocuments`: no field of the document changes) as the only
+  exceptions. Foreign-key actions (a deleted correspondent, type
   or tag) do not advance it: `PATCH` sends only changed fields, and a
   stale deleted tag ends in `owner_mismatch`.
 - **`POST /api/documents/bulk`** (write) changes several documents, all
@@ -1081,6 +1209,17 @@ another user's document answers `404` and an admin sees all.
   `400` `nothing_to_change`. The answer is `{updated}`, `0` for a search
   whose dry run matched nothing either (which writes no entry).
 
+  **Actions.** `action` `trash`, `restore` or `purge` (absent or `update`:
+  the change above; another value is `400` `invalid_action`) takes no
+  fields (`400` `invalid_field`). By `ids` every document must be in the
+  action's state, else `409` `in_trash` or `not_in_trash` and nothing
+  changes; `match.trashed` must be `true` for restore and purge and
+  absent for the others, and a purge by `match` needs `match.owner`
+  (both `400` `invalid_selection`). The dry run takes the `action` too:
+  its fingerprint is for that action. Audit: `document.bulk_delete`,
+  `bulk_restore`, `bulk_purge` as the summary and `document.delete`,
+  `restore`, `purge` per document (see [Trash](#trash)).
+
   **Dry run.** `{"match": {...}, "dryRun": true}` changes nothing and
   answers `{matched, owners, limit, fingerprint}`: the number of matches
   (also above the limit), their owners (`0` above the limit), the limit,
@@ -1099,9 +1238,11 @@ another user's document answers `404` and an admin sees all.
   n}`. `n` is the number the change would cover now (also `0`), for
   information only: the client counts again with a dry run (which also
   gives `owners` and `limit`) and asks again; the UI never resends by
-  itself. The fingerprint is opaque: `v1.` and the unpadded base64url
-  (`RawURLEncoding`) SHA-256 of the matched IDs, sorted by their 16 bytes
-  and concatenated (`store.matchFingerprint`); clients pass it back
+  itself. The fingerprint is opaque: `v2.` and the unpadded base64url
+  (`RawURLEncoding`) SHA-256 of the action's name, a zero byte and the
+  matched IDs, sorted by their 16 bytes and concatenated
+  (`store.matchFingerprint`; `v1.` without the action is refused as
+  `match_changed`); clients pass it back
   unchanged, never compute it, and compare nothing. It grants nothing (it
   only narrows a change the caller may make anyway), so it carries no key.
   It needs no client-sent ID list, so the server still resolves the
@@ -1200,8 +1341,11 @@ answers `404` and an admin may change everyone's (the row keeps its owner).
   `tag_name_conflict` (a child would clash with a root tag on delete;
   `childId` and `childName` when the lookup found it; nothing changes),
   `400` `owner_mismatch` (a parent of another owner, or no such tag).
-- **`GET /api/documents/counts`** answers `{inbox, favorites, total}` for
-  the scope, with `owner` as for the lists.
+- **`GET /api/documents/counts`** answers `{inbox, favorites, total,
+  trash}` for the scope, with `owner` as for the lists: the first three of
+  the live documents, `trash` the trashed ones not yet due for purge. The
+  `documentCount` and `subtreeCount` of the metadata lists leave trashed
+  documents out.
 - **Audit.** `tag.create`, `tag.update`, `tag.delete`, likewise
   `correspondent.*` and `document_type.*`, in the transaction of the
   change (`503` and no change without the log). The target is the row's
