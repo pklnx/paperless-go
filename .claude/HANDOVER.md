@@ -6,7 +6,7 @@ State of the work for the next session. Update before a session ends.
 - #100 (#92, iPhone guide): approved; waits for the maintainer's device checks listed in the PR body (raw bytes vs multipart is the key one). Don't merge before.
 
 ## Next tickets
-- The first release (vYY.MM-N via Actions → Release) waits for the maintainer's explicit OK (#120 and #115 are merged); ask before running the release workflow.
+- First release v26.10-1 published 2026-10-23 (dry run, then release; ghcr.io package public, #149 removed the "no release yet" notes). Every further release needs the maintainer's explicit OK; run a dry run first. The release body has only the generated notes (no tool here edits releases).
 - Follow-up ticket: a search time limit for the bulk match (`MatchDocumentIDs`), which runs under the owner lock (maintainer: after the release).
 - Backlog (step numbers as in #100's roadmap, valid once #100 merges; main and the bodies of #8–#11 still use the old numbers): roadmap 9 archive import/export (#10), 10 automatic assignment (#8), 11 external OCR/classification (#9), 12 deadlines (#11), 14 native iPhone app in its own repository (later); #21 (transfer a user's data). #12 (notes, saved views, trash) is done.
 
@@ -26,7 +26,7 @@ State of the work for the next session. Update before a session ends.
 - Search (#6): sort by relevance by default, except a query with only excluded words (newest added); `date:`/`created:` = document date, `added:` = upload; day bounds in the browser's time zone, else UTC; `document.search` is audit-logged with the query; broad relevance at about 2 s is accepted until #7. Compound words later (#56).
 - #39: users see all entries whose target is themselves, details reduced to an allowlist; `audit export --user` unchanged.
 - #55: a PDF that opens without a password and allows changes is OCRed; its archive is unencrypted.
-- The repository is public (#61); no release yet (#63).
+- The repository is public (#61); no release yet (#63, superseded by v26.10-1 on 2026-10-23).
 - No Claude GitHub Action any more (#65): plans, plan reviews and reviews run in Claude sessions on the subscription. Risky PRs get a second, independent session reviewer; `second-review` is a marker. The Action ran Claude Code on the API key, and the plan's API credits do not cover Claude Code.
 - PostgreSQL: Debian image `postgres:18` (musl ranked full-text search about 4× slower); minimum PostgreSQL 17; existing databases keep their sort order, new ones use builtin `C.UTF-8` (#66).
 
@@ -53,6 +53,7 @@ State of the work for the next session. Update before a session ends.
 - Release after #120/#115 only with the maintainer's explicit OK.
 
 ## Done (2026-10-23)
+- Release v26.10-1; #149 (no-release notes removed).
 - #118 (#117), #119, #120 (#114), #122, #123 (#121 `./pgo restore`), #129 (#128 Markdown notes), #130 (smoke cleanup), #132 (#124 trash store/API), #133 (#131 autolinks), #135 (#126 trash UI), #136 (#125 blob removal, `./pgo sweep`), #139 (#127 saved views), #141 (#137 flaky test), #144 (#134), #145 (#142), #146 (#138), #147 (#143), #140 (#115; #56 closed).
 - #12 closed (all 5 parts).
 
@@ -71,7 +72,6 @@ State of the work for the next session. Update before a session ends.
 
 ## Manual checks for the maintainer
 - Ruleset for `main` with the required checks (test, lint, vulncheck, docker, compose, web; `toolstest` recommended): part of the public-switch steps; confirm it is active.
-- After the first release: set the ghcr.io package to public, then remove the "no release yet" notes (#63).
 - Trusted proxies behind Tailscale or Caddy (`PAPERLESS_GO_TRUSTED_PROXIES`) so the `__Host-` cookie is kept (#51).
 - After updating: `./pgo keygen` into `.env`, then `./pgo migrate`. Try TOTP with a real authenticator app, and a passkey at an HTTPS `PAPERLESS_GO_PUBLIC_URL`.
 - Drag and drop in Safari and Firefox; a ~100 MB upload through a reverse proxy.
