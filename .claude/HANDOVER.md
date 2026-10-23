@@ -79,7 +79,7 @@ State of the work for the next session. Update before a session ends.
 ## Notes for sessions
 - golangci-lint matching CI: `GOTOOLCHAIN=$(go env GOVERSION) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0`, then `~/go/bin/golangci-lint run ./...`.
 - PostgreSQL 17 or newer is required (#66). The cloud sandbox's local PostgreSQL is 16 and can no longer run the store tests: start `dockerd` and run `postgres:18` (Docker Hub rate-limits; `mirror.gcr.io/library/postgres:18` works), then point `TEST_DATABASE_URL` at it.
-- Cloud sessions have no `gh`; the coordinator subscribes to PR activity and arms one safety check-in.
+- Cloud sessions have no `gh`: use the GitHub MCP tools from the GitHub operations table in `CLAUDE.md`; the coordinator subscribes to PR activity and arms one safety check-in.
 - Web: use `pnpm` in `web/`; never `npx prettier` or `tsc -b` (they rewrite or emit files).
 - The container can restart: docker stops (start `dockerd` again), /var/tmp worktrees survive.
 - Docker Hub can answer 500 on image pulls in CI (seen 2026-10-23 on main, compose job); rerun only per the flaky-test rule.
