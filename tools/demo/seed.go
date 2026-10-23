@@ -14,7 +14,9 @@ import (
 
 // seedDoc is a generated document of the demo. Each has a word no other
 // document has (word), so a search for it finds exactly this document;
-// web/e2e/demo.ts names the ones the tests use.
+// web/e2e/demo.ts names the ones the tests use. The exceptions are the
+// groups that share one word on purpose (bulkDocs, pairDocs): a search for
+// it finds the whole group.
 type seedDoc struct {
 	owner         string
 	title         string
@@ -36,12 +38,67 @@ var seedTags = []struct{ name, parent string }{
 	{"Bills", "Finance"},
 	{"Taxes", "Finance"},
 	{"Home", ""},
+	// The bulk edit test adds it.
+	{"Review", ""},
 }
 
 var (
-	seedCorrespondents = []string{"City Utilities", "Tax Office", "Northwind Insurance", "Hausverwaltung Berg"}
-	seedTypes          = []string{"Invoice", "Letter", "Contract"}
+	// Meridian Bank and Statement are set by the bulk edit test.
+	seedCorrespondents = []string{"City Utilities", "Tax Office", "Northwind Insurance", "Hausverwaltung Berg", "Meridian Bank"}
+	seedTypes          = []string{"Invoice", "Letter", "Contract", "Statement"}
 )
+
+// bulkBatch is how many documents share bulkWord: more than one page of the
+// list (the web UI loads 50), so that "Select all matches of this search"
+// is offered.
+const (
+	bulkBatch = 52
+	bulkWord  = "bulkbatch"
+	pairWord  = "bulkpair"
+)
+
+// workDocs are the documents the end-to-end specs of bulk edit, trash and
+// metadata change. Each spec has its own, so that no spec depends on
+// another or changes what the rest of the suite looks at. They are
+// imported before all others and dated early, so that the list (newest
+// added first) shows them last: the first page is still demo's own
+// documents. web/e2e/demo.ts names them (seed.bulkPair, seed.trashUndo…);
+// trashAgain's lines are repeated there to build the same file.
+func workDocs() []seedDoc {
+	docs := make([]seedDoc, 0, bulkBatch+8)
+	for i := 1; i <= bulkBatch; i++ {
+		docs = append(docs, seedDoc{
+			owner: "demo", title: fmt.Sprintf("Bulk batch %02d", i), date: "2023-03-01", word: bulkWord,
+			pages: [][]string{{"Sample for the bulk edit", fmt.Sprintf("Number %02d of the batch.", i)}},
+		})
+	}
+	return append(docs,
+		seedDoc{
+			owner: "demo", title: "Bulk pair one", date: "2023-02-01", word: pairWord,
+			pages: [][]string{{"First of two documents", "They are changed together."}},
+		},
+		seedDoc{
+			owner: "demo", title: "Bulk pair two", date: "2023-02-02", word: pairWord,
+			pages: [][]string{{"Second of two documents", "They are changed together."}},
+		},
+		seedDoc{
+			owner: "demo", title: "Trash flow undo", date: "2023-01-03", word: "trashundo",
+			pages: [][]string{{"Moved to the trash and back", "Undo, then the trash view."}},
+		},
+		seedDoc{
+			owner: "demo", title: "Trash flow purge", date: "2023-01-02", word: "trashpurge",
+			pages: [][]string{{"Moved to the trash and removed", "Deleted permanently."}},
+		},
+		seedDoc{
+			owner: "demo", title: "Trash flow upload again", date: "2023-01-01", word: "trashagain",
+			pages: [][]string{{"Moved to the trash, then uploaded again", "The same file."}},
+		},
+		seedDoc{
+			owner: "demo", title: "Metadata sample", date: "2022-12-01", word: "metasample",
+			pages: [][]string{{"Gets a new tag, correspondent and type", "The metadata page changes them."}},
+		},
+	)
+}
 
 // seedDocs are imported in this order; the list shows the newest first.
 var seedDocs = []seedDoc{
@@ -155,7 +212,7 @@ func seed(ctx context.Context, st *store.Store, blobs *blobstore.Store, ids map[
 	if err != nil {
 		return err
 	}
-	for _, d := range seedDocs {
+	for _, d := range append(workDocs(), seedDocs...) {
 		pages := make([][]string, len(d.pages))
 		copy(pages, d.pages)
 		pages[0] = append(append([]string{}, d.pages[0]...), "Reference word: "+d.word)

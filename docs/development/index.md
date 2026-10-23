@@ -83,7 +83,9 @@ Keep it that way instead of adding exceptions.
 
 `web/e2e/` holds browser tests of the main flows (Playwright, Chromium):
 login and the 2FA and password guards, upload and processing, search,
-the document detail, the profile, and the phone layout. They run against
+the document detail, the profile, the phone layout, bulk edit, the trash,
+saved views, the metadata page and the admin pages (users, log, everyone's
+documents). They run against
 the demo server `tools/demo`, which creates a database of its own next to
 the one in `DEMO_DATABASE_URL` (the user needs `CREATEDB`), adds made-up
 users and generated documents, processes them with stand-in tools (no
@@ -106,6 +108,11 @@ name `demo`, whose password and TOTP secret are in `tools/demo/main.go`.
   Content Security Policy violation and a request to any other host (which
   is aborted). A test that provokes an error answer on purpose declares it
   with `guards.allowHTTPError(path, status)`.
+- **Own data.** One demo serves all specs, one test at a time, so a spec
+  that changes documents has its own: seed documents of `workDocs` in
+  `tools/demo/seed.go` (`work` in `web/e2e/demo.ts`), found by a search for
+  their word, and names it creates with `unique()`. The specs do not depend
+  on each other's order.
 - **No network, no real data.** The tests upload only PDFs they generate
   (`web/e2e/pdf.ts`, the same writer as the demo's) and log in only with the
   demo's public logins.

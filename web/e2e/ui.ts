@@ -2,7 +2,7 @@
 // these helpers, by role, label and text only (no CSS classes, element
 // types or structure), so a rewrite of the UI (#150, Carbon) changes these
 // helpers and the accessible names it renames, not the specs.
-import type { Dialog, Locator, Page } from "@playwright/test";
+import { expect, type Dialog, type Locator, type Page } from "@playwright/test";
 
 /** The documents of the list, a list named by the list's heading ("All documents", "Search results", a tag's name…). */
 export function documentList(page: Page, name: string | RegExp = "All documents"): Locator {
@@ -58,11 +58,14 @@ export function navigation(page: Page): Locator {
   return page.getByRole("navigation", { name: "Navigation" });
 }
 
-/** A tag's entry in the navigation: its name, then its count. */
-export function tagEntry(nav: Locator, name: string): Locator {
+/** A list's entry in the navigation ("All documents", "Trash", a tag, a correspondent or a type): its name, then its count. */
+export function listEntry(nav: Locator, name: string): Locator {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return nav.getByRole("button", { name: new RegExp(`^${escaped}(?: \\d+)?$`) });
 }
+
+/** A tag's entry in the navigation: its name, then its count. */
+export const tagEntry = listEntry;
 
 /** The phone's menu button. */
 export function menuButton(page: Page): Locator {
@@ -142,11 +145,12 @@ export function pdfPage(page: Page, n: number): Locator {
  * - an in-DOM confirmation, when confirm names its button: a Sheet
  *   ("Delete permanently") or an inline panel (role="group", the admin's
  *   "Reset password"). The button is found by its name only, without
- *   assuming a dialog role.
+ *   assuming a dialog role. When the page has another button of that name
+ *   (the one that asked), confirm is the button itself, as a Locator.
  * It fails when no confirmation shows. #150's Carbon modals change only
  * this helper.
  */
-export async function confirmDialog(page: Page, action: () => Promise<void>, confirm?: string | RegExp): Promise<void> {
+export async function confirmDialog(page: Page, action: () => Promise<void>, confirm?: string | RegExp | Locator): Promise<void> {
   let native = false;
   const accept = (d: Dialog) => {
     native = true;
@@ -160,7 +164,8 @@ export async function confirmDialog(page: Page, action: () => Promise<void>, con
   }
   if (native) return;
   if (confirm === undefined) throw new Error("confirmDialog: no confirmation was shown");
-  await page.getByRole("button", { name: confirm, exact: true }).click();
+  const button = typeof confirm === "string" || confirm instanceof RegExp ? page.getByRole("button", { name: confirm, exact: true }) : confirm;
+  await button.click();
 }
 
 /** The theme switch: named after the theme it switches to. */
@@ -192,4 +197,117 @@ export async function logInThroughForm(page: Page, name: string, password: strin
   await page.getByLabel("User name").fill(name);
   await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Log in", exact: true }).click();
+}
+
+/**
+ * A sheet by its title: today a native <dialog> opened with showModal
+ * (bulk edit, the saved views, the metadata page, the permanent delete);
+ * #150's Carbon modals keep the role and the name.
+ */
+export function sheet(page: Page, title: string | RegExp): Locator {
+  return page.getByRole("dialog", { name: title, exact: true });
+}
+
+/** A notice at the bottom of the screen (it has no role: its text is its name). */
+export function notice(page: Page, text: string): Locator {
+  return page.getByText(text, { exact: true });
+}
+
+/** The Undo button of a notice. */
+export function undoButton(page: Page): Locator {
+  return page.getByRole("button", { name: "Undo", exact: true });
+}
+
+/** A document's checkbox in the list. */
+export function selectBox(page: Page, title: string): Locator {
+  return documentRow(page, title).getByRole("checkbox", { name: `Select ${title}`, exact: true });
+}
+
+/** "Select all loaded" above the list. */
+export function selectAllLoaded(page: Page): Locator {
+  return page.getByRole("checkbox", { name: "Select all loaded", exact: true });
+}
+
+/** The bar that changes the checked documents. */
+export function bulkBar(page: Page): Locator {
+  return page.getByRole("region", { name: "Change the selected documents", exact: true });
+}
+
+/** A document's tag chips in its row. */
+export function rowTags(page: Page, title: string): Locator {
+  return documentRow(page, title).getByRole("list", { name: "Tags", exact: true });
+}
+
+/** Creates name (it must not exist yet) in the picker labelled label (correspondent, type or tags) and chooses it. */
+export async function createChoice(page: Page, label: string, name: string): Promise<void> {
+  await detailForm(page).getByRole("combobox", { name: label, exact: true }).fill(name);
+  await page.getByRole("option", { name: `Create “${name}”` }).click();
+}
+
+/** Saves the open document's form and waits for "Saved". */
+export async function saveDocument(page: Page): Promise<void> {
+  await detailForm(page).getByRole("button", { name: "Save", exact: true }).click();
+  await expect(detailForm(page).getByRole("status")).toHaveText("Saved");
+}
+
+/** The entry of the "Saved views" list in the navigation. */
+export function savedViewEntry(page: Page, name: string): Locator {
+  return navigation(page).getByRole("list", { name: "Saved views", exact: true }).getByRole("button", { name, exact: true });
+}
+
+/** A page of the navigation ("Log", "Users", "Tags, correspondents & types"). */
+export function pageEntry(page: Page, name: string): Locator {
+  return navigation(page).getByRole("button", { name, exact: true });
+}
+
+/** A tab of the metadata page ("Tags", "Correspondents", "Document types"). */
+export function metadataTab(page: Page, name: string): Locator {
+  return page.getByRole("tab", { name, exact: true });
+}
+
+/**
+ * An entry of the metadata page's list (the list is named after its tab;
+ * the navigation has lists with the same names, so the page's main area).
+ */
+export function metadataRow(page: Page, list: string, name: string): Locator {
+  return page
+    .getByRole("main")
+    .getByRole("list", { name: list, exact: true })
+    .getByRole("listitem")
+    .filter({ has: page.getByRole("button", { name, exact: true }) });
+}
+
+/** A user's card on the users page: the list item that starts with the user's name. */
+export function userRow(page: Page, name: string): Locator {
+  return page
+    .getByRole("main")
+    .getByRole("listitem")
+    .filter({ has: page.getByText(name, { exact: true }) });
+}
+
+/** The panel that asks before a password is reset: an inline group inside the user's card. */
+export function resetPasswordPanel(row: Locator): Locator {
+  return row.getByRole("group").filter({ hasText: "They are logged out everywhere and get a new password from you." });
+}
+
+/** An entry of the log page: a list item of the page's main area. */
+export function logEntries(page: Page): Locator {
+  return page.getByRole("main").getByRole("listitem");
+}
+
+/**
+ * A filter of the log page by its label. The labels wrap their select, so
+ * the accessible name continues with the select's options: the name is
+ * matched from its start.
+ */
+export function logFilter(page: Page, label: string): Locator {
+  return page.getByRole("combobox", { name: new RegExp(`^${label}\\b`) });
+}
+
+/**
+ * The banner of a document in the trash: a region named "Trash" inside the
+ * document's detail (the list's own region has the same name).
+ */
+export function trashBanner(page: Page, title: string): Locator {
+  return detail(page, title).getByRole("region", { name: "Trash", exact: true });
 }

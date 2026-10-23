@@ -78,6 +78,9 @@ var (
 		{name: "max", password: "max-password"}, //nolint:gosec // public demo login
 		// The password change test.
 		{name: "ida", password: "ida-password"}, //nolint:gosec // public demo login
+		// The admin page's reset of 2FA; its setup was confirmed with a
+		// code from an hour ago, like kim's.
+		{name: "eli", password: "eli-password", totp: "MFRGGZDFMZTWQ2LKNNWG23TPOBYXE43U", totpAt: -time.Hour}, //nolint:gosec // public demo login
 	}
 )
 
