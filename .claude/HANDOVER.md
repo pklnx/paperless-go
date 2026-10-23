@@ -3,14 +3,12 @@
 State of the work for the next session. Update before a session ends.
 
 ## Open PRs
-- #120 (#114, #56 part 1: search vocabulary, migration 00018): both reviews approved on `2dae88a` (CI green there); three small fixes pushed after the reviews (`ec7d361`: lock order, pg_trgm hint, cost wording), not re-reviewed; confirm CI on the current head before the merge. **Do not merge before the maintainer decides on the two missed plan thresholds** (bulk generation 3.4× vs ≤ 1.5×, vocabulary 26 % vs ≤ 20 %; real `import` 2.2×, single writes +7–12 ms p95). Both reviewers recommend accepting; options in the PR body. Then #115 (part 2).
 - #100 (#92, iPhone guide): approved; waits for the maintainer's device checks listed in the PR body (raw bytes vs multipart is the key one). Don't merge before.
 
 ## Next tickets
-- #115 (#56 part 2, compound expansion) after #120; plan review must-do 8 belongs to it.
-- #121 (`pg_restore --clean` fails on audit-log partitions, pre-existing): needs a plan.
-- Backlog (step numbers as in #100's roadmap, valid once #100 merges; main and the bodies of #8–#12 still use the old numbers): roadmap 9 archive import/export (#10), 10 automatic assignment (#8), 11 external OCR/classification (#9), 12 deadlines (#11), 13 notes/saved views/trash (#12), 14 native iPhone app in its own repository (later); #21 (transfer a user's data).
-- No release: the maintainer said "noch nicht" (2026-10-22); ask before running the release workflow. #117 (pool exhaustion) was the known blocker before a release and is done.
+- The first release (vYY.MM-N via Actions → Release) waits for the maintainer's explicit OK (#120 and #115 are merged); ask before running the release workflow.
+- Follow-up ticket: a search time limit for the bulk match (`MatchDocumentIDs`), which runs under the owner lock (maintainer: after the release).
+- Backlog (step numbers as in #100's roadmap, valid once #100 merges; main and the bodies of #8–#11 still use the old numbers): roadmap 9 archive import/export (#10), 10 automatic assignment (#8), 11 external OCR/classification (#9), 12 deadlines (#11), 14 native iPhone app in its own repository (later); #21 (transfer a user's data). #12 (notes, saved views, trash) is done.
 
 ## Maintainer decisions (2026-10-21)
 - Owner per document; tags, correspondents, document types and saved views per owner.
@@ -47,6 +45,17 @@ State of the work for the next session. Update before a session ends.
 - #117: 15 s bound for API requests, `Retry-After: 5`; background writers unbounded; no separate pool; gate per process (comment on #117).
 - Merge order kept: #109 → #108 → #117 → #114.
 
+## Maintainer decisions (2026-10-23)
+- #120: the missed plan thresholds are accepted. The night's coordinator decisions are confirmed.
+- #12 trash: not in normal search, only in the trash view. A duplicate of a trashed file (consume, import and upload-only keys) restores it automatically. Retention 30 days, configurable (`PAPERLESS_GO_TRASH_RETENTION`, default 720h). A single delete has an undo notice, no dialog. Emptying a trash over 5 000 documents: a hint, delete in parts.
+- Notes autolinks like the app; bare domains without `www` are not linked; `&amp;` in URLs is decoded after the check.
+- #115: a cap of about 250 compounds per search and a 30 s limit answering "search too broad"; stem prefixes stay off; the 32-word AND case (about 3.3 s, the parser's maximum) is accepted; a time limit for the bulk match is a follow-up.
+- Release after #120/#115 only with the maintainer's explicit OK.
+
+## Done (2026-10-23)
+- #118 (#117), #119, #120 (#114), #122, #123 (#121 `./pgo restore`), #129 (#128 Markdown notes), #130 (smoke cleanup), #132 (#124 trash store/API), #133 (#131 autolinks), #135 (#126 trash UI), #136 (#125 blob removal, `./pgo sweep`), #139 (#127 saved views), #141 (#137 flaky test), #144 (#134), #145 (#142), #146 (#138), #147 (#143), #140 (#115; #56 closed).
+- #12 closed (all 5 parts).
+
 ## Done (night 2026-10-22/23)
 - #109 (#105), #116 (#108, #102 closed: per-owner advisory lock, 0 deadlocks in S1–S3), #118 (#117: per-owner in-process gate + bounded wait), #119 (flaky DocumentList poll test).
 
@@ -72,3 +81,5 @@ State of the work for the next session. Update before a session ends.
 - PostgreSQL 17 or newer is required (#66). The cloud sandbox's local PostgreSQL is 16 and can no longer run the store tests: start `dockerd` and run `postgres:18` (Docker Hub rate-limits; `mirror.gcr.io/library/postgres:18` works), then point `TEST_DATABASE_URL` at it.
 - Cloud sessions have no `gh`; the coordinator subscribes to PR activity and arms one safety check-in.
 - Web: use `pnpm` in `web/`; never `npx prettier` or `tsc -b` (they rewrite or emit files).
+- The container can restart: docker stops (start `dockerd` again), /var/tmp worktrees survive.
+- Docker Hub can answer 500 on image pulls in CI (seen 2026-10-23 on main, compose job); rerun only per the flaky-test rule.
