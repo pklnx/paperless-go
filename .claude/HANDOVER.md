@@ -3,7 +3,7 @@
 State of the work for the next session. Update before a session ends.
 
 ## Open PRs
-- #120 (#114, #56 part 1: search vocabulary, migration 00018): both reviews approved (A, B), CI green, three small fixes pushed after the reviews (`ec7d361`). **Do not merge before the maintainer decides on the two missed plan thresholds** (bulk generation 3.4× vs ≤ 1.5×, vocabulary 26 % vs ≤ 20 %; real `import` 2.2×, single writes +7–12 ms p95). Both reviewers recommend accepting; options in the PR body. Then #115 (part 2).
+- #120 (#114, #56 part 1: search vocabulary, migration 00018): both reviews approved on `2dae88a` (CI green there); three small fixes pushed after the reviews (`ec7d361`: lock order, pg_trgm hint, cost wording), not re-reviewed; confirm CI on the current head before the merge. **Do not merge before the maintainer decides on the two missed plan thresholds** (bulk generation 3.4× vs ≤ 1.5×, vocabulary 26 % vs ≤ 20 %; real `import` 2.2×, single writes +7–12 ms p95). Both reviewers recommend accepting; options in the PR body. Then #115 (part 2).
 - #100 (#92, iPhone guide): approved; waits for the maintainer's device checks listed in the PR body (raw bytes vs multipart is the key one). Don't merge before.
 
 ## Next tickets
