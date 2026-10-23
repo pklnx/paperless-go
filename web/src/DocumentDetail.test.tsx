@@ -289,6 +289,8 @@ describe("viewer", () => {
     serve(doc("d1", "A"));
     await openAt("/?doc=d1");
     await waitFor(() => expect(screen.getAllByRole("group", { name: /^Page|^Seite/ })).toHaveLength(5));
+    // The pages render before the viewer's effect observes them: wait for the observer too.
+    await waitFor(() => expect(viewerIO()?.els).toHaveLength(5));
     expect(pdf.renders).toEqual([]);
     act(() => viewerIO().show(2, 3));
     await waitFor(() => expect([...new Set(pdf.renders)].sort()).toEqual([2, 3]));
