@@ -109,7 +109,9 @@ queues the files once:
   older document, and files no document names that were written in
   between (left by a failed upload) count as newer until the next change.
 - A file left by an upload or a processing job that failed after the last
-  document change. Then put back the data directory of the same backup. If the
+  document change.
+
+Otherwise put back the data directory of the same backup. If the
 files are really not needed (you restored on purpose and want the newer
 documents gone), `./pgo sweep --force` queues them once. The check only
 keeps files, it never removes one, and it is not watertight: once the
