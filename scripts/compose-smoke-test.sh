@@ -44,6 +44,9 @@ cleanup() {
 	if [ -n "${oneoff:-}" ]; then
 		docker rm -f "$oneoff" >/dev/null 2>&1 || true
 	fi
+	# Stop the app first: a running web server's worker can still write under
+	# /data/work as the container's user while it is removed, and rm below fails.
+	docker compose --progress quiet stop >/dev/null 2>&1 || true
 	in_data 'rm -rf /data/* /data/.[!.]* /consume/* /consume/.[!.]*' >/dev/null 2>&1 || true
 	docker compose --progress quiet down -v >/dev/null 2>&1 || true
 	rm -f .env
@@ -222,7 +225,7 @@ chmod -R a+rX "$work/scans"
 expect "$work/out" 'sub/smoke.pdf: would import'
 ./pgo import "$work/scans" | tee "$work/out"
 expect "$work/out" 'sub/smoke.pdf: imported'
-expect "$work/out" 'imported: 1, duplicates: 0, failed: 0'
+expect "$work/out" 'imported: 1, duplicates: 0, restored: 0, failed: 0'
 ./pgo import "$work/scans" | tee "$work/out"
 expect "$work/out" 'sub/smoke.pdf: duplicate'
 if ./pgo import "$work/scans/sub/smoke.pdf" > "$work/out" 2>&1; then

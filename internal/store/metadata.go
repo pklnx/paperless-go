@@ -764,14 +764,18 @@ func (s *Store) ListTagsWithCounts(ctx context.Context, sc Scope) ([]TagCount, e
 // DocumentCounts are the numbers of the scope's documents for the sidebar.
 type DocumentCounts struct {
 	Inbox, Favorites, Total int64
+	// Trash counts the trashed documents not yet due for purge; the
+	// others count live documents only.
+	Trash int64
 }
 
-// CountDocuments counts the scope's documents: in the inbox, favourites
-// and all.
+// CountDocuments counts the scope's documents: in the inbox, favourites,
+// all live ones and the trash.
 func (s *Store) CountDocuments(ctx context.Context, sc Scope) (DocumentCounts, error) {
-	r, err := s.q.DocumentCounts(ctx, sc.owner())
+	now, ret := s.trashClock()
+	r, err := s.q.DocumentCounts(ctx, db.DocumentCountsParams{Owner: sc.owner(), Now: now, RetentionUs: ret.Microseconds()})
 	if err != nil {
 		return DocumentCounts{}, err
 	}
-	return DocumentCounts{Inbox: r.Inbox, Favorites: r.Favorites, Total: r.Total}, nil
+	return DocumentCounts{Inbox: r.Inbox, Favorites: r.Favorites, Total: r.Total, Trash: r.Trash}, nil
 }

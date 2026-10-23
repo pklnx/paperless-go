@@ -10,11 +10,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/pklnx/paperless-go/internal/blobstore"
 	"github.com/pklnx/paperless-go/internal/config"
+	"github.com/pklnx/paperless-go/internal/ingest"
 	"github.com/pklnx/paperless-go/internal/store"
 	"github.com/pklnx/paperless-go/internal/store/storetest"
 )
@@ -89,7 +93,7 @@ func TestImportCommand(t *testing.T) {
 		"sub/deep/b.pdf: imported\n",
 		"sub/copy-of-a.pdf: duplicate of \"a\"\n",
 		"notes.txt: failed: unsupported file type",
-		"imported: 3, duplicates: 1, failed: 1\n",
+		"imported: 3, duplicates: 1, restored: 0, failed: 1\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
@@ -111,7 +115,7 @@ func TestImportCommand(t *testing.T) {
 	if !errors.As(err, &ee) {
 		t.Fatalf("second run: %v", err)
 	}
-	if !strings.Contains(out, "imported: 0, duplicates: 4, failed: 1\n") || strings.Contains(out, ": imported") {
+	if !strings.Contains(out, "imported: 0, duplicates: 4, restored: 0, failed: 1\n") || strings.Contains(out, ": imported") {
 		t.Errorf("second run:\n%s", out)
 	}
 	if n := docCount(t, st, alice.ID); n != 3 {
@@ -140,7 +144,7 @@ func TestImportSingleFileAndCleanRun(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, src, "one.pdf", tinyPDF("one"))
 	out, err := run(t, url, "import", filepath.Join(src, "one.pdf"))
-	if err != nil || !strings.Contains(out, "one.pdf: imported\n") || !strings.Contains(out, "imported: 1, duplicates: 0, failed: 0\n") {
+	if err != nil || !strings.Contains(out, "one.pdf: imported\n") || !strings.Contains(out, "imported: 1, duplicates: 0, restored: 0, failed: 0\n") {
 		t.Fatalf("%q, %v", out, err)
 	}
 	if n := docCount(t, st, alice.ID); n != 1 {
@@ -198,7 +202,7 @@ func TestImportDryRunStoresNothing(t *testing.T) {
 	if !errors.As(err, &ee) {
 		t.Fatalf("dry run with a bad file exits 1: %v", err)
 	}
-	for _, want := range []string{"a.pdf: would import\n", "b.png: would import\n", "bad.txt: failed: unsupported file type", "would import: 2, duplicates: 0, failed: 1\n"} {
+	for _, want := range []string{"a.pdf: would import\n", "b.png: would import\n", "bad.txt: failed: unsupported file type", "would import: 2, duplicates: 0, would restore: 0, failed: 1\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}
@@ -218,7 +222,7 @@ func TestImportDryRunStoresNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, err = run(t, url, "import", src, "--dry-run")
-	if err != nil || !strings.Contains(out, "a.pdf: duplicate of \"a\"\n") || !strings.Contains(out, "would import: 0, duplicates: 2, failed: 0") {
+	if err != nil || !strings.Contains(out, "a.pdf: duplicate of \"a\"\n") || !strings.Contains(out, "would import: 0, duplicates: 2, would restore: 0, failed: 0") {
 		t.Errorf("%q, %v", out, err)
 	}
 }
@@ -302,5 +306,126 @@ func TestImportInterruptedKeepsAuditEntry(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no document.import entry for the interrupted run")
+	}
+}
+
+// A file whose document is in the trash restores it, audited with via
+// import, and the dry run says it would; one whose document is due for
+// purge (here through PAPERLESS_GO_TRASH_RETENTION=0, which every command
+// reads) fails, to be imported again later, and restores nothing.
+func TestImportRestoresTrashedDocument(t *testing.T) {
+	st, url := importEnv(t)
+	ctx := context.Background()
+	alice := storetest.User(t, st, "alice", false)
+	src := t.TempDir()
+	writeFile(t, src, "a.pdf", tinyPDF("a"))
+	if _, err := run(t, url, "import", src); err != nil {
+		t.Fatal(err)
+	}
+	docs, err := st.ListDocuments(ctx, store.Scope{UserID: alice.ID})
+	if err != nil || len(docs) != 1 {
+		t.Fatalf("documents: %v, %v", docs, err)
+	}
+	id := docs[0].ID
+	if err := st.TrashDocument(ctx, store.Scope{UserID: alice.ID}, id); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, url, "import", src, "--dry-run")
+	if err != nil || !strings.Contains(out, "a.pdf: would restore \"a\" from the trash\n") ||
+		!strings.Contains(out, "would import: 0, duplicates: 0, would restore: 1, failed: 0\n") {
+		t.Fatalf("dry run: %v\n%s", err, out)
+	}
+	if d, err := st.GetDocument(ctx, store.Scope{UserID: alice.ID}, id); err != nil || d.DeletedAt == nil {
+		t.Fatalf("restored by the dry run: %+v, %v", d, err)
+	}
+
+	// In the trash with retention 0: due at once, not restored.
+	t.Setenv(config.EnvTrashRetention, "0")
+	out, err = run(t, url, "import", src)
+	var ee *exitError
+	if !errors.As(err, &ee) || !strings.Contains(out, "a.pdf: failed: the existing document is being removed permanently") {
+		t.Fatalf("due: %v\n%s", err, out)
+	}
+	t.Setenv(config.EnvTrashRetention, "")
+	out, err = run(t, url, "import", src)
+	if err != nil || !strings.Contains(out, "a.pdf: restored \"a\" from the trash\n") ||
+		!strings.Contains(out, "imported: 0, duplicates: 0, restored: 1, failed: 0\n") {
+		t.Fatalf("restore: %v\n%s", err, out)
+	}
+	if d, err := st.GetDocument(ctx, store.Scope{UserID: alice.ID}, id); err != nil || d.DeletedAt != nil {
+		t.Errorf("after the import: %+v, %v", d, err)
+	}
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	var actor, target string
+	var details, summary map[string]any
+	if err := conn.QueryRow(ctx, `SELECT actor, target_id, details FROM audit_log WHERE action = 'document.restore'`).Scan(&actor, &target, &details); err != nil {
+		t.Fatal(err)
+	}
+	if actor != store.ActorCLI || target != id || details["via"] != "import" || details["operator"] != "patrick" {
+		t.Errorf("restore entry: %s %s %v", actor, target, details)
+	}
+	if err := conn.QueryRow(ctx, `SELECT details FROM audit_log WHERE action = 'document.import' ORDER BY id DESC LIMIT 1`).Scan(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary["restored"] != float64(1) || summary["imported"] != float64(0) {
+		t.Errorf("summary: %v", summary)
+	}
+}
+
+// A document that becomes due for purge between the duplicate check and
+// the restore (the store's clock passes the retention between the two
+// decisions) fails the file, which a later run imports as new; it is not
+// counted as restored, and nothing is restored.
+func TestImportRestoreOfDocumentDueMeanwhile(t *testing.T) {
+	st, _ := importEnv(t)
+	ctx := context.Background()
+	alice := storetest.User(t, st, "alice", false)
+	var calls atomic.Int32
+	jumpAfter := int32(1 << 30)
+	st.Now = func() time.Time {
+		if calls.Add(1) > jumpAfter {
+			return time.Now().Add(store.DefaultTrashRetention + time.Hour)
+		}
+		return time.Now()
+	}
+	blobs, err := blobstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	im, err := ingest.New(st, blobs, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	m := &importer{
+		ctx: ctx, out: &out, st: st, im: im, owner: alice, maxSize: 1 << 20,
+		entry: func(action string) *store.AuditEntry { return &store.AuditEntry{Actor: store.ActorCLI, Action: action} },
+	}
+	src := t.TempDir()
+	writeFile(t, src, "a.pdf", tinyPDF("a"))
+	m.file(filepath.Join(src, "a.pdf"), "a.pdf", "a.pdf")
+	docs, err := st.ListDocuments(ctx, store.Scope{UserID: alice.ID})
+	if err != nil || len(docs) != 1 {
+		t.Fatalf("documents: %v, %v", docs, err)
+	}
+	if err := st.TrashDocument(ctx, store.Scope{UserID: alice.ID}, docs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The duplicate check is the first decision; the restore comes after.
+	m.tally, out = importTally{}, bytes.Buffer{}
+	calls.Store(0)
+	jumpAfter = 1
+	m.file(filepath.Join(src, "a.pdf"), "a.pdf", "a.pdf")
+	jumpAfter = 1 << 30
+	if m.tally != (importTally{failed: 1}) || !strings.Contains(out.String(), "a.pdf: failed: the existing document is being removed permanently") {
+		t.Errorf("tally %+v, output:\n%s", m.tally, out.String())
+	}
+	if d, err := st.GetDocument(ctx, store.Scope{UserID: alice.ID}, docs[0].ID); err != nil || d.DeletedAt == nil {
+		t.Errorf("document: %+v, %v", d, err)
 	}
 }

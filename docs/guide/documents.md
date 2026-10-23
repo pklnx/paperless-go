@@ -70,6 +70,16 @@ exist yet can be created right there ("Create …").
   (tags you added or removed, on top of the new tags), and you check them
   and save again. Nothing is saved by itself.
 - While a save is running, previous and next wait for it.
+- The notes are shown formatted; **Edit** opens them as text, **Preview**
+  shows the text as edited (empty notes open as text). They use the same
+  Markdown as the app, so a note looks the same in both: headings (`#` to
+  `###`), lists with `-`, `*`, `+` or `1.` (indent by two spaces or a tab
+  per level), read-only tasks `- [ ]` and `- [x]`, quotes `>`, code
+  between ```` ``` ```` or `~~~` lines, rules `---`, `**bold**`, `*italic*`,
+  `~~struck~~`, `` `code` ``, and links `[text](https://…)`. A line break
+  stays a line break. Links open in a new tab and work only for `http`,
+  `https`, `mailto` and `tel` addresses; any other link shows its text.
+  Everything else, HTML included, shows as you typed it.
 - Leaving a document with unsaved changes (another document, Back, logging
   out, closing the tab) asks first.
 
@@ -120,7 +130,13 @@ a correspondent or a type needs documents of a single user. The bar says
 so before anything is sent: "Tags…" explains the rule, and
 "Correspondent…" and "Type…" offer only removing.
 
-Documents cannot be deleted yet: that comes with the trash.
+The web UI cannot delete documents yet; it gets the trash with #12. The
+API already moves a document to the trash (`DELETE
+/api/documents/{id}`), where it stays for 30 days
+(`PAPERLESS_GO_TRASH_RETENTION`) before it is removed for good: the trash
+is `GET /api/documents?trashed=true`, and a document comes back with
+`POST /api/documents/{id}/restore`. A document in the trash is in no list,
+search or count, but its archive serial number stays taken.
 
 ## Tags, correspondents and types
 

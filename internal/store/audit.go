@@ -30,8 +30,8 @@ const (
 	ActorSystem = "system"
 )
 
-// What an audit entry is about. Documents, tags, correspondents and
-// document types are named by their UUID.
+// What an audit entry is about. Documents, tags, correspondents, document
+// types and saved views are named by their UUID.
 const (
 	TargetDocument      = "document"
 	TargetUser          = "user"
@@ -39,6 +39,7 @@ const (
 	TargetTag           = "tag"
 	TargetCorrespondent = "correspondent"
 	TargetDocumentType  = "document_type"
+	TargetSavedView     = "saved_view" // from 00020 (#12, part 4 writes it)
 )
 
 // ErrAuditUnavailable wraps every failure to write an audit entry. Whatever

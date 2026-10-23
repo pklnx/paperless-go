@@ -134,7 +134,7 @@ LIMIT 1;
 SELECT c.id, c.owner_id, c.name, c.match_text, c.match_mode, c.created_at, c.modified_at,
        count(d.id)::bigint AS document_count
 FROM correspondents c
-LEFT JOIN documents d ON d.correspondent_id = c.id
+LEFT JOIN documents d ON d.correspondent_id = c.id AND d.deleted_at IS NULL
 WHERE sqlc.narg(owner)::bigint IS NULL OR c.owner_id = sqlc.narg(owner)
 GROUP BY c.id
 ORDER BY c.owner_id, lower(c.name), c.id;
@@ -143,14 +143,15 @@ ORDER BY c.owner_id, lower(c.name), c.id;
 SELECT t.id, t.owner_id, t.name, t.symbol, t.match_text, t.match_mode, t.created_at, t.modified_at,
        count(d.id)::bigint AS document_count
 FROM document_types t
-LEFT JOIN documents d ON d.document_type_id = t.id
+LEFT JOIN documents d ON d.document_type_id = t.id AND d.deleted_at IS NULL
 WHERE sqlc.narg(owner)::bigint IS NULL OR t.owner_id = sqlc.narg(owner)
 GROUP BY t.id
 ORDER BY t.owner_id, lower(t.name), t.id;
 
 -- ListTagsWithCounts counts per tag its own documents (document_count) and
 -- the distinct documents of the tag and its descendants (subtree_count),
--- which is what a tag filter (SearchTagIDs) lists.
+-- which is what a tag filter (SearchTagIDs) lists. Like the other counts
+-- it leaves trashed documents out.
 -- name: ListTagsWithCounts :many
 WITH RECURSIVE scoped AS (
     SELECT tags.id FROM tags
@@ -161,11 +162,13 @@ WITH RECURSIVE scoped AS (
     SELECT subtree.root, c.id FROM subtree JOIN tags c ON c.parent_id = subtree.id
 ), own AS (
     SELECT dt.tag_id, count(*) AS n FROM document_tags dt
+    JOIN documents d ON d.id = dt.document_id AND d.deleted_at IS NULL
     WHERE dt.tag_id IN (SELECT scoped.id FROM scoped)
     GROUP BY dt.tag_id
 ), deep AS (
     SELECT subtree.root, count(DISTINCT dt.document_id) AS n
     FROM subtree JOIN document_tags dt ON dt.tag_id = subtree.id
+    JOIN documents d ON d.id = dt.document_id AND d.deleted_at IS NULL
     GROUP BY subtree.root
 )
 SELECT t.id, t.owner_id, t.name, t.color_hex, t.symbol, t.parent_id, t.match_text, t.match_mode,
@@ -178,8 +181,13 @@ LEFT JOIN deep ON deep.root = t.id
 ORDER BY t.owner_id, lower(t.name), t.id;
 
 -- name: DocumentCounts :one
-SELECT count(*) FILTER (WHERE is_inbox)::bigint AS inbox,
-       count(*) FILTER (WHERE is_favorite)::bigint AS favorites,
-       count(*)::bigint AS total
+-- The live documents' counts, and the trash: trashed documents not yet
+-- due for purge (store.trashDue).
+SELECT count(*) FILTER (WHERE deleted_at IS NULL AND is_inbox)::bigint AS inbox,
+       count(*) FILTER (WHERE deleted_at IS NULL AND is_favorite)::bigint AS favorites,
+       count(*) FILTER (WHERE deleted_at IS NULL)::bigint AS total,
+       count(*) FILTER (WHERE deleted_at IS NOT NULL
+                        AND coalesce(purge_at, deleted_at + sqlc.arg(retention_us)::bigint * interval '1 microsecond')
+                            > sqlc.arg(now)::timestamptz)::bigint AS trash
 FROM documents
 WHERE sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner);
