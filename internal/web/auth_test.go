@@ -91,7 +91,23 @@ func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 // for the store (storetest.NewWithParams), such as pool_max_conns.
 func newAuthFixtureDB(t *testing.T, opts Options, params map[string]string) *authFixture {
 	t.Helper()
-	st, dbURL := storetest.NewWithParams(t, params)
+	return newAuthFixtureBlobs(t, opts, params, false)
+}
+
+// newAuthFixtureBlobs is newAuthFixtureDB whose store, with checkBlobs,
+// checks the files of the server's blob store (store.Blobs) instead of
+// taking every hash as stored: for the tests of the file removal.
+func newAuthFixtureBlobs(t *testing.T, opts Options, params map[string]string, checkBlobs bool) *authFixture {
+	t.Helper()
+	blobs, err := blobstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	so := storetest.Options{Params: params}
+	if checkBlobs {
+		so.Blobs = blobs
+	}
+	st, dbURL := storetest.NewWithOptions(t, so)
 	storeNow := &atomic.Pointer[func() time.Time]{}
 	st.Now = func() time.Time {
 		if f := storeNow.Load(); f != nil {
@@ -101,10 +117,6 @@ func newAuthFixtureDB(t *testing.T, opts Options, params map[string]string) *aut
 	}
 	key := bytes.Repeat([]byte{7}, crypto.KeySize)
 	sealer, err := crypto.NewSealer(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	blobs, err := blobstore.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

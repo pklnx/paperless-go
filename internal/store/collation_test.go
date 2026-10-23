@@ -310,7 +310,7 @@ func TestMigrateRefreshNotOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	u.User = neturl.UserPassword(role, "app")
-	app, err := store.Open(ctx, u.String())
+	app, err := store.Open(ctx, u.String(), storetest.AnyBlob)
 	if err != nil {
 		t.Fatal(err)
 	}

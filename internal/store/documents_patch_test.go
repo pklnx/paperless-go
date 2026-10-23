@@ -552,7 +552,7 @@ func openWith(t *testing.T, dbURL string, params map[string]string) *store.Store
 		q.Set(k, v)
 	}
 	u.RawQuery = strings.ReplaceAll(q.Encode(), "+", "%20")
-	s, err := store.Open(context.Background(), u.String())
+	s, err := store.Open(context.Background(), u.String(), storetest.AnyBlob)
 	if err != nil {
 		t.Fatal(err)
 	}

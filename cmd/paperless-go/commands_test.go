@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/pklnx/paperless-go/internal/blobstore"
 	"github.com/pklnx/paperless-go/internal/config"
 	"github.com/pklnx/paperless-go/internal/store/storetest"
 )
@@ -18,6 +20,10 @@ import (
 func run(t *testing.T, dbURL string, args ...string) (string, error) {
 	t.Helper()
 	t.Setenv(config.EnvDatabaseURL, dbURL)
+	if os.Getenv(config.EnvDataDir) == "" {
+		// migrate binds the data directory: never the package's ./data.
+		t.Setenv(config.EnvDataDir, t.TempDir())
+	}
 	cmd := newRootCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -32,7 +38,7 @@ func TestMigrateCommands(t *testing.T) {
 	ctx := context.Background()
 
 	out, err := run(t, url, "migrate")
-	if err != nil || out != "database schema is up to date\n" {
+	if err != nil || !strings.HasPrefix(out, "database schema is up to date\nbound the data directory ") {
 		t.Fatalf("migrate: %q, %v", out, err)
 	}
 	out, err = run(t, url, "migrate", "status")
@@ -124,8 +130,12 @@ func TestCheckSchemaRefusesStaleIndexCollation(t *testing.T) {
 func TestNewSweeperUsesTheStoresRetention(t *testing.T) {
 	st := storetest.New(t)
 	st.TrashRetention = 3 * time.Hour
-	s, wake, wakeFn := newSweeper(&app{cfg: &config.Config{}, store: st}, slog.New(slog.DiscardHandler))
-	if s.Retention != 3*time.Hour || s.Store == nil {
+	blobs, err := blobstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, wake, wakeFn := newSweeper(&app{cfg: &config.Config{}, store: st}, slog.New(slog.DiscardHandler), blobs)
+	if s.Retention != 3*time.Hour || s.Store == nil || s.Blobs != blobs {
 		t.Errorf("sweeper: %+v", s)
 	}
 	wakeFn()

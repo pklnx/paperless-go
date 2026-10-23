@@ -85,6 +85,9 @@ echo "PAPERLESS_GO_SECRET_KEY=$key" >> .env
 echo "== migrate"
 ./pgo migrate | tee "$work/out"
 expect "$work/out" "applied 00001_initial.sql"
+# The container sees the data directory: migrate binds it to the
+# installation, so the sweep's daily walk may run there.
+expect "$work/out" "^bound the data directory /data to this installation$"
 if [ "$(uname -s)" = Linux ]; then
 	owner=$(in_data 'stat -c %u:%g /data' | tr -d '\r')
 	if [ "$owner" != 65532:65532 ]; then
@@ -272,6 +275,13 @@ expect "$work/out" '^text layer: 0 words$'
 expect "$work/out" 'scan.pdf: imported'
 ./pgo process --until-empty | tee "$work/out"
 expect "$work/out" '^processed: 1, to retry: 0,'
+
+# One pass and one walk, with serve stopped and the queue empty: the data
+# directory is bound (by migrate), so the walk runs.
+echo "== sweep"
+./pgo sweep | tee "$work/out"
+expect "$work/out" '^queue: removed: 0, in use again: 0, failed: 0$'
+expect "$work/out" '^walk: files: [1-9][0-9]*, unreferenced: [0-9]+, queued: [0-9]+, '
 
 echo "== processing status, thumbnail and retry in the API"
 docker compose --progress quiet up -d --wait web
@@ -486,6 +496,10 @@ if grep -q pending "$work/out"; then
 	exit 1
 fi
 expect "$work/out" '00001_initial\.sql +applied'
+# The data directory still belongs to the restored database (the same
+# installation): the sweep's walk accepts it.
+./pgo sweep --dry-run | tee "$work/out"
+expect "$work/out" '^walk: files: [1-9][0-9]*, unreferenced: [0-9]+, would queue: [0-9]+, '
 docker compose --progress quiet up -d --wait web
 WEB_PORT=$(docker compose port web 8080 | sed 's/.*://')
 base="http://localhost:$WEB_PORT"

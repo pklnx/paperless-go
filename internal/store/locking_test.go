@@ -177,6 +177,11 @@ type writerCase struct {
 // empty selection answers before it locks. Every *Store method is either
 // in this table or on the list of non-writers, so a new method must be
 // classified.
+// hashWriterMethods are the store methods that name a hash in documents:
+// each must call holdBlobs before it (TestEveryWriterLocksItsOwner runs
+// every writer of the owner tables, which all hash writers are).
+var hashWriterMethods = map[string]bool{"CreateDocument": true, "CompleteJob": true}
+
 func TestEveryWriterLocksItsOwner(t *testing.T) {
 	st := storetest.New(t)
 	ctx := context.Background()
@@ -356,6 +361,7 @@ func TestEveryWriterLocksItsOwner(t *testing.T) {
 		}
 		var locks, gates [][]int64
 		writes := 0
+		held, hashWrites := false, 0
 		for _, e := range events {
 			if e.Gated != nil {
 				gates = append(gates, e.Gated)
@@ -365,12 +371,30 @@ func TestEveryWriterLocksItsOwner(t *testing.T) {
 				locks = append(locks, e.Owners)
 				continue
 			}
+			if e.Held {
+				held = true
+				continue
+			}
+			if store.IsHashWriterQuery(e.Query) {
+				hashWrites++
+				if !held {
+					t.Errorf("%s: %s names a hash without holding its blob lock", c.name, e.Query)
+				}
+			}
 			if e.Writes {
 				writes++
 				if !e.Locked {
 					t.Errorf("%s: %s ran without the owner lock", c.name, e.Query)
 				}
 			}
+		}
+		// Every writer that names a hash (and only those) holds its blob
+		// locks first (blob_removals.go, holdBlobs).
+		if hashWrites > 0 != hashWriterMethods[c.method] && c.err == nil {
+			t.Errorf("%s: %d hash writes, hash writer %v", c.name, hashWrites, hashWriterMethods[c.method])
+		}
+		if hashWriterMethods[c.method] && c.err == nil && !held {
+			t.Errorf("%s: no blob hold", c.name)
 		}
 		if !reflect.DeepEqual(gates, locks) {
 			t.Errorf("%s: gated %v, locked %v; want the same owners", c.name, gates, locks)
@@ -408,6 +432,9 @@ func TestEveryWriterLocksItsOwner(t *testing.T) {
 		"SchemaVersions", "SearchDocuments", "SetUserAdmin", "SetUserLocked", "SetUserPassword", "StartSession",
 		"TouchAPIKey", "TouchSession", "TwoFactorChallengeUser", "UpdateDeadline", "UpdateSavedView",
 		"VerifyTwoFactorCode",
+		// The file removal (blob_removals.go): blob_removals and reads.
+		"BlobRemovalsDue", "ExclusiveSweep", "FinishBlobRemoval", "RequeueBlobRemoval", "HasDocuments", "MarkBlobRemoval", "QueueUnreferencedBlobs",
+		"UnreferencedBlobs", "WalkCandidates",
 	} {
 		nonWriters[m] = true
 	}

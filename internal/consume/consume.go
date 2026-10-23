@@ -572,6 +572,13 @@ func (c *Consumer) consume(ctx context.Context, ur *os.Root, u *store.User, key 
 			c.purgePending(u, name)
 			return nil
 		}
+		if errors.Is(err, store.ErrBlobRemoved) {
+			// The sweeper removed the stored copy of this file (its last
+			// document was purged); the next scan stores it again.
+			c.log.Info("consume folder: the stored copy of this file was being cleaned up; left for the next scan",
+				"user", u.Name, "file", name)
+			return nil
+		}
 		if body.err != nil {
 			// The file could not be read; the others may well be.
 			c.readError(u, key, fi, body.err)

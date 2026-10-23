@@ -63,6 +63,28 @@ more copy of the database (it prints the size of the current one). If the
 disk fills up during the restore, the restore stops and the old database
 stays in use; PostgreSQL may restart.
 
+**The data directory and the restored database.** The data directory holds
+a marker file, `installation`, with the ID of the installation it belongs
+to (written by `./pgo migrate` into a fresh data directory, or by `./pgo
+sweep --bind`). The daily [file sweep](#file-removal) only removes files
+the database does not name in a data directory whose marker names the
+database's installation. A restore with the data directory of the same
+backup keeps them matching: the dump holds the installation's ID and the
+data directory its marker, so the sweep works as before. A database
+restored into another installation, or a data directory of another one, is
+refused with an error in the log, and nothing is removed: neither the
+daily walk nor the per-minute pass touches a data directory whose marker
+names another installation. A data directory
+copied before the marker existed stays unbound (a warning in the log) until
+`./pgo sweep --bind`. So a database restore never removes files of the
+restored state: the walk refuses a data directory that is not the
+installation's, and the per-minute pass removes only files the restored
+database itself queued. Keeping the newer data directory with an older dump
+of the same installation does make the files that only newer documents
+needed unreferenced: the walk queues them (unless they are more than 10 %
+of the files), and they go an hour later. That is why the data directory
+goes back together with the dump, as above.
+
 Move the current data directory aside instead of overwriting it, and keep
 it until the restored server works: going back to the replaced database
 needs the files that belong to it. To go back, stop the web server and
@@ -76,6 +98,48 @@ docker compose exec postgres psql -U paperless -d postgres -v ON_ERROR_STOP=1 -1
 ```
 
 Then move the old data directory back and start the web server.
+
+## File removal
+
+Files are shared: the same file uploaded by two users, or an archive PDF
+that equals its original, is stored once. `serve` removes a file only when
+no document names it any more:
+
+- **Every minute** it removes the files of purged documents, an hour after
+  the purge (so disk space comes back about an hour and a minute after
+  "delete permanently" or the end of the retention), unless a document
+  names them again by then.
+- **Once a day** (and at start) it walks the data directory and queues the
+  files no document names (left by refused uploads, failed imports or a
+  crash), which then go an hour later, and removes temporary files older
+  than a day. Anything it does not recognize (symbolic links, other names)
+  is logged and left alone.
+
+The daily walk refuses, logs an error and removes nothing when the data
+directory is not bound to this installation (see the marker under
+[Restore](#restore)), when the database has no documents but the data
+directory has files, or when it would queue more than 10 % of the files
+(and more than 100). These are the signs of a wrong
+`PAPERLESS_GO_DATABASE_URL`, a restore into the wrong database or a
+reinstall that kept the data directory.
+
+```sh
+./pgo sweep --dry-run   # what one pass and one walk would do
+./pgo sweep             # do it now; files queued now still wait an hour
+./pgo sweep --force     # once, after checking: override the 10 % and empty-database stops
+./pgo sweep --bind      # bind the data directory to this installation (see the upgrade note)
+```
+
+Only one sweep runs at a time: `./pgo sweep` while `serve`'s sweeper is
+busy (for a moment every minute) says "another sweep is running" and exits
+with status 1; run it again. A file that cannot be removed (a read-only or
+failing disk) is logged as an error and tried again an hour later.
+
+An upload of a file whose last document was just purged can meet its file
+being removed: it answers `503` with `Retry-After` (1 second, or up to 6
+minutes while the removal of a sweep that was interrupted is pending), and
+the retry stores the file again. The consume folder and `./pgo import` treat it the same way
+(the file is kept, or reported as failed, for the next run).
 
 ## Upgrades
 
@@ -368,15 +432,14 @@ stays. No document data changes either way.
 
 **Trash (#12, `00020_trash.sql`).** Run `./pgo migrate` before `docker
 compose up -d web`. The migration adds two columns to `documents`, three
-indexes (one on the trash, two on the file hashes for the coming file
+indexes (one on the trash, two on the file hashes for the file
 removal) and the queue table `blob_removals`, and lets the audit log record
 saved views; no row is rewritten. Building the two hash indexes reads the
 documents table once, with writes to it waiting meanwhile (the web server
 does not run while migrations are pending anyway). Deleting a document now moves it to the trash; after
 `PAPERLESS_GO_TRASH_RETENTION` (default 30 days), or at once after "delete
 permanently", `serve` removes the row within a minute and records it in
-the audit log. Its files stay on disk for now; removing them comes with
-the next part of #12 (about an hour after the purge). A user who has
+the audit log; its files go about an hour later (see the next note). A user who has
 documents in the trash cannot be removed until they are purged. An invalid
 `PAPERLESS_GO_TRASH_RETENTION` (negative or unreadable) stops every
 command, not only `serve`: `migrate`, `user`, `import` and the others read
@@ -388,6 +451,28 @@ in every list and search, so empty the trash and let the sweeper finish
 (a minute) before going back if that matters. It forgets the queued file
 removals (the files stay), and works only until the first audit entry
 about a saved view, after which going back needs a backup restore.
+
+**File removal (#12, part 2).** `serve` now removes the files that no
+document names any more: the files of purged documents an hour after the
+purge, and once a day the files the walk of the data directory finds
+unreferenced (see [File removal](#file-removal)). No migration. The walk
+works only in a data directory bound to the installation: `./pgo migrate`
+binds a fresh data directory (one without document files) by writing the
+file `installation` into it, so `migrate` must run with the data directory
+mounted, as `./pgo` does. An existing installation stays unbound, and the
+log warns about it at every start, until you bind it once after checking
+that `DATA_DIR` and the database belong together:
+
+```sh
+./pgo migrate
+./pgo sweep --bind      # needs documents in the database; --force replaces another installation's marker
+docker compose up -d web
+```
+
+While unbound, the files of purged documents are still removed (they are
+known to the database); only the daily walk is off. Back up the data
+directory with the marker, and restore both together (see
+[Restore](#restore)).
 
 ### Versions
 

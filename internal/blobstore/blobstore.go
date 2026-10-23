@@ -295,13 +295,49 @@ func (s *Store) open(rel string) (*os.File, error) {
 
 // Exists reports whether the blob for hash is present on disk. A malformed
 // hash is never present.
-func (s *Store) Exists(hash string) bool {
-	if !IsHash(hash) {
-		return false
-	}
-	_, err := os.Stat(s.abs(relPath(hash)))
-	return err == nil
+func (s *Store) Exists(hash string) bool { return Files{root: s.root}.Exists(hash) }
+
+// Present is Exists that tells a missing blob (false) from a failed
+// lookup (an error, for example a permission or I/O error).
+func (s *Store) Present(hash string) (bool, error) { return Files{root: s.root}.Present(hash) }
+
+// Files looks up a store's blobs by hash without opening the store: no
+// directory is created or synchronized. The metadata store checks with it
+// that a file is still there before a row names it (store.Blobs), in
+// every command, also in those that never write a file.
+type Files struct{ root string }
+
+// OpenFiles returns the lookup of the store rooted at root, the same
+// directory New takes.
+func OpenFiles(root string) Files { return Files{root: root} }
+
+// Exists reports whether the blob for hash is present on disk. A malformed
+// hash is never present; neither is a file that cannot be looked up.
+func (f Files) Exists(hash string) bool {
+	ok, err := f.Present(hash)
+	return ok && err == nil
 }
+
+// Present reports whether the blob for hash is on disk: false only when
+// it does not exist; any other failure of the lookup (permissions, I/O, a
+// file where a directory belongs) is an error. A malformed hash gives
+// ErrNotHash.
+func (f Files) Present(hash string) (bool, error) {
+	if !IsHash(hash) {
+		return false, fmt.Errorf("%w: %q", ErrNotHash, hash)
+	}
+	_, err := os.Stat(filepath.Join(f.root, filepath.FromSlash(relPath(hash))))
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	}
+	return false, err
+}
+
+// Root returns the directory, as passed to OpenFiles.
+func (f Files) Root() string { return f.root }
 
 // Remove deletes the blob for hash and makes the removal durable before
 // it returns nil: it synchronizes the containing directory, also when the
@@ -457,6 +493,26 @@ func (s *Store) walkTemp(fn func(Entry) error) error {
 		if err := fn(e); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ErrNotTemp means a path passed to RemoveTemp is not a temporary file of
+// Put: tmp/put-<name>, without a further slash.
+var ErrNotTemp = errors.New("blobstore: not a temporary file of Put")
+
+// RemoveTemp removes the temporary file rel (as Walk reports it, tmp/put-*)
+// that an unfinished Put left behind; one already gone is fine. It is not
+// made durable: a temporary name is no state anyone depends on. The
+// caller makes sure no Put is still writing it (the sweep removes only
+// names older than a day).
+func (s *Store) RemoveTemp(rel string) error {
+	name, ok := strings.CutPrefix(rel, "tmp/")
+	if !ok || !strings.HasPrefix(name, "put-") || strings.ContainsAny(name, `/\`) || name == "put-" {
+		return fmt.Errorf("%w: %q", ErrNotTemp, rel)
+	}
+	if err := os.Remove(filepath.Join(s.root, "tmp", name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	return nil
 }

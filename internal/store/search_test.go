@@ -845,7 +845,7 @@ func TestSearchTsqueryOncePerSearch(t *testing.T) {
 		END $$`); err != nil {
 		t.Fatal(err)
 	}
-	seq, err := store.Open(ctx, url)
+	seq, err := store.Open(ctx, url, storetest.AnyBlob)
 	if err != nil {
 		t.Fatal(err)
 	}

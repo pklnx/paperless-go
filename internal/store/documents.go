@@ -172,7 +172,9 @@ func (in *NewDocument) validate() error {
 // original file, the error is a *DuplicateError (ErrDuplicate); other
 // owners' documents do not count. A linked tag, correspondent or document
 // type that is not the owner's gives ErrOwnerMismatch; a taken ASN gives
-// ErrASNTaken; an owner that does not exist gives ErrUnknownUser. An entry
+// ErrASNTaken; an owner that does not exist gives ErrUnknownUser; a file
+// (original or archive) that the sweeper is removing, or that is missing,
+// gives ErrBlobRemoved, and storing it again makes the retry work. An entry
 // from WithAudit is written in the same transaction; a document target
 // without an ID gets the new document's. The transaction takes the
 // owner's gate and write lock first (ownerTx).
@@ -202,8 +204,17 @@ func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*
 	}
 
 	var id pgtype.UUID
+	archive := ""
+	if in.ArchiveSHA256 != nil {
+		archive = *in.ArchiveSHA256
+	}
 	err = s.ownerTx(ctx, []int64{owner}, func(ctx context.Context, t *writeTx) error {
 		q := t.q
+		// The files must still be there, and the sweeper must not take
+		// them until this transaction ends (blob_removals.go).
+		if err := s.holdBlobs(ctx, t, in.OriginalSHA256, archive); err != nil {
+			return err
+		}
 		var err error
 		id, err = q.CreateDocument(ctx, db.CreateDocumentParams{
 			OwnerID: owner, Title: in.Title, DocumentDate: date, Notes: in.Notes,
