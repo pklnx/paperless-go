@@ -729,14 +729,19 @@ and thumbnail minutes before `CompleteJob`.
   archive and thumbnail) call `holdBlobs` right after `lockOwners`: the
   shared lock of each hash in ascending key; `DELETE FROM blob_removals …
   RETURNING removed_at` (a row the sweeper marked gives `ErrBlobRemoved`);
-  `Exists` for each hash (a missing file gives `ErrBlobRemoved`). Then the
+  `Present` for each hash (a missing file gives `ErrBlobRemoved`; a lookup
+  that fails otherwise, such as a permission or I/O error, is an error of
+  its own, never taken for a removal). Then the
   row is written. The guard refuses the statements that write a hash
   column (`hashWriterQueries`; unnamed SQL by `writesHashColumns`) unless
   `holdBlobs` ran in the transaction, and `TestEveryWriterLocksItsOwner`
   checks that exactly the hash writers hold. A rolled-back writer (a
   duplicate) rolls its dequeue back too. `ErrBlobRemoved` writes nothing:
-  an upload answers `503` with `Retry-After: 1` ("the file is being
-  cleaned up; try again"), the consume folder leaves the file for the next
+  an upload answers `503` ("the file is being cleaned up; try again") with
+  `Retry-After: 1` for a missing file, and, for a row the sweeper marked,
+  the time until a crashed pass's mark would be taken over (`MarkStale`
+  plus a minute's round, at most 360 s; `store.BlobRemovedError`), the
+  consume folder leaves the file for the next
   scan, `import` reports the file as failed, and the worker's attempt is
   retried. The retry's `Put` publishes a fresh copy.
 - **`Blobs` is required.** `store.Open` takes the blob store's lookup
@@ -815,7 +820,11 @@ and thumbnail minutes before `CompleteJob`.
   documents in the database and `--force` over another installation's
   marker. A `PAPERLESS_GO_DATABASE_URL` typo, a restore into the wrong
   database or a reinstall that kept `DATA_DIR` therefore cannot queue the
-  whole store; the queue pass keeps working while unbound, since it removes
+  whole store. The queue pass checks the marker too, before it removes
+  anything: with another installation's marker (a database URL that points
+  at another installation's database, a wrong dump) it removes nothing,
+  logs an error and returns `ErrOtherInstallation` (`./pgo sweep` exits 1).
+  It keeps working while the data directory is unbound, since it removes
   only what this database queued.
 
 ## Blob durability
@@ -1171,7 +1180,10 @@ another user's document answers `404` and an admin sees all.
   again). A duplicate of a trashed document adds `trashed: true` for a
   caller that may read; for a key without `read` the server restores it
   instead (see [Trash](#trash)); one due for purge answers `503` with
-  `Retry-After: 60`.
+  `Retry-After: 60`. An upload of a file the sweeper is removing answers
+  `503` "the file is being cleaned up; try again", with `Retry-After: 1`
+  when the file is gone (the retry stores it again) and up to 360 while the
+  sweeper's mark is on it (see [Blob removal](#blob-removal)).
 - **`GET /api/documents`** lists and searches the scope's documents
   through `store.SearchDocuments`, without their text, with
   `maxUploadSize` for the UI. Parameters (`listQuery`):

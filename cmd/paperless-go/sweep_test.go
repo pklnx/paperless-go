@@ -212,6 +212,23 @@ func TestSweepCommand(t *testing.T) {
 	if err != nil || !strings.Contains(out, "queue: removed: 1") || blobs.Exists(orphan.SHA256) || !blobs.Exists(kept.SHA256) {
 		t.Fatalf("sweep after the grace: %q, %v", out, err)
 	}
+	// A data directory of another installation: the queue pass removes
+	// nothing and the command exits 1.
+	marker := filepath.Join(dir, sweep.MarkerFile)
+	bound, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("00000000-0000-4000-8000-000000000000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(t, url, "sweep"); err == nil || !strings.Contains(out, "queue: refused: ") ||
+		!strings.Contains(out, "no file was removed") {
+		t.Fatalf("sweep with another installation's marker: %q, %v", out, err)
+	}
+	if err := os.WriteFile(marker, bound, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	// While another sweep holds the sweep lock (store.ExclusiveSweep's
 	// class "pgos"), the command does nothing and says so.
 	if _, err := conn.Exec(context.Background(), `SELECT pg_advisory_lock(1885826931, 0)`); err != nil {

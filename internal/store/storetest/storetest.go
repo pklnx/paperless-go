@@ -51,7 +51,7 @@ var AnyBlob store.Blobs = anyBlob{}
 
 type anyBlob struct{}
 
-func (anyBlob) Exists(string) bool { return true }
+func (anyBlob) Present(string) (bool, error) { return true, nil }
 
 // Options are NewWithOptions' choices.
 type Options struct {

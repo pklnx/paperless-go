@@ -86,6 +86,8 @@ type Sweeper struct {
 	// Test seams (export_test.go): called after step 1 and step 2 of
 	// the queue pass for a hash.
 	afterMark, afterRemove func(hash string)
+	// walkStarted is called when a walk starts (export_test.go).
+	walkStarted func()
 }
 
 // Stats is what one RunOnce did.
@@ -155,7 +157,11 @@ func (s *Sweeper) RunOnce(ctx context.Context) (Stats, error) {
 // no document names, per hash in three steps: mark the row under the
 // hash's exclusive blob lock (store.MarkBlobRemoval; a hash in use loses
 // its row instead), remove the file without a lock held, delete the row.
-// The whole pass holds the sweep lock (store.ExclusiveSweep): while
+// It first checks the data directory's marker: when it names another
+// installation (or cannot be read), the pass removes nothing and returns
+// that error (ErrOtherInstallation); an unbound data directory is fine,
+// since the queue holds only what this database queued. The whole pass
+// holds the sweep lock (store.ExclusiveSweep): while
 // another pass or walk runs, in this or another process, it does nothing
 // and returns store.ErrSweepRunning. A crash after the first step leaves
 // the row marked, and a pass after store.MarkStale takes it again; Remove
@@ -174,6 +180,15 @@ func (s *Sweeper) QueuePass(ctx context.Context, dryRun bool) (QueueStats, error
 
 func (s *Sweeper) queuePass(ctx context.Context, dryRun bool) (QueueStats, error) {
 	var st QueueStats
+	// The data directory must not belong to another installation: this
+	// database's queue names files of its own documents only.
+	inst, err := s.Store.Installation(ctx)
+	if err != nil {
+		return st, err
+	}
+	if err := CheckBinding(s.Blobs.Root(), inst.ID); err != nil && !errors.Is(err, ErrUnbound) {
+		return st, err
+	}
 	now := s.now()
 	hashes, err := s.Store.BlobRemovalsDue(ctx, now, QueueBatch)
 	if err != nil || len(hashes) == 0 {
@@ -275,6 +290,9 @@ func (s *Sweeper) Walk(ctx context.Context, opts WalkOptions) (WalkStats, error)
 
 func (s *Sweeper) walk(ctx context.Context, opts WalkOptions) (WalkStats, error) {
 	var st WalkStats
+	if s.walkStarted != nil {
+		s.walkStarted()
+	}
 	inst, err := s.Store.Installation(ctx)
 	if err != nil {
 		return st, err
@@ -380,6 +398,9 @@ func (s *Sweeper) Run(ctx context.Context, tick <-chan time.Time, wake <-chan st
 			return
 		case errors.Is(err, store.ErrSweepRunning):
 			log.Debug("sweep: another sweep is running; the queue pass waits for the next round")
+		case errors.Is(err, ErrOtherInstallation):
+			log.Error("sweep: the data directory belongs to another installation; no file is removed", "dir", s.Blobs.Root(),
+				"err", err)
 		case err != nil:
 			log.Error("sweep: the round failed; trying again at the next round", "purged", st.Purged,
 				"removed", st.Queue.Removed, "err", err)

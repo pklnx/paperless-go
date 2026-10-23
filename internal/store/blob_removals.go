@@ -165,14 +165,19 @@ func (s *Store) holdBlobs(ctx context.Context, t *writeTx, hashes ...string) err
 		}
 		for _, r := range rows {
 			if r.RemovedAt != nil {
-				return fmt.Errorf("%w: %s", ErrBlobRemoved, r.Sha256)
+				now, _ := s.trashClock()
+				return &BlobRemovedError{Hash: r.Sha256, RetryAfter: markRetryAfter(*r.RemovedAt, now)}
 			}
 		}
 		for _, h := range hs {
 			// One stat per hash: the named exception to "no I/O under
 			// the owner lock" (architecture.md, "Write locking").
-			if !s.blobs.Exists(h) {
-				return fmt.Errorf("%w: %s is missing", ErrBlobRemoved, h)
+			ok, err := s.blobs.Present(h)
+			if err != nil {
+				return fmt.Errorf("store: check the file %s: %w", h, err)
+			}
+			if !ok {
+				return &BlobRemovedError{Hash: h, RetryAfter: time.Second}
 			}
 		}
 	}
@@ -181,6 +186,34 @@ func (s *Store) holdBlobs(ctx context.Context, t *writeTx, hashes ...string) err
 		f()
 	}
 	return nil
+}
+
+// BlobRemovedError is ErrBlobRemoved for one hash, with how long a caller
+// should wait before it tries again: a second when the file is missing
+// (the retry stores it again), or, when the sweeper's mark is on the row,
+// until a pass that crashed after its mark would be taken over
+// (MarkStale) plus one sweep round. A live pass finishes much sooner, but
+// a writer cannot tell the two apart. errors.Is(err, ErrBlobRemoved) holds.
+type BlobRemovedError struct {
+	Hash       string
+	RetryAfter time.Duration
+}
+
+func (e *BlobRemovedError) Error() string {
+	return fmt.Sprintf("%v: %s", ErrBlobRemoved, e.Hash)
+}
+
+// Is makes errors.Is(err, ErrBlobRemoved) hold.
+func (e *BlobRemovedError) Is(target error) bool { return target == ErrBlobRemoved }
+
+// markRound is the longest wait between a stale mark and the pass that
+// takes it over: serve sweeps every minute (sweep.DefaultInterval).
+const markRound = time.Minute
+
+// markRetryAfter is how long a writer that met a mark set at markedAt
+// waits at now: until the mark is stale plus one round, at least a second.
+func markRetryAfter(markedAt, now time.Time) time.Duration {
+	return max(markedAt.Add(MarkStale+markRound).Sub(now), time.Second)
 }
 
 // afterBlobHoldKey carries a test hook (export_test.go) that runs in a

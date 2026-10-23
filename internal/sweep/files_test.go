@@ -689,7 +689,7 @@ func TestRunWalksDaily(t *testing.T) {
 	e := newFileEnv(t)
 	orphan := e.put("orphan")
 	walks := make(chan struct{}, 8)
-	e.sw.Store = &countingStore{Store: e.st, walks: walks}
+	sweep.SetWalkSeam(e.sw, func() { walks <- struct{}{} })
 	tick := make(chan time.Time)
 	ctx, cancel := context.WithCancel(e.ctx)
 	done := make(chan struct{})
@@ -722,13 +722,33 @@ func TestRunWalksDaily(t *testing.T) {
 	}
 }
 
-// countingStore reports the start of each walk (its Installation call).
-type countingStore struct {
-	*store.Store
-	walks chan struct{}
-}
-
-func (c *countingStore) Installation(ctx context.Context) (*store.Installation, error) {
-	c.walks <- struct{}{}
-	return c.Store.Installation(ctx)
+// The queue pass checks the data directory's marker first: with a
+// database of another installation (a wrong PAPERLESS_GO_DATABASE_URL, a
+// dump of another installation) it removes nothing, also in a dry run,
+// though that database queued the hash. An unbound data directory is
+// fine: the queue names only what this database queued.
+func TestQueuePassRefusesAnotherInstallation(t *testing.T) {
+	e := newFileEnv(t)
+	e.bind() // bound to e's installation
+	h := e.put("the real installation's file")
+	other, _ := storetest.NewWithOptions(t, storetest.Options{Blobs: e.blobs})
+	if _, err := other.QueueUnreferencedBlobs(e.ctx, []string{h}, e.now()); err != nil {
+		t.Fatal(err)
+	}
+	sw := &sweep.Sweeper{Store: other, Blobs: e.blobs, Now: e.now}
+	for _, dry := range []bool{true, false} {
+		if q, err := sw.QueuePass(e.ctx, dry); !errors.Is(err, sweep.ErrOtherInstallation) || q != (sweep.QueueStats{}) {
+			t.Fatalf("dry run %v: %+v, %v; want ErrOtherInstallation", dry, q, err)
+		}
+	}
+	if due, err := other.BlobRemovalsDue(e.ctx, e.now(), 10); err != nil || len(due) != 1 || !e.blobs.Exists(h) {
+		t.Fatalf("after the refusal: rows %v, %v, file %v", due, err, e.blobs.Exists(h))
+	}
+	// Unbound, the same pass removes the file this database queued.
+	if err := os.Remove(filepath.Join(e.blobs.Root(), sweep.MarkerFile)); err != nil {
+		t.Fatal(err)
+	}
+	if q, err := sw.QueuePass(e.ctx, false); err != nil || q != (sweep.QueueStats{Removed: 1}) {
+		t.Fatalf("unbound: %+v, %v", q, err)
+	}
 }

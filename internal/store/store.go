@@ -58,10 +58,10 @@ type Store struct {
 }
 
 // Blobs is what the store needs of the blob store: whether the file of a
-// hash is on disk (blobstore.Store.Exists, or blobstore.Files.Exists for a
-// command that only reads).
+// hash is on disk (blobstore.Files.Present or blobstore.Store.Present).
+// An error is a failed lookup (permissions, I/O), not a missing file.
 type Blobs interface {
-	Exists(hash string) bool
+	Present(hash string) (bool, error)
 }
 
 // errNoBlobs refuses a store without its blob store: writers of a hash

@@ -112,7 +112,7 @@ func (f *fakeStore) QueueUnreferencedBlobs(context.Context, []string, time.Time)
 }
 func (f *fakeStore) HasDocuments(context.Context) (bool, error) { return true, nil }
 func (f *fakeStore) Installation(context.Context) (*store.Installation, error) {
-	return nil, errors.New("no installation")
+	return &store.Installation{ID: "00000000-0000-4000-8000-000000000001"}, nil
 }
 
 type syncBuf struct {

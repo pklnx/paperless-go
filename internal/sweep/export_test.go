@@ -5,3 +5,6 @@ package sweep
 func SetQueueSeams(s *Sweeper, afterMark, afterRemove func(hash string)) {
 	s.afterMark, s.afterRemove = afterMark, afterRemove
 }
+
+// SetWalkSeam makes s call started whenever a walk starts.
+func SetWalkSeam(s *Sweeper, started func()) { s.walkStarted = started }

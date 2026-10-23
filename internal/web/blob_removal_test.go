@@ -49,20 +49,22 @@ func uploadAndPurge(t *testing.T, f *authFixture, data []byte) string {
 }
 
 // uploadRemoved uploads data and expects the 503 of a file being cleaned
-// up.
-func uploadRemoved(t *testing.T, f *authFixture, data []byte) {
+// up, with Retry-After retry.
+func uploadRemoved(t *testing.T, f *authFixture, data []byte, retry string) {
 	t.Helper()
 	resp, out := f.upload("/api/documents", "application/pdf", url.PathEscape("again.pdf"), data)
-	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") != "1" ||
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") != retry ||
 		out["error"] != "the file is being cleaned up; try again" {
 		t.Fatalf("upload while the file is removed: %d %v %v", resp.StatusCode, resp.Header, out)
 	}
 }
 
 // An upload of a file whose last document was just purged, while the
-// sweeper's step 1 has marked it (the file still there): 503 with
-// Retry-After: 1 and nothing stored. Once the sweep finished, the retry
-// stores a new copy and succeeds.
+// sweeper's step 1 has marked it (the file still there): 503 and nothing
+// stored. Retry-After covers the time until a crashed pass's mark would
+// be taken over (store.MarkStale plus a minute's round): here the mark is
+// 30 s old, so 330 s. Once the sweep finished, the retry stores a new copy
+// and succeeds.
 func TestUploadWhileTheFileIsMarked(t *testing.T) {
 	f, sw, _ := newBlobFixture(t)
 	ctx := context.Background()
@@ -72,7 +74,8 @@ func TestUploadWhileTheFileIsMarked(t *testing.T) {
 	if m, err := f.st.MarkBlobRemoval(ctx, h, marked); err != nil || m != store.BlobMarked {
 		t.Fatalf("mark: %v, %v", m, err)
 	}
-	uploadRemoved(t, f, data)
+	f.setStoreNow(func() time.Time { return marked.Add(30 * time.Second) })
+	uploadRemoved(t, f, data, "330")
 	if has, err := f.st.HasDocuments(ctx); err != nil || has {
 		t.Fatalf("documents after the refused upload: %v, %v", has, err)
 	}
@@ -80,7 +83,7 @@ func TestUploadWhileTheFileIsMarked(t *testing.T) {
 	if err := f.blobs.Remove(h); err != nil {
 		t.Fatal(err)
 	}
-	uploadRemoved(t, f, data) // between step 2 and 3 as well
+	uploadRemoved(t, f, data, "330") // between step 2 and 3 as well
 	if err := f.st.FinishBlobRemoval(ctx, h, marked); err != nil {
 		t.Fatal(err)
 	}

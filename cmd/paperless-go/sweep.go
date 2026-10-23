@@ -76,6 +76,10 @@ directory has files, or when it would queue more than 10 % of the files.
 			if errors.Is(err, store.ErrSweepRunning) {
 				return errSweepRunning
 			}
+			if errors.Is(err, sweep.ErrOtherInstallation) {
+				fmt.Fprintf(out, "queue: refused: %v; no file was removed. Check %s and the data directory\n", err, config.EnvDatabaseURL)
+				return &exitError{code: 1, msg: "the sweep refused the data directory"}
+			}
 			if err != nil {
 				return err
 			}

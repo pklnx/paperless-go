@@ -602,3 +602,20 @@ func TestMarkBlobRemovalReadCommitted(t *testing.T) {
 		t.Error("the new document's file was removed")
 	}
 }
+
+// failingLookup is a blob store whose lookups fail.
+type failingLookup struct{}
+
+func (failingLookup) Present(string) (bool, error) { return false, errors.New("permission denied") }
+
+// A lookup that fails (permissions, I/O) is an error of its own, not a
+// file being cleaned up: nothing is written, and the caller does not
+// retry as if the sweeper were at work.
+func TestHoldBlobsLookupError(t *testing.T) {
+	st, _ := storetest.NewWithOptions(t, storetest.Options{Blobs: failingLookup{}})
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	_, err := st.CreateDocument(context.Background(), alice, newDoc("x"))
+	if err == nil || errors.Is(err, store.ErrBlobRemoved) || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("create with a failing lookup: %v", err)
+	}
+}

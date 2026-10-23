@@ -297,6 +297,10 @@ func (s *Store) open(rel string) (*os.File, error) {
 // hash is never present.
 func (s *Store) Exists(hash string) bool { return Files{root: s.root}.Exists(hash) }
 
+// Present is Exists that tells a missing blob (false) from a failed
+// lookup (an error, for example a permission or I/O error).
+func (s *Store) Present(hash string) (bool, error) { return Files{root: s.root}.Present(hash) }
+
 // Files looks up a store's blobs by hash without opening the store: no
 // directory is created or synchronized. The metadata store checks with it
 // that a file is still there before a row names it (store.Blobs), in
@@ -310,11 +314,26 @@ func OpenFiles(root string) Files { return Files{root: root} }
 // Exists reports whether the blob for hash is present on disk. A malformed
 // hash is never present; neither is a file that cannot be looked up.
 func (f Files) Exists(hash string) bool {
+	ok, err := f.Present(hash)
+	return ok && err == nil
+}
+
+// Present reports whether the blob for hash is on disk: false only when
+// it does not exist; any other failure of the lookup (permissions, I/O, a
+// file where a directory belongs) is an error. A malformed hash gives
+// ErrNotHash.
+func (f Files) Present(hash string) (bool, error) {
 	if !IsHash(hash) {
-		return false
+		return false, fmt.Errorf("%w: %q", ErrNotHash, hash)
 	}
 	_, err := os.Stat(filepath.Join(f.root, filepath.FromSlash(relPath(hash))))
-	return err == nil
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	}
+	return false, err
 }
 
 // Root returns the directory, as passed to OpenFiles.

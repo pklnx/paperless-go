@@ -72,7 +72,9 @@ database's installation. A restore with the data directory of the same
 backup keeps them matching: the dump holds the installation's ID and the
 data directory its marker, so the sweep works as before. A database
 restored into another installation, or a data directory of another one, is
-refused with an error in the log, and nothing is removed. A data directory
+refused with an error in the log, and nothing is removed: neither the
+daily walk nor the per-minute pass touches a data directory whose marker
+names another installation. A data directory
 copied before the marker existed stays unbound (a warning in the log) until
 `./pgo sweep --bind`. So a database restore never removes files of the
 restored state: the walk refuses a data directory that is not the
@@ -134,8 +136,9 @@ with status 1; run it again. A file that cannot be removed (a read-only or
 failing disk) is logged as an error and tried again an hour later.
 
 An upload of a file whose last document was just purged can meet its file
-being removed: it answers `503` with `Retry-After: 1`, and the retry stores
-the file again. The consume folder and `./pgo import` treat it the same way
+being removed: it answers `503` with `Retry-After` (1 second, or up to 6
+minutes while the removal of a sweep that was interrupted is pending), and
+the retry stores the file again. The consume folder and `./pgo import` treat it the same way
 (the file is kept, or reported as failed, for the next run).
 
 ## Upgrades

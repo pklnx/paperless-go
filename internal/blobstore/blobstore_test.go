@@ -329,3 +329,29 @@ func TestRemoveTemp(t *testing.T) {
 		}
 	}
 }
+
+// Present tells a missing blob from a failed lookup: only a file that
+// does not exist is missing.
+func TestFilesPresent(t *testing.T) {
+	root := t.TempDir()
+	sum := sha256.Sum256([]byte("x"))
+	h := hex.EncodeToString(sum[:])
+	f := OpenFiles(root)
+	if ok, err := f.Present(h); ok || err != nil {
+		t.Fatalf("missing: %v, %v", ok, err)
+	}
+	// A file where the shard directory belongs: stat fails with ENOTDIR,
+	// which is no "does not exist".
+	if err := os.WriteFile(filepath.Join(root, "documents"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := f.Present(h); ok || err == nil || errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a failed lookup: %v, %v; want an error", ok, err)
+	}
+	if f.Exists(h) {
+		t.Error("Exists of a failed lookup")
+	}
+	if _, err := f.Present("nope"); !errors.Is(err, ErrNotHash) {
+		t.Errorf("malformed: %v", err)
+	}
+}
