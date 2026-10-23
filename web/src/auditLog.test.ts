@@ -101,6 +101,10 @@ describe("entry texts", () => {
     expect(entryDetail(entry("document.import", { actor: "cli", details: { path: "/srv/x", imported: 3, duplicates: 0, failed: 1 } }), en)).toBe(
       "3 files imported, 1 file failed",
     );
+    const restored = entry("document.consume", { actor: "system", details: { imported: 0, duplicates: 1, restored: 2, failed: 0 } });
+    expect(entryDetail(restored, en)).toBe("1 duplicate, 2 documents restored from the trash");
+    expect(entryDetail(restored, de)).toBe("1 Duplikat, 2 Dokumente aus dem Papierkorb wiederhergestellt");
+    expect(entryDetail(entry("document.import", { actor: "cli", details: { imported: 0, restored: 1 } }), en)).toBe("1 document restored from the trash");
     expect(entryDetail(entry("document.consume", { details: {} }), en)).toBe("");
     const none = (interrupted: unknown) => entry("document.consume", { details: { imported: 0, duplicates: 0, failed: 0, interrupted } });
     expect(entryDetail(none(true), en)).toBe("interrupted");

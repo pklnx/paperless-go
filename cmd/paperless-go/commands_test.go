@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -115,5 +117,22 @@ func TestCheckSchemaRefusesStaleIndexCollation(t *testing.T) {
 	}
 	if err := checkSchema(ctx, st); err != nil {
 		t.Errorf("checkSchema after migrate: %v", err)
+	}
+}
+
+// serve's sweeper decides "due" with the store's clock and retention.
+func TestNewSweeperUsesTheStoresRetention(t *testing.T) {
+	st := storetest.New(t)
+	st.TrashRetention = 3 * time.Hour
+	s, wake, wakeFn := newSweeper(&app{cfg: &config.Config{}, store: st}, slog.New(slog.DiscardHandler))
+	if s.Retention != 3*time.Hour || s.Store == nil {
+		t.Errorf("sweeper: %+v", s)
+	}
+	wakeFn()
+	wakeFn() // merged, never blocks
+	select {
+	case <-wake:
+	default:
+		t.Error("not woken")
 	}
 }

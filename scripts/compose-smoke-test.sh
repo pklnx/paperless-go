@@ -225,7 +225,7 @@ chmod -R a+rX "$work/scans"
 expect "$work/out" 'sub/smoke.pdf: would import'
 ./pgo import "$work/scans" | tee "$work/out"
 expect "$work/out" 'sub/smoke.pdf: imported'
-expect "$work/out" 'imported: 1, duplicates: 0, failed: 0'
+expect "$work/out" 'imported: 1, duplicates: 0, restored: 0, failed: 0'
 ./pgo import "$work/scans" | tee "$work/out"
 expect "$work/out" 'sub/smoke.pdf: duplicate'
 if ./pgo import "$work/scans/sub/smoke.pdf" > "$work/out" 2>&1; then

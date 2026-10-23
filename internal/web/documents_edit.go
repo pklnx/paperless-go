@@ -37,6 +37,7 @@ const (
 	codeTagAddRemove    = "tag_add_and_remove"
 	codeMatchChanged    = "match_changed"
 	codeDocChanged      = "document_changed"
+	codeInvalidAction   = "invalid_action"
 )
 
 // documentError is a refused document change: a fixed message and a code,
@@ -44,9 +45,11 @@ const (
 // selection that is too large, or the current modifiedAt of a document
 // changed meanwhile.
 type documentError struct {
-	Error      string     `json:"error"`
-	Code       string     `json:"code"`
-	DocumentID string     `json:"documentId,omitempty"`
+	Error      string `json:"error"`
+	Code       string `json:"code"`
+	DocumentID string `json:"documentId,omitempty"`
+	// Trashed: the document of DocumentID (asn_taken) is in the trash.
+	Trashed    bool       `json:"trashed,omitempty"`
 	Matched    int        `json:"matched,omitempty"`
 	Limit      int        `json:"limit,omitempty"`
 	ModifiedAt *time.Time `json:"modifiedAt,omitempty"`
@@ -85,7 +88,14 @@ func (s *Server) failDocument(w http.ResponseWriter, r *http.Request, err error)
 	case errors.As(err, &taken):
 		s.writeJSON(w, http.StatusConflict, documentError{
 			Error: "another document has this archive serial number", Code: codeASNTaken, DocumentID: taken.DocumentID,
+			Trashed: taken.Trashed,
 		})
+	case errors.Is(err, store.ErrInTrash):
+		s.writeJSON(w, http.StatusConflict, documentError{Error: "the document is in the trash", Code: codeInTrash})
+	case errors.Is(err, store.ErrNotInTrash):
+		s.writeJSON(w, http.StatusConflict, documentError{Error: "the document is not in the trash", Code: codeNotInTrash})
+	case errors.As(err, &ve) && ve.Field == "selection":
+		s.refuseDocument(w, codeInvalidSelect, "the selection does not fit the action")
 	case errors.Is(err, store.ErrOwnerMismatch):
 		s.refuseDocument(w, codeOwnerMismatch, "a tag, correspondent or document type is not one of the document owner's")
 	case errors.As(err, &tooMany):
@@ -202,7 +212,8 @@ func (in documentPatchJSON) patch() (store.DocumentPatch, string) {
 // owner's, invalid_title, invalid_notes, invalid_asn, invalid_field,
 // nothing_to_change), 404 outside the scope, 409 asn_taken naming the
 // document that has the number, 409 document_changed with the current
-// modifiedAt when expectedModifiedAt no longer holds, 503 without the audit log,
+// modifiedAt when expectedModifiedAt no longer holds, 409 in_trash for a
+// document in the trash, 503 without the audit log,
 // after a deadlock with SQL outside the store (Retry-After: 1) or when
 // another change of the owner ran longer than ownerWait (Retry-After: 5).
 func (s *Server) handlePatchDocument(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +271,9 @@ type bulkMatchJSON struct {
 	Favorite      *bool    `json:"favorite"`
 	Owner         string   `json:"owner"`
 	TZ            string   `json:"tz"`
+	// Trashed selects the trash (the list's trashed=true): required for
+	// the actions restore and purge, refused for the others.
+	Trashed bool `json:"trashed"`
 }
 
 // values is m as the list's query parameters.
@@ -287,6 +301,9 @@ func (m *bulkMatchJSON) values() url.Values {
 	}
 	if m.TZ != "" {
 		v.Set("tz", m.TZ)
+	}
+	if m.Trashed {
+		v.Set("trashed", "true")
 	}
 	return v
 }
@@ -318,8 +335,12 @@ type bulkJSON struct {
 	// search covers.
 	DryRun bool `json:"dryRun"`
 	// Fingerprint is required with match without dryRun and refused
-	// otherwise: the dry run's fingerprint, passed back unchanged.
+	// otherwise: the dry run's fingerprint, passed back unchanged. It is
+	// bound to the action of its dry run.
 	Fingerprint string `json:"fingerprint"`
+	// Action is trash, restore or purge; absent (or update) means the
+	// field change below. The trash actions take no fields.
+	Action string `json:"action"`
 
 	AddTags       []string         `json:"addTags"`
 	RemoveTags    []string         `json:"removeTags"`
@@ -351,6 +372,18 @@ type bulkJSON struct {
 // selection, ids, the search for match, bulkRun) and one document.update
 // per document (fields, bulkRun, and ownerId for another user's
 // document), in the same transaction.
+//
+// action trash, restore or purge (no fields) moves the documents to the
+// trash, back, or asks for their permanent deletion: by ids every one must
+// be in the state the action works on (409 in_trash, not_in_trash), and
+// match.trashed must be true for restore and purge and false for trash
+// (400 invalid_selection). A purge by match needs match.owner ("empty
+// trash" is always one user's trash: owner me, also for an admin who sees
+// everyone's documents), else 400 invalid_selection. The dry run and its
+// fingerprint are for the action sent with them. Audit:
+// document.bulk_delete, bulk_restore or bulk_purge as the summary (count,
+// ids, selection, the search, bulkRun) and one document.delete, restore or
+// purge per document. Answers {updated} with the number of documents.
 func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 	if !s.documentsAvailable(w, r) {
 		return
@@ -371,7 +404,22 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 		s.refuseDocument(w, codeInvalidSelect, "fingerprint goes only with a change by search")
 		return
 	}
-	sel := store.BulkSelection{IDs: in.IDs}
+	audit, ok := bulkAudits[in.Action]
+	if !ok {
+		s.refuseDocument(w, codeInvalidAction, "action must be update, trash, restore or purge")
+		return
+	}
+	action := store.BulkAction(in.Action)
+	onTrash := action == store.BulkRestore || action == store.BulkPurge
+	if in.Match != nil && in.Match.Trashed != onTrash {
+		s.refuseDocument(w, codeInvalidSelect, "match.trashed must be true for restore and purge, and false otherwise")
+		return
+	}
+	if in.Match != nil && action == store.BulkPurge && in.Match.Owner == "" {
+		s.refuseDocument(w, codeInvalidSelect, "a purge by search needs match.owner (empty the trash of one user)")
+		return
+	}
+	sel := store.BulkSelection{IDs: in.IDs, Action: action}
 	sc := requestScope(r)
 	if in.Match != nil {
 		q, _, err := listQuery(in.Match.values())
@@ -436,13 +484,19 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	fields := c.Fields()
-	if len(fields) == 0 {
+	switch {
+	case audit.fields && len(fields) == 0:
 		s.refuseDocument(w, codeNothingToChange, "nothing to change")
+		return
+	case !audit.fields && len(fields) > 0:
+		s.refuseDocument(w, codeInvalidField, "the action "+in.Action+" takes no fields")
 		return
 	}
 
-	e := s.auditEntry(r, "document.bulk_update")
-	e.Detail("fields", fields)
+	e := s.auditEntry(r, audit.summary)
+	if audit.fields {
+		e.Detail("fields", fields)
+	}
 	e.Detail("bulkRun", newBulkRun())
 	if in.Match != nil {
 		e.Detail("selection", "match")
@@ -450,12 +504,31 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 	} else {
 		e.Detail("selection", "ids")
 	}
-	changed, err := s.store.BulkUpdateDocuments(withAudit(r, e), sc, sel, c, "document.update")
+	changed, err := s.store.BulkUpdateDocuments(withAudit(r, e), sc, sel, c, audit.perDocument)
 	if err != nil {
 		s.failDocument(w, r, err)
 		return
 	}
+	if action == store.BulkPurge && len(changed) > 0 {
+		s.wakeSweeper()
+	}
 	s.writeJSON(w, http.StatusOK, map[string]int{"updated": len(changed)})
+}
+
+// bulkAudit names the audit actions of a bulk action, and whether it
+// takes fields.
+type bulkAudit struct {
+	summary, perDocument string
+	fields               bool
+}
+
+// bulkAudits are the bulk actions by their name in the body.
+var bulkAudits = map[string]bulkAudit{
+	"":                        {"document.bulk_update", "document.update", true},
+	string(store.BulkUpdate):  {"document.bulk_update", "document.update", true},
+	string(store.BulkTrash):   {"document.bulk_delete", "document.delete", false},
+	string(store.BulkRestore): {"document.bulk_restore", "document.restore", false},
+	string(store.BulkPurge):   {"document.bulk_purge", "document.purge", false},
 }
 
 // bulkDryRunJSON is the answer of a dry run.

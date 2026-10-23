@@ -129,23 +129,28 @@ type Query struct {
 	Cursor string
 	// Limit is the page size, 1 to MaxLimit; 0 means DefaultLimit.
 	Limit int
+	// Trashed searches the trash instead of the live documents. It is
+	// not part of the syntax.
+	Trashed bool
 }
 
 // Sort is the order of results.
 type Sort string
 
 // Sort orders. Relevance needs free text; added and date are newest first
-// unless Ascending.
+// unless Ascending; deleted (the most recently deleted first, never
+// ascending) is only for the trash.
 const (
 	SortRelevance Sort = "relevance"
 	SortAdded     Sort = "added"
 	SortDate      Sort = "date"
+	SortDeleted   Sort = "deleted"
 )
 
 // ParseSort parses the sort parameter; "" is the default.
 func ParseSort(s string) (Sort, bool) {
 	switch Sort(s) {
-	case "", SortRelevance, SortAdded, SortDate:
+	case "", SortRelevance, SortAdded, SortDate, SortDeleted:
 		return Sort(s), true
 	}
 	return "", false

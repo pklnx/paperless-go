@@ -105,8 +105,9 @@ type Result struct {
 	// Document is the new document (Imported).
 	Document *store.Document
 	// Existing is the owner's document that already has the file
-	// (Duplicate). Its ID is empty in the rare case that the document was
-	// deleted between the collision and the lookup.
+	// (Duplicate). Its ID is empty when the lookup after a collision failed
+	// for another reason than the row being gone. Existing.Trashed says
+	// that it is in the trash; the caller decides whether to restore it.
 	Existing store.DocumentRef
 	// Refusal says why the file was refused (Refused).
 	Refusal *RefusedError
@@ -147,7 +148,9 @@ func (l *limitReader) Read(p []byte) (int, error) {
 //     pixel limit from it; a refused file stores nothing.
 //  2. Stream the whole file through the size limit into the blob store.
 //  3. If the owner already has a document with that file, stop with
-//     Duplicate.
+//     Duplicate, also when it is in the trash. One due for purge is
+//     neither: the error wraps store.ErrPurgePending, a transient error,
+//     since the file can be imported as new once the sweeper deleted it.
 //  4. Create the document (in the inbox). A concurrent import of the same
 //     file that wins the insert also gives Duplicate.
 //
@@ -188,6 +191,8 @@ func (im *Importer) Import(ctx context.Context, req Request) (Result, error) {
 
 	existing, err := im.store.FindDocumentByOriginal(ctx, req.OwnerID, blob.SHA256)
 	switch {
+	case err == nil && existing.Due:
+		return Result{}, fmt.Errorf("ingest: duplicate check: %w", store.ErrPurgePending)
 	case err == nil:
 		return Result{Outcome: Duplicate, Existing: *existing}, nil
 	case !errors.Is(err, store.ErrNotFound):
@@ -211,7 +216,14 @@ func (im *Importer) Import(ctx context.Context, req Request) (Result, error) {
 	var dup *store.DuplicateError
 	if errors.As(err, &dup) {
 		res := Result{Outcome: Duplicate, Existing: store.DocumentRef{ID: dup.ExistingID}}
-		if ref, lerr := im.store.FindDocumentByOriginal(ctx, req.OwnerID, blob.SHA256); lerr == nil {
+		ref, lerr := im.store.FindDocumentByOriginal(ctx, req.OwnerID, blob.SHA256)
+		switch {
+		case lerr == nil && ref.Due, errors.Is(lerr, store.ErrNotFound):
+			// Due for purge, or purged since the collision: no document
+			// holds the file now, so it is not a duplicate; a retry
+			// imports it as new.
+			return Result{}, fmt.Errorf("ingest: create document: %w", store.ErrPurgePending)
+		case lerr == nil:
 			res.Existing = *ref
 		}
 		return res, nil

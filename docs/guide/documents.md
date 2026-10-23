@@ -138,7 +138,13 @@ a correspondent or a type needs documents of a single user. The bar says
 so before anything is sent: "Tags…" explains the rule, and
 "Correspondent…" and "Type…" offer only removing.
 
-Documents cannot be deleted yet: that comes with the trash.
+The web UI cannot delete documents yet; it gets the trash with #12. The
+API already moves a document to the trash (`DELETE
+/api/documents/{id}`), where it stays for 30 days
+(`PAPERLESS_GO_TRASH_RETENTION`) before it is removed for good: the trash
+is `GET /api/documents?trashed=true`, and a document comes back with
+`POST /api/documents/{id}/restore`. A document in the trash is in no list,
+search or count, but its archive serial number stays taken.
 
 ## Tags, correspondents and types
 

@@ -767,12 +767,13 @@ func TestSearchFilterCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The filter block is also in MatchDocumentIDs (the bulk change by
-	// search), which has no snippet.
+	// search), which has no snippet. SearchDocumentsDeletedDesc is the
+	// trash's own order (#12).
 	for _, marker := range []string{"filters", "snippet"} {
 		names := `SearchDocuments`
-		want := 5
+		want := 6
 		if marker == "filters" {
-			names, want = `(SearchDocuments|MatchDocumentIDs)`, 6
+			names, want = `(SearchDocuments|MatchDocumentIDs)`, 7
 		}
 		queries := regexp.MustCompile(`(?m)^-- name: `+names).FindAllStringIndex(string(src), -1)
 		var copies []string

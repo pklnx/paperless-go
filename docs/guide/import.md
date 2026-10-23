@@ -41,7 +41,11 @@ consume/            CONSUME_DIR in .env, default ./consume
   with a dot), `*.part`, `*.tmp`, `~$*` (Office lock files), subfolders,
   `failed/` and symbolic links (which are never followed).
 - **After the import** the file is deleted, and so is a duplicate (a file
-  you already have; it is not imported twice). It is deleted only after the
+  you already have; it is not imported twice). If your document of that
+  file is in the trash, it comes back from the trash (recorded in the
+  log), and then the file is deleted too: you put it in to keep it. If
+  that document is just being deleted permanently, the file stays and is
+  imported as a new document a minute later. It is deleted only after the
   document is stored, and only if the file has not changed in the meantime;
   a changed file stays and is imported again once it settles.
 - **Files that cannot be imported** (another type, larger than
@@ -56,8 +60,9 @@ consume/            CONSUME_DIR in .env, default ./consume
   tried again after an hour, or as soon as it changes.
 - **Audit log.** Each look that imported, deleted or moved files in your
   folder adds one entry to your [log](./audit-log), made by the server,
-  with how many files it imported, how many duplicates it deleted and how
-  many it moved to `failed/` (no file names). An imported file counts
+  with how many files it imported, how many duplicates it deleted, how
+  many documents it restored from the trash and how many files it moved
+  to `failed/` (no file names); each restore also has an entry of its own. An imported file counts
   once, when its document is stored, even if the file cannot be deleted. It
   is then tried again after an hour as a duplicate. A duplicate or a file
   for `failed/` counts only once it is deleted or moved, so a try that
@@ -110,17 +115,23 @@ it for the first load of an existing scan folder.
   ```text
   invoice-2026.pdf: imported
   sub/copy.pdf: duplicate of "invoice-2026"
+  old.pdf: restored "old" from the trash
   notes.txt: failed: unsupported file type
-  imported: 1, duplicates: 1, failed: 1
+  imported: 1, duplicates: 1, restored: 1, failed: 1
   ```
 
   A duplicate is a file the user already has (the same content, whatever the
-  name). The exit status is 1 if any file failed.
+  name). A file whose document is in the user's trash restores that
+  document, recorded in the log. A file whose document is just being
+  deleted permanently fails ("the existing document is being removed
+  permanently"); run the import again a minute later to import it as new.
+  The exit status is 1 if any file failed.
 - **Running it again is safe.** Files that were imported are then reported as
   duplicates and nothing is added twice. After fixing the files that failed,
   run the same command again.
 - **`--dry-run`** runs all checks, including the duplicate check, and lists
-  `would import`, `duplicate` or `failed` per file without storing anything.
+  `would import`, `duplicate`, `would restore` or `failed` per file without
+  storing anything.
 
 New documents are queued for [processing](../reference/cli#processing) like
 every other new document. `serve` does that in the background, or run

@@ -500,7 +500,8 @@ func (s *Server) handleDeleteDocumentType(w http.ResponseWriter, r *http.Request
 }
 
 // handleDocumentCounts answers the sidebar's counts of the scope's
-// documents (owner as for the lists): {inbox, favorites, total}.
+// documents (owner as for the lists): {inbox, favorites, total, trash};
+// the first three count live documents only.
 func (s *Server) handleDocumentCounts(w http.ResponseWriter, r *http.Request) {
 	sc, ok := s.listScope(w, r)
 	if !ok {
@@ -511,5 +512,5 @@ func (s *Server) handleDocumentCounts(w http.ResponseWriter, r *http.Request) {
 		s.failStore(w, r, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]int64{"inbox": c.Inbox, "favorites": c.Favorites, "total": c.Total})
+	s.writeJSON(w, http.StatusOK, map[string]int64{"inbox": c.Inbox, "favorites": c.Favorites, "total": c.Total, "trash": c.Trash})
 }

@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"runtime"
 	"slices"
@@ -202,6 +203,9 @@ func TestEveryWriterLocksItsOwner(t *testing.T) {
 	ad2 := mustDoc(t, st, alice, archived("alice two"))
 	bd := mustDoc(t, st, bob, archived("Rechnung bob"))
 	bd2 := mustDoc(t, st, bob, archived("bob two"))
+	ad3 := mustDoc(t, st, alice, archived("alice three"))
+	ad4 := mustDoc(t, st, alice, archived("alice four"))
+	bd3 := mustDoc(t, st, bob, archived("bob three"))
 	atag := mustTag(t, st, alice, "AT", nil)
 	btag := mustTag(t, st, bob, "BT", nil)
 	acorr := mustCorrespondent(t, st, alice, "AC")
@@ -303,6 +307,36 @@ func TestEveryWriterLocksItsOwner(t *testing.T) {
 		{"complete job", "CompleteJob", []int64{a}, func(ctx context.Context) error {
 			return st.CompleteJob(ctx, j, time.Now(), store.ProcessResult{PageCount: 1, Text: "t", TextSource: store.TextSourceTesseract,
 				ArchiveSHA256: hashOf("job archive"), ArchiveSize: 1})
+		}, nil},
+		{"trash document", "TrashDocument", []int64{a}, func(ctx context.Context) error {
+			return st.TrashDocument(ctx, alice, ad3.ID)
+		}, nil},
+		{"admin trashes bob's document", "TrashDocument", []int64{b}, func(ctx context.Context) error {
+			return st.TrashDocument(ctx, admin, bd3.ID)
+		}, nil},
+		{"trash out of scope", "TrashDocument", nil, func(ctx context.Context) error {
+			return st.TrashDocument(ctx, alice, bd2.ID)
+		}, store.ErrNotFound},
+		{"restore document", "RestoreDocument", []int64{a}, two(func(ctx context.Context) (any, error) {
+			return st.RestoreDocument(ctx, alice, ad3.ID)
+		}), nil},
+		{"admin restores bob's document", "RestoreDocument", []int64{b}, two(func(ctx context.Context) (any, error) {
+			return st.RestoreDocument(ctx, admin, bd3.ID)
+		}), nil},
+		{"bulk trash by ids", "BulkUpdateDocuments", []int64{a}, func(ctx context.Context) error {
+			_, err := st.BulkUpdateDocuments(ctx, alice, store.BulkSelection{IDs: []string{ad3.ID, ad4.ID}, Action: store.BulkTrash},
+				store.BulkChange{}, "document.delete")
+			return err
+		}, nil},
+		{"purge document", "PurgeDocument", []int64{a}, func(ctx context.Context) error {
+			return st.PurgeDocument(ctx, alice, ad3.ID)
+		}, nil},
+		{"purge due documents", "PurgeDueDocuments", []int64{a}, func(ctx context.Context) error {
+			res, err := st.PurgeDueDocuments(ctx, time.Now(), store.DefaultTrashRetention, 100)
+			if err == nil && res.Purged != 1 {
+				err = fmt.Errorf("purged %d, want 1", res.Purged)
+			}
+			return err
 		}, nil},
 		{"delete document", "DeleteDocument", []int64{a}, func(ctx context.Context) error {
 			return st.DeleteDocument(ctx, alice, ad2.ID)

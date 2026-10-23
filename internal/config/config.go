@@ -55,7 +55,14 @@ const (
 	// EnvConsumeDir is the consume folder that serve imports from, with
 	// one subfolder per user; empty turns it off.
 	EnvConsumeDir = "PAPERLESS_GO_CONSUME_DIR"
+	// EnvTrashRetention is how long a deleted document stays in the trash
+	// before it is removed for good (a Go duration, at least 0).
+	EnvTrashRetention = "PAPERLESS_GO_TRASH_RETENTION"
 )
+
+// DefaultTrashRetention is the trash's retention when EnvTrashRetention is
+// unset: 30 days.
+const DefaultTrashRetention = 720 * time.Hour
 
 // Processing defaults.
 const (
@@ -100,6 +107,9 @@ type Config struct {
 	// PublicURL is the web UI's origin (scheme, host and port, no path);
 	// empty turns passkeys off.
 	PublicURL string
+	// TrashRetention is how long a trashed document stays before it is
+	// due for purge; 0 purges at the next sweep.
+	TrashRetention time.Duration
 }
 
 // DataDirFromEnv returns the data directory, ./data unless set.
@@ -165,6 +175,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.OCRTimeout, err = parseTimeout(os.Getenv(EnvOCRTimeout)); err != nil {
+		return nil, err
+	}
+	if cfg.TrashRetention, err = ParseTrashRetention(os.Getenv(EnvTrashRetention)); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -268,6 +281,20 @@ func parseTimeout(v string) (time.Duration, error) {
 	d, err := time.ParseDuration(v)
 	if err != nil || d < time.Minute {
 		return 0, fmt.Errorf("%s: want a duration of at least 1m, such as 30m or 2h, got %q", EnvOCRTimeout, v)
+	}
+	return d, nil
+}
+
+// ParseTrashRetention parses EnvTrashRetention: a Go duration of at least
+// 0 (720h for 30 days); empty is DefaultTrashRetention.
+func ParseTrashRetention(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return DefaultTrashRetention, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("%s: want a duration of at least 0, such as 720h for 30 days, got %q", EnvTrashRetention, v)
 	}
 	return d, nil
 }

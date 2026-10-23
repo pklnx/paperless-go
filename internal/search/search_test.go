@@ -238,12 +238,12 @@ func TestDateRangeTimeZones(t *testing.T) {
 }
 
 func TestParseSort(t *testing.T) {
-	for _, ok := range []string{"", "relevance", "added", "date"} {
+	for _, ok := range []string{"", "relevance", "added", "date", "deleted"} {
 		if _, valid := ParseSort(ok); !valid {
 			t.Errorf("%q refused", ok)
 		}
 	}
-	for _, bad := range []string{"title", "Relevance", " added"} {
+	for _, bad := range []string{"title", "Relevance", " added", "Deleted"} {
 		if _, valid := ParseSort(bad); valid {
 			t.Errorf("%q accepted", bad)
 		}

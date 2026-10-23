@@ -249,11 +249,13 @@ func TestProcessingKeepsPrecondition(t *testing.T) {
 // The precondition relies on every write of a document advancing
 // modified_at with the strictly increasing form (architecture.md,
 // "modified_at"). Every UPDATE of documents in the queries must use it;
-// SetDocumentProcessed is the only exception (processing writes no field
-// a PATCH sends, so it must not cause false conflicts).
+// SetDocumentProcessed is an exception (processing writes no field a PATCH
+// sends, so it must not cause false conflicts), and so are the trash's
+// writes (#12): they change no field of the document, and a PATCH of a
+// trashed document is refused anyway.
 func TestDocumentUpdatesAdvanceModifiedAt(t *testing.T) {
 	const greatest = "modified_at = GREATEST(now(), modified_at + interval '1 microsecond')"
-	exceptions := map[string]bool{"SetDocumentProcessed": true}
+	exceptions := map[string]bool{"SetDocumentProcessed": true, "TrashDocuments": true, "RestoreDocuments": true, "PurgeDocuments": true}
 	files, err := filepath.Glob(filepath.Join("queries", "*.sql"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no query files: %v", err)
