@@ -197,6 +197,12 @@ jobs:
           if docker pull --quiet busybox:1.37; then echo "Docker Hub block is not effective" >&2; exit 1; fi
           echo "Docker Hub is blocked"
       - run: scripts/ci-docker-mirror.sh
+      - name: "PROOF (temporary): diagnose mirror pulls"
+        run: |
+          curl -sS -o /dev/null -w 'mirror /v2/: %{http_code}\n' https://mirror.gcr.io/v2/ || true
+          getent hosts mirror.gcr.io || true
+          docker pull busybox:1.37 || true
+          sudo journalctl -u docker --no-pager -n 40 || true
       # The base images and postgres:18 with retries; the smoke test's build
       # then takes them from the local store.
       - run: scripts/ci-pull-images.sh
