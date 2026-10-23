@@ -514,6 +514,15 @@ known to the database); only the daily walk is off. Back up the data
 directory with the marker, and restore both together (see
 [Restore](#restore)).
 
+**Words inside compounds (#56, `00021_search_infix.sql`).** The search
+uses that list: a word of 4 or more characters also finds the longer words
+that contain it (see [Search](./search), "Compound words"). The migration
+only replaces a function and takes no noticeable time. Rolling it back
+(`migrate down`) restores the search without compound matches; the list
+stays until `00018` is rolled back too. Words of trashed documents stay in
+the list until the document is purged, so the trash's own search finds
+them inside compounds too; live searches never show trashed documents.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build

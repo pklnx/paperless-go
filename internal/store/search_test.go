@@ -1047,3 +1047,65 @@ func TestSearchFilterIDsOwner(t *testing.T) {
 		t.Errorf("admin resolves tags %v, correspondents %v, types %v", tags, corr, types)
 	}
 }
+
+// A search query that runs longer than SearchTimeout fails with
+// ErrSearchTooBroad, in every sort; a cancelled context stays the
+// context's error. The test holds a lock on documents, so the search
+// waits for it until its statement_timeout (or the cancel) ends it.
+func TestSearchTimeout(t *testing.T) {
+	st, url := storetest.NewWithURL(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	textDoc(t, st, alice, "doc", "Stromrechnung")
+	lock := connect(t, url)
+	tx, err := lock.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `LOCK TABLE documents IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	st.SearchTimeout = 50 * time.Millisecond
+	for _, sort := range []search.Sort{search.SortRelevance, search.SortAdded, search.SortDate} {
+		for _, asc := range []bool{false, true} {
+			if sort == search.SortRelevance && asc {
+				continue
+			}
+			q := parseQuery(t, "rechnung", nil)
+			q.Sort, q.Ascending = sort, asc
+			if _, err := st.SearchDocuments(ctx, alice, q); !errors.Is(err, store.ErrSearchTooBroad) {
+				t.Errorf("sort %s asc=%v: %v, want ErrSearchTooBroad", sort, asc, err)
+			}
+		}
+	}
+
+	// A cancel while the search waits is the context's error.
+	st.SearchTimeout = time.Hour
+	cctx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		_, err := st.SearchDocuments(cctx, alice, parseQuery(t, "rechnung", nil))
+		done <- err
+	}()
+	watch := connect(t, url)
+	for {
+		var waiting bool
+		if err := watch.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%SearchDocumentsRelevance%')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+	}
+	cancel()
+	if err := <-done; errors.Is(err, store.ErrSearchTooBroad) || !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled search: %v, want context.Canceled", err)
+	}
+
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st.SearchTimeout = store.DefaultSearchTimeout
+	wantFound(t, st, alice, "rechnung", "doc")
+}

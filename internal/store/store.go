@@ -50,6 +50,11 @@ type Store struct {
 	// one applies to documents already in the trash. Set it before the
 	// store is used.
 	TrashRetention time.Duration
+	// SearchTimeout bounds each search query (SearchDocuments, through
+	// statement_timeout in its read-only transaction); Open sets
+	// DefaultSearchTimeout. A search that runs longer fails with
+	// ErrSearchTooBroad. Set it before the store is used.
+	SearchTimeout time.Duration
 
 	// blobs answers whether a file is still in the blob store: the last
 	// step of holdBlobs (blob_removals.go) before a writer names a hash.
@@ -87,7 +92,7 @@ func Open(ctx context.Context, url string, blobs Blobs) (*Store, error) {
 	g := guardedDB{d: pool}
 	s := &Store{
 		pool: pool, g: g, q: db.New(g), gate: newOwnerGate(), searchDB: func(d guardedDB) db.DBTX { return unnamedStatements{d} },
-		TrashRetention: DefaultTrashRetention, blobs: blobs,
+		TrashRetention: DefaultTrashRetention, SearchTimeout: DefaultSearchTimeout, blobs: blobs,
 	}
 	s.sq = db.New(s.searchDB(g))
 	return s, nil
