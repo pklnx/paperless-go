@@ -72,6 +72,7 @@ State of the work for the next session. Update before a session ends.
 
 ## Manual checks for the maintainer
 - Ruleset for `main` with the required checks (test, lint, vulncheck, docker, compose, web; `toolstest` recommended): part of the public-switch steps; confirm it is active. `audit` and `docs-audit` (`pnpm audit`, #151) stay off the required list.
+- After #158 part 1 is green on `main`: add `web-e2e` to the required checks of the `main` ruleset. Then note the Chromium setup step's time of the next 10 runs here; if the apt fallback never ran, lower the job's timeout from 20 to 15.
 - Trusted proxies behind Tailscale or Caddy (`PAPERLESS_GO_TRUSTED_PROXIES`) so the `__Host-` cookie is kept (#51).
 - After updating: `./pgo keygen` into `.env`, then `./pgo migrate`. Try TOTP with a real authenticator app, and a passkey at an HTTPS `PAPERLESS_GO_PUBLIC_URL`.
 - Drag and drop in Safari and Firefox; a ~100 MB upload through a reverse proxy.
@@ -82,4 +83,5 @@ State of the work for the next session. Update before a session ends.
 - Cloud sessions have no `gh`: use the GitHub MCP tools from the GitHub operations table in `CLAUDE.md`; the coordinator subscribes to PR activity and arms one safety check-in.
 - Web: use `pnpm` in `web/`; never `npx prettier` or `tsc -b` (they rewrite or emit files).
 - The container can restart: docker stops (start `dockerd` again), /var/tmp worktrees survive.
+- End-to-end tests in the cloud sandbox (#158): run `pnpm e2e` in `web/` with `CHROMIUM_PATH=/opt/pw-browsers/chromium` (no `playwright install` there; the sandbox's revision differs from the pinned one), `DEMO_DATABASE_URL` pointing at a `postgres:18` container (`mirror.gcr.io/library/postgres:18`), `GOTOOLCHAIN=auto`, and a `pnpm` on `PATH` (a shim that runs `~/.cache/node/corepack/v1/pnpm/12.9.1/bin/pnpm.mjs`). Do not pipe the run into `head`: a closed pipe kills Playwright before it stops the demo, which then leaves its `paperless_demo_*` database behind.
 - Docker Hub can answer 500 on image pulls (seen 2026-10-23 on main, compose job). Since #151 CI pulls through mirror.gcr.io with Docker Hub as the fallback (`scripts/ci-docker-mirror.sh`, `scripts/ci-pull-images.sh`, buildx `buildkitd-config-inline`); the `test` service has no fallback. A pull failure that still happens: rerun only per the flaky-test rule.

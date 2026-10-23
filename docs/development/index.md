@@ -79,6 +79,46 @@ colors.
 pnpm refuses packages released less than a day ago (supply-chain protection).
 Keep it that way instead of adding exceptions.
 
+## End-to-end tests
+
+`web/e2e/` holds browser tests of the main flows (Playwright, Chromium):
+login and the 2FA and password guards, upload and processing, search,
+the document detail, the profile, and the phone layout. They run against
+the demo server `tools/demo`, which creates a database of its own next to
+the one in `DEMO_DATABASE_URL` (the user needs `CREATEDB`), adds made-up
+users and generated documents, processes them with stand-in tools (no
+OCR tools, no network) and drops the database when it stops.
+
+```sh
+make web-e2e DEMO_DATABASE_URL='postgres://paperless:<password>@localhost:5432/paperless?sslmode=disable'
+# or, in web/: pnpm e2e (with DEMO_DATABASE_URL set)
+```
+
+The Playwright configuration builds the UI, builds and starts the demo on
+port 18280 (`E2E_PORT` sets another one, so that two runs do not collide)
+and stops it at the end. Install the browser once with
+`pnpm exec playwright install --only-shell chromium`, or point
+`CHROMIUM_PATH` at a Chromium of your own. `go run ./tools/demo -db …` also
+runs the demo by itself, for trying the UI; it prints the URL and the user
+name `demo`, whose password and TOTP secret are in `tools/demo/main.go`.
+
+- **Guards.** Every test fails on an uncaught page error, a console error, a
+  Content Security Policy violation and a request to any other host (which
+  is aborted). A test that provokes an error answer on purpose declares it
+  with `guards.allowHTTPError(path, status)`.
+- **No network, no real data.** The tests upload only PDFs they generate
+  (`web/e2e/pdf.ts`, the same writer as the demo's) and log in only with the
+  demo's public logins.
+- **Locators.** Specs find things by role, label and text only, never by CSS
+  classes, element types or structure. Everything that depends on how the
+  UI is built is in `web/e2e/ui.ts`: a rewrite of the UI changes the helpers,
+  not the specs. `data-testid` only where nothing has a role or a label
+  (`no-thumbnail`). Native `window.confirm` dialogs and in-page
+  confirmations go through `confirmDialog`.
+- **Waiting.** Every wait is an assertion or an event, never a sleep.
+- A pull request that changes a flow updates its spec in the same pull
+  request.
+
 ## Documentation
 
 This site is built with [VitePress](https://vitepress.dev/) from `docs/` and
@@ -152,6 +192,14 @@ file changes on `main`.
   docs workflow queues its `main` runs instead, so deploys stay in order.
 - Every job has a timeout (`timeout-minutes`), about two to three times its
   longest run so far.
+- `web-e2e` runs the end-to-end tests on every pull request except those
+  that change documentation only (`docs/`, `.claude/`, `*.md`; the `changes`
+  job decides, and runs the tests whenever it fails). It installs only
+  Playwright's headless Chromium, without apt, and checks its libraries
+  (`scripts/ci-playwright-chromium.sh`): the runner image has them. If one
+  is missing, the run shows a warning and installs them with apt, which can
+  take minutes. A failed run keeps the traces of the failed tests for 7 days
+  (`playwright-traces`).
 - CI pulls Docker Hub images through mirror.gcr.io (Google's public Docker Hub
   cache), with Docker Hub as the fallback, so a Docker Hub error or rate limit
   does not fail a job. These pulls are anonymous: dockerd would send the

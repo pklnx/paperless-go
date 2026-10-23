@@ -41,6 +41,10 @@ go.work.sum
 /internal/web/ui/dist/*
 !/internal/web/ui/dist/.keep
 /web/node_modules/
+# Playwright (pnpm e2e): the saved login, results and traces, the report
+/web/e2e/.auth/
+/web/test-results/
+/web/playwright-report/
 /docs/node_modules/
 /docs/.vitepress/cache/
 /docs/.vitepress/dist/

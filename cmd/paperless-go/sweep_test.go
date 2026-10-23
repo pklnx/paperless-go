@@ -57,7 +57,8 @@ func TestOpenAppChecksTheDataDir(t *testing.T) {
 }
 
 // store.Open is called by openApp alone in the program (tests open stores
-// through storetest).
+// through storetest; the demo server in tools/demo, never shipped, opens
+// its own).
 func TestOnlyOpenAppOpensTheStore(t *testing.T) {
 	root := filepath.Join("..", "..")
 	var callers []string
@@ -96,7 +97,13 @@ func TestOnlyOpenAppOpensTheStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"../../cmd/paperless-go/commands.go:openApp", "../../internal/store/storetest/storetest.go:NewWithOptions"}
+	// tools/demo opens the store of its temporary data directory with
+	// blobstore.OpenFiles, as openApp does (tools/demo/main_test.go checks
+	// the argument).
+	want := []string{
+		"../../cmd/paperless-go/commands.go:openApp", "../../internal/store/storetest/storetest.go:NewWithOptions",
+		"../../tools/demo/main.go:run",
+	}
 	if strings.Join(callers, " ") != strings.Join(want, " ") {
 		t.Errorf("store.Open called from %v, want %v", callers, want)
 	}
