@@ -51,7 +51,9 @@ Some limits of the word match:
 
 - **Compound words.** For each word the search uses at most the 100 longer
   words that occur in the most of your documents (with "Everyone's
-  documents", in all users' documents). A rarer compound beyond them is
+  documents", in all users' documents), and at most 250 for the whole
+  search: with three or more such words they share them, so each gets
+  fewer (with 32 words about 8 each). A rarer compound beyond them is
   not found by its part. Within a phrase (`"Rechnung für Juli"`) words
   match exactly, never inside longer words, and a word of fewer than 4
   characters never does either.
@@ -89,7 +91,10 @@ are plain text. A tag, correspondent or type name that does not exist finds
 no documents. `-` before any filter excludes what it matches.
 
 A search has at most 1000 characters and 32 words, phrases and filter
-values.
+values. A search that takes longer than 30 seconds is stopped with "The
+search took too long": typically many short words sorted by best match.
+Fewer or longer words, a filter (`tag:`, `date:`) or sorting by date
+helps.
 
 ## Order
 

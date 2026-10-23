@@ -27,7 +27,11 @@ export const pollTimer = {
 };
 
 const errorText = (err: unknown) =>
-  err instanceof ApiError && err.status === 400 && err.message === "query too long" ? t.searchTooLong : t.failed(err instanceof Error ? err.message : String(err));
+  err instanceof ApiError && err.status === 400 && err.message === "query too long"
+    ? t.searchTooLong
+    : err instanceof ApiError && err.body.code === "search_too_broad"
+      ? t.searchTooBroad
+      : t.failed(err instanceof Error ? err.message : String(err));
 
 
 interface ListState {

@@ -441,6 +441,15 @@ describe("document list", () => {
     expect((await screen.findByRole("alert")).textContent).toBe(t.searchTooLong);
   });
 
+  it("explains a search stopped at the time limit", async () => {
+    server.documents = (p) =>
+      p.get("q") ? { status: 422, body: { error: "search too broad; use fewer or longer words, or a filter", code: "search_too_broad" } } : page([]);
+    await start();
+    fireEvent.change(screen.getByRole("searchbox", { name: t.searchLabel }), { target: { value: "rech nung zahl trag" } });
+    fireEvent.submit(screen.getByRole("search"));
+    expect((await screen.findByRole("alert")).textContent).toBe(t.searchTooBroad);
+  });
+
   it("does not search for blanks", async () => {
     await start();
     fireEvent.change(screen.getByRole("searchbox", { name: t.searchLabel }), { target: { value: "   " } });

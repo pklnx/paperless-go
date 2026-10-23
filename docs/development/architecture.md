@@ -350,7 +350,15 @@ ranking, cursors, the bulk match and saved views are unchanged.
   `zufalls`, find `Zufallstext`). At most 100 lexemes per item, ordered by
   `n DESC, lexeme`, so the result is deterministic and `-X` excludes
   exactly what `X` finds; each is quoted by the fixed escaper and ORed into
-  the item before `!!`. It runs through `EXECUTE … USING`, so it is planned
+  the item before `!!`.
+- **Cap per search** (#140). At most 250 compounds per search: a first
+  pass looks up every item (`document_search_compound_patterns` decides
+  which items expand), then the 250 are shared max-min fair, in ascending
+  order of what each item found (then by position), each getting what it
+  found but at most an equal share of what is left. A single word keeps
+  its 100, two words 100 each, three 83/83/84, 32 words 7 or 8 each; an
+  item that finds few leaves the rest to the others
+  (`TestSearchCompoundCapPerSearch`). It runs through `EXECUTE … USING`, so it is planned
   with its values and the trigram index serves it
   (`TestSearchCompoundLookupUsesTrigramIndex` reads the statement between
   `$lookup$` from `pg_proc` and checks its plan).
@@ -389,6 +397,20 @@ ranking, cursors, the bulk match and saved views are unchanged.
   every match (OR, by relevance: 5 min → over an hour); by date the OR
   takes 0.3–0.5 s. The foreign key of `search_vocabulary` to `users` costs
   no measurable time.
+
+**Time limit** (#140). `SearchDocuments` runs its query, in every sort,
+in a read-only transaction with `statement_timeout` set to
+`Store.SearchTimeout` (`DefaultSearchTimeout`, 30 s; `set_config(…,
+true)`, so it ends with the transaction). A query stopped by it (`57014`
+while the context is still live) is `store.ErrSearchTooBroad`, which the
+API answers `422` with `{"error": "search too broad; …", "code":
+"search_too_broad"}` and the UI explains; a cancelled request stays the
+context's error. A broad word ranked over 100 000 documents takes 5 to 8
+s; many short words ranked over every document took over an hour before
+the cap, and 5 minutes even without the expansion. `SearchTsquery` and the
+bulk change's match run outside this limit (`TestSearchTimeout`,
+`TestSearchTooBroad` hold a lock on `documents` so the search waits into
+its limit).
 
 **Reads.** No query reads the vectors back: `GetDocument` and
 `ListDocuments` list their columns instead of `d.*`.
@@ -1142,8 +1164,11 @@ another user's document answers `404` and an admin sees all.
   false`, `limit must be a positive number`. `failStore` maps the store's
   `ErrInvalidCursor` and `ErrInvalidSort` to `400`, `ErrRetry` to `503`
   with `Retry-After: 1` and `ErrBusy` (a write that waited 15 s for
-  another change of the same owner) to `503` with `Retry-After: 5`; any
-  other error is a logged `500` with `internal
+  another change of the same owner) to `503` with `Retry-After: 5`,
+  `ErrSearchTooBroad` (the search's 30 s limit, Search index above) to
+  `422` with `search too broad; use fewer or longer words, or a filter`
+  and `"code": "search_too_broad"` (a warning in the log, not an
+  audit entry); any other error is a logged `500` with `internal
   error`, so no database message reaches the client.
   The first page of a typed search (`q` with free text or search syntax,
   no cursor) writes `document.search` after the search ran, with `q` as

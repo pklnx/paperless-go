@@ -5,15 +5,49 @@
 -- finds Stromrechnung. The function is the one of 00011 plus that step;
 -- everything else is unchanged. Down restores 00011's body.
 --
--- The expansion, for a non-phrase item of 4 or more characters: the
--- term's one paperless_simple lexeme and, when it differs, its german
--- stem (each of 4 or more characters) are looked up in search_vocabulary
--- within the owner (all owners for NULL) as LIKE '%p%', wildcards
--- escaped, leaving out lexemes that start with a pattern (the word itself
--- and its prefixes match as before). At most 100 lexemes, ordered by
--- n DESC, lexeme; each is quoted by the fixed escaper and ORed into the
--- item before negation, so -X excludes exactly what X finds. The expanded tsquery stays inside the store like the rest: a
+-- The expansion, for a non-phrase item of 4 or more characters
+-- (document_search_compound_patterns): the term's one paperless_simple
+-- lexeme and, when it differs, its german stem (each of 4 or more
+-- characters) are looked up in search_vocabulary within the owner (all
+-- owners for NULL) as LIKE '%p%', wildcards escaped, leaving out lexemes
+-- that start with a pattern (the word itself and its prefixes match as
+-- before). At most 100 lexemes per item, ordered by n DESC, lexeme, and at
+-- most 250 per search, shared out fairly (#140): items that find fewer
+-- than an equal share keep all of theirs, the rest split what is left, so
+-- a single word keeps its 100. Each is quoted by the fixed escaper and
+-- ORed into the item before negation, so -X excludes exactly what X
+-- finds. The expanded tsquery stays inside the store like the rest: a
 -- bound parameter, never logged or returned.
+
+-- document_search_compound_patterns returns the LIKE patterns of a term's
+-- expansion, unescaped: its one paperless_simple lexeme of 4 or more
+-- characters and its german stem when that differs and has 4 or more
+-- characters; NULL when the term does not expand (under 4 characters, or
+-- several simple lexemes such as Strom-Rechnung, whose parts match
+-- already). It does not look at phrases; the caller skips those.
+-- +goose StatementBegin
+CREATE FUNCTION document_search_compound_patterns(term text) RETURNS text[]
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    lexemes text[];
+    stems text[];
+BEGIN
+    IF term IS NULL OR char_length(term) < 4 THEN
+        RETURN NULL;
+    END IF;
+    SELECT array_agg(v.lexeme) INTO lexemes FROM unnest(to_tsvector('public.paperless_simple', term)) v;
+    IF cardinality(lexemes) IS DISTINCT FROM 1 OR char_length(lexemes[1]) < 4 THEN
+        RETURN NULL;
+    END IF;
+    SELECT array_agg(v.lexeme) INTO stems FROM unnest(to_tsvector('pg_catalog.german', term)) v;
+    IF cardinality(stems) = 1 AND stems[1] <> lexemes[1] AND char_length(stems[1]) >= 4 THEN
+        RETURN lexemes || stems[1];
+    END IF;
+    RETURN lexemes;
+END;
+$$;
+-- +goose StatementEnd
+
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION document_search_tsquery(
     owner bigint, terms text[], is_phrase boolean[], negated boolean[], or_group integer[]
@@ -29,22 +63,82 @@ DECLARE
     pos integer;
     pattern text;
     result tsquery;
-    lexemes text[];
-    stems text[];
     patterns text[];
     escaped text[];
     compounds text[];
+    found jsonb := '[]';
+    counts integer[] := '{}';
+    alloc integer[];
+    remaining integer := 250;
+    sharing integer;
+    k integer;
+    i integer := 0;
 BEGIN
     IF coalesce(cardinality(is_phrase), 0) <> n OR coalesce(cardinality(negated), 0) <> n
        OR coalesce(cardinality(or_group), 0) <> n THEN
         RAISE EXCEPTION 'document_search_tsquery: arrays of different lengths' USING ERRCODE = '22023';
     END IF;
+    -- Compounds, first pass: each item's lookup, at most 100 lexemes in
+    -- their final order, and how many it found. The loop below takes the
+    -- first alloc[i] of item i.
+    FOR item IN
+        SELECT u.term, coalesce(u.phrase, false) AS phrase
+        FROM unnest(terms, is_phrase) WITH ORDINALITY AS u(term, phrase, ord)
+        WHERE u.term IS NOT NULL AND btrim(u.term) <> ''
+        ORDER BY u.ord
+    LOOP
+        compounds := NULL;
+        patterns := CASE WHEN item.phrase THEN NULL ELSE document_search_compound_patterns(item.term) END;
+        IF patterns IS NOT NULL THEN
+            SELECT array_agg(replace(replace(replace(p, '\', '\\'), '%', '\%'), '_', '\_'))
+            INTO escaped FROM unnest(patterns) p;
+            -- The values are bound, so the statement is planned with
+            -- them and the trigram index serves the LIKE. The owner's
+            -- most frequent first (all owners' counts summed for an
+            -- admin), then by lexeme, so a word and its negation expand
+            -- alike. TestSearchCompoundLookupUsesTrigramIndex reads this
+            -- statement from the function and explains it.
+            EXECUTE $lookup$
+                SELECT array_agg(c.lexeme ORDER BY c.n DESC, c.lexeme) FROM (
+                    SELECT v.lexeme, sum(v.n) AS n
+                    FROM search_vocabulary v
+                    WHERE ($1::bigint IS NULL OR v.owner_id = $1::bigint)
+                      AND v.lexeme LIKE ANY ($2::text[])
+                      AND v.lexeme NOT LIKE ALL ($3::text[])
+                    GROUP BY v.lexeme
+                    ORDER BY sum(v.n) DESC, v.lexeme
+                    LIMIT 100
+                ) c
+            $lookup$
+            INTO compounds
+            USING owner,
+                (SELECT array_agg('%' || e.p || '%') FROM unnest(escaped) e(p)),
+                (SELECT array_agg(e.p || '%') FROM unnest(escaped) e(p));
+        END IF;
+        found := found || jsonb_build_array(coalesce(to_jsonb(compounds), '[]'::jsonb));
+        counts := counts || coalesce(cardinality(compounds), 0);
+    END LOOP;
+    -- The 250 of the search, shared fairly: in ascending order of what
+    -- they found (then by position), each item gets what it found, at
+    -- most an equal share of what is left. A single word keeps its 100;
+    -- two words 100 each; 32 words about 7 each when all find many.
+    alloc := array_fill(0, ARRAY[greatest(cardinality(counts), 1)]);
+    SELECT count(*) INTO sharing FROM unnest(counts) c WHERE c > 0;
+    FOR k IN
+        SELECT s.i FROM generate_subscripts(counts, 1) AS s(i) WHERE counts[s.i] > 0 ORDER BY counts[s.i], s.i
+    LOOP
+        alloc[k] := least(counts[k], remaining / sharing);
+        remaining := remaining - alloc[k];
+        sharing := sharing - 1;
+    END LOOP;
+
     FOR item IN
         SELECT u.term, coalesce(u.phrase, false) AS phrase, coalesce(u.neg, false) AS neg, u.grp, u.ord
         FROM unnest(terms, is_phrase, negated, or_group) WITH ORDINALITY AS u(term, phrase, neg, grp, ord)
         WHERE u.term IS NOT NULL AND btrim(u.term) <> ''
         ORDER BY u.ord
     LOOP
+        i := i + 1;
         IF item.phrase THEN
             q := phraseto_tsquery('pg_catalog.german', item.term)
               || phraseto_tsquery('pg_catalog.english', item.term)
@@ -61,55 +155,13 @@ BEGIN
                     q := q || part;
                 END IF;
             END IF;
-
-            -- Compounds (#56): the lexemes of the scope's vocabulary that
-            -- contain a pattern but start with none (prefixes stay what
-            -- the prefix query above makes of the word). The patterns are
-            -- the word's one paperless_simple lexeme and its german stem,
-            -- each of 4 or more characters; a word that makes several
-            -- simple lexemes (Strom-Rechnung) is left alone, its parts
-            -- match already.
-            IF char_length(item.term) >= 4 THEN
-                SELECT array_agg(v.lexeme) INTO lexemes
-                FROM unnest(to_tsvector('public.paperless_simple', item.term)) v;
-                IF cardinality(lexemes) = 1 AND char_length(lexemes[1]) >= 4 THEN
-                    patterns := lexemes;
-                    SELECT array_agg(v.lexeme) INTO stems
-                    FROM unnest(to_tsvector('pg_catalog.german', item.term)) v;
-                    IF cardinality(stems) = 1 AND stems[1] <> lexemes[1] AND char_length(stems[1]) >= 4 THEN
-                        patterns := patterns || stems[1];
-                    END IF;
-                    SELECT array_agg(replace(replace(replace(p, '\', '\\'), '%', '\%'), '_', '\_'))
-                    INTO escaped FROM unnest(patterns) p;
-                    -- The values are bound, so the statement is planned
-                    -- with them and the trigram index serves the LIKE.
-                    -- At most 100, the owner's most frequent first (all
-                    -- owners' counts summed for an admin), then by lexeme,
-                    -- so a word and its negation expand alike.
-                    -- TestSearchCompoundLookupUsesTrigramIndex reads this
-                    -- statement from the function and explains it.
-                    EXECUTE $lookup$
-                        SELECT array_agg(c.lexeme ORDER BY c.n DESC, c.lexeme) FROM (
-                            SELECT v.lexeme, sum(v.n) AS n
-                            FROM search_vocabulary v
-                            WHERE ($1::bigint IS NULL OR v.owner_id = $1::bigint)
-                              AND v.lexeme LIKE ANY ($2::text[])
-                              AND v.lexeme NOT LIKE ALL ($3::text[])
-                            GROUP BY v.lexeme
-                            ORDER BY sum(v.n) DESC, v.lexeme
-                            LIMIT 100
-                        ) c
-                    $lookup$
-                    INTO compounds
-                    USING owner,
-                        (SELECT array_agg('%' || e.p || '%') FROM unnest(escaped) e(p)),
-                        (SELECT array_agg(e.p || '%') FROM unnest(escaped) e(p));
-                    IF compounds IS NOT NULL THEN
-                        SELECT string_agg('''' || replace(replace(l, '\', '\\'), '''', '''''') || '''', ' | ')::tsquery
-                        INTO part FROM unnest(compounds) l;
-                        q := q || part;
-                    END IF;
-                END IF;
+            -- Compounds: this item's share of the first pass.
+            IF alloc[i] > 0 THEN
+                SELECT string_agg('''' || replace(replace(e.l, '\', '\\'), '''', '''''') || '''', ' | ' ORDER BY e.ord)::tsquery
+                INTO part
+                FROM jsonb_array_elements_text(found -> (i - 1)) WITH ORDINALITY AS e(l, ord)
+                WHERE e.ord <= alloc[i];
+                q := q || part;
             END IF;
         END IF;
 
@@ -173,6 +225,7 @@ $$;
 -- +goose StatementEnd
 
 -- +goose Down
+DROP FUNCTION document_search_compound_patterns(text);
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION document_search_tsquery(
     owner bigint, terms text[], is_phrase boolean[], negated boolean[], or_group integer[]

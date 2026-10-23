@@ -45,9 +45,10 @@ import (
 // migrated only to that version, and at the end times migrating up: 17 is
 // part 1's "before" (no vocabulary; the migration times the backfill), 20
 // part 2's (the vocabulary and the trash, without the expansion of 00021).
-// SEARCHBENCH_FILLFACTOR sets the fillfactor of search_vocabulary before
-// the generation. "Before" and "after" are two runs on the same host and
-// server, with the same seed.
+// SEARCHBENCH_RECHECK=1 re-measures #115's failed cases with and without
+// the expansion on the same data (#140). SEARCHBENCH_FILLFACTOR sets the
+// fillfactor of search_vocabulary before the generation. "Before" and
+// "after" are two runs on the same host and server, with the same seed.
 //
 // It logs the timings of each case, EXPLAIN (ANALYZE, BUFFERS) of the
 // queries the store ran, hit counts of the compound cases, the
@@ -73,6 +74,8 @@ func TestSearchBench(t *testing.T) {
 	ctx := context.Background()
 	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
 	bob := store.Scope{UserID: storetest.User(t, st, "bob", false).ID}
+	// The benchmark measures how long a search takes, so no time limit.
+	st.SearchTimeout = 0
 	if before {
 		if err := st.MigrateDownTo(ctx, beforeVersion); err != nil {
 			t.Fatal(err)
@@ -356,6 +359,41 @@ func TestSearchBench(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Logf("hits of rechnung through berechnung only: %d", n)
+	}
+
+	// SEARCHBENCH_RECHECK=1 (#140): the cases that failed in #115, on the
+	// same data with the expansion, without it (migrated down to 00020)
+	// and with it again, so the order and the cache show. The OR ranking
+	// runs once per round, without the time limit; at the end it runs once
+	// more under the default limit.
+	if os.Getenv("SEARCHBENCH_RECHECK") == "1" && !before {
+		and, or := strings.Join(worst, " "), strings.Join(worst, " OR ")
+		recheck := func(label string) {
+			q := tsquery(&alice.UserID, worst...)
+			t.Logf("%s: 32 items of 4 characters make %d alternatives", label, strings.Count(q, "|")+strings.Count(q, "&")+1)
+			stat(label+": 32 items, AND, relevance", 10, search1(query(and, "")))
+			stat(label+": 32 items, OR, sort=added", 10, search1(query(or, search.SortAdded)))
+			start := time.Now()
+			search1(query(or, ""))()
+			t.Logf("%-55s %v (1 run)", label+": 32 items, OR, relevance", time.Since(start).Round(time.Millisecond))
+			stat(label+": broad infix rechnung, relevance", 10, search1(query("rechnung", "")))
+			stat(label+": selective infix erinnerung, relevance", 40, search1(query("erinnerung", "")))
+			stat(label+": selective infix erinnerung, sort=added", 40, search1(query("erinnerung", search.SortAdded)))
+		}
+		recheck("after")
+		if err := st.MigrateDownTo(ctx, infixVersion-1); err != nil {
+			t.Fatal(err)
+		}
+		recheck("before")
+		if _, err := st.Migrate(ctx); err != nil {
+			t.Fatal(err)
+		}
+		recheck("after again")
+		st.SearchTimeout = store.DefaultSearchTimeout
+		start := time.Now()
+		_, err := st.SearchDocuments(ctx, alice, query(or, ""))
+		t.Logf("32 items, OR, relevance under the default limit: %v after %v", err, time.Since(start).Round(time.Millisecond))
+		st.SearchTimeout = 0
 	}
 	measure("plain list, first page", 40, search1(search.Query{Limit: 25}))
 

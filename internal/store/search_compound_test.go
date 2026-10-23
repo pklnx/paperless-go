@@ -393,3 +393,135 @@ func TestSearchCompoundTrash(t *testing.T) {
 	}
 	wantFound(t, st, alice, "rechnung", "live", "trashed")
 }
+
+// tsqueryOfItems returns document_search_tsquery's text for AND items in
+// the scope of owner.
+func tsqueryOfItems(t *testing.T, conn *pgx.Conn, owner *int64, terms ...string) string {
+	t.Helper()
+	n := len(terms)
+	groups := make([]int32, n)
+	for i := range groups {
+		groups[i] = int32(-1 - i)
+	}
+	var q string
+	if err := conn.QueryRow(context.Background(),
+		`SELECT coalesce(document_search_tsquery($1, $2, $3, $4, $5)::text, '')`,
+		owner, terms, make([]bool, n), make([]bool, n), groups).Scan(&q); err != nil {
+		t.Fatalf("tsquery of %q: %v", terms, err)
+	}
+	return q
+}
+
+// The cap per search (#140): at most 250 compounds per search, shared out
+// fairly. A word that finds fewer than an equal share keeps all of its
+// own, the others split the rest, each at most 100, the most frequent
+// first; the result is the same on every call.
+func TestSearchCompoundCapPerSearch(t *testing.T) {
+	st, url := storetest.NewWithURL(t)
+	ctx := context.Background()
+	alice := storetest.User(t, st, "alice", false)
+	conn := connect(t, url)
+	// Vocabulary rows written directly: 120 compounds each of five roots
+	// with falling counts, and 10 of mahnung.
+	roots := []string{"rechnung", "vertrag", "kosten", "beitrag", "auftrag"}
+	for _, root := range roots {
+		if _, err := conn.Exec(ctx, `INSERT INTO search_vocabulary (owner_id, lexeme, n)
+			SELECT $1, 'x' || lpad(i::text, 3, '0') || $2, 1000 - i FROM generate_series(0, 119) i`, alice.ID, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO search_vocabulary (owner_id, lexeme, n)
+		SELECT $1, 'x' || lpad(i::text, 3, '0') || 'mahnung', 1000 - i FROM generate_series(0, 9) i`, alice.ID); err != nil {
+		t.Fatal(err)
+	}
+	// per returns, for each root, which compounds of it the tsquery holds.
+	per := func(q string) map[string][]string {
+		out := map[string][]string{}
+		for _, l := range quotedLexemes(q) {
+			if !strings.HasPrefix(l, "x") {
+				continue
+			}
+			for _, root := range append(slices.Clone(roots), "mahnung") {
+				if strings.HasSuffix(l, root) {
+					out[root] = append(out[root], l)
+				}
+			}
+		}
+		return out
+	}
+	first := func(root string, k int) []string {
+		var want []string
+		for i := range k {
+			want = append(want, fmt.Sprintf("x%03d%s", i, root))
+		}
+		return want
+	}
+	for _, c := range []struct {
+		terms []string
+		want  map[string]int
+	}{
+		{[]string{"rechnung"}, map[string]int{"rechnung": 100}},
+		{[]string{"rechnung", "vertrag"}, map[string]int{"rechnung": 100, "vertrag": 100}},
+		{[]string{"rechnung", "vertrag", "kosten"}, map[string]int{"rechnung": 83, "vertrag": 83, "kosten": 84}},
+		{[]string{"mahnung", "rechnung", "vertrag"}, map[string]int{"mahnung": 10, "rechnung": 100, "vertrag": 100}},
+		{roots, map[string]int{"rechnung": 50, "vertrag": 50, "kosten": 50, "beitrag": 50, "auftrag": 50}},
+		// A word without compounds and a phrase take no share.
+		{[]string{"rechnung", "nichts", `vertrag kosten`, "kosten"}, map[string]int{"rechnung": 100, "kosten": 100}},
+	} {
+		terms := c.terms
+		phrase := slices.Index(terms, `vertrag kosten`)
+		var q string
+		if phrase < 0 {
+			q = tsqueryOfItems(t, conn, &alice.ID, terms...)
+		} else {
+			n := len(terms)
+			isPhrase := make([]bool, n)
+			isPhrase[phrase] = true
+			groups := make([]int32, n)
+			for i := range groups {
+				groups[i] = int32(-1 - i)
+			}
+			if err := conn.QueryRow(ctx, `SELECT coalesce(document_search_tsquery($1, $2, $3, $4, $5)::text, '')`,
+				&alice.ID, terms, isPhrase, make([]bool, n), groups).Scan(&q); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := per(q)
+		total := 0
+		for root, k := range c.want {
+			if !slices.Equal(got[root], first(root, k)) {
+				t.Errorf("%q: %s: %d compounds %q, want the first %d", terms, root, len(got[root]), got[root], k)
+			}
+			total += k
+		}
+		if len(got) != len(c.want) {
+			t.Errorf("%q: compounds of %v, want %v", terms, got, c.want)
+		}
+		if total > 250 {
+			t.Fatalf("test case over 250: %d", total)
+		}
+		if again := tsqueryOfItems(t, conn, &alice.ID, terms...); phrase < 0 && again != q {
+			t.Errorf("%q: another call gave another tsquery", terms)
+		}
+	}
+	// 32 words of which every one finds many: 7 or 8 each, 250 in all.
+	var many []string
+	for i := range 32 {
+		root := fmt.Sprintf("qk%c%czt", 'a'+i/26, 'a'+i%26) // no stemmer changes it
+		many = append(many, root)
+		if _, err := conn.Exec(ctx, `INSERT INTO search_vocabulary (owner_id, lexeme, n)
+			SELECT $1, 'x' || lpad(i::text, 3, '0') || $2, 1000 - i FROM generate_series(0, 19) i`, alice.ID, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q := tsqueryOfItems(t, conn, &alice.ID, many...)
+	n := 0
+	for _, l := range quotedLexemes(q) {
+		if strings.HasPrefix(l, "x") {
+			n++
+		}
+	}
+	if n != 250 {
+		t.Errorf("32 words: %d compounds, want 250", n)
+	}
+}

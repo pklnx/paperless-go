@@ -373,6 +373,8 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 
 type apiError struct {
 	Error string `json:"error"`
+	// Code names an error the UI explains in its own words.
+	Code string `json:"code,omitempty"`
 }
 
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, status int, msg string, err error) {
@@ -398,6 +400,12 @@ func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
 		s.fail(w, r, http.StatusBadRequest, "invalid sort", err)
 	case errors.Is(err, search.ErrTooLong):
 		s.fail(w, r, http.StatusBadRequest, "query too long", err)
+	case errors.Is(err, store.ErrSearchTooBroad):
+		// The search ran into store.Store.SearchTimeout: the query asks
+		// too much (many short words, a broad word ranked), not a fault.
+		s.log.Warn("search too broad: stopped at the time limit", "method", r.Method, "path", r.URL.Path)
+		s.writeJSON(w, http.StatusUnprocessableEntity, apiError{
+			Error: "search too broad; use fewer or longer words, or a filter", Code: "search_too_broad"})
 	case errors.Is(err, search.ErrInvalid), errors.As(err, &ve) && ve.Field == "q":
 		s.fail(w, r, http.StatusBadRequest, "invalid query", err)
 	case errors.Is(err, store.ErrInvalid):
