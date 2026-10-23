@@ -226,7 +226,7 @@ describe("opening", () => {
   it("opens directly from the URL (a reload)", async () => {
     serve(doc("d1", "Rechnung", { notes: "Bezahlt" }));
     await openAt("/?doc=d1");
-    expect((detail().getByLabelText(t.fieldNotes) as HTMLTextAreaElement).value).toBe("Bezahlt");
+    expect(detail().getByTestId("notes-rendered").textContent).toBe("Bezahlt");
     expect(requests.some((r) => r.url === "/api/documents/d1")).toBe(true);
   });
 
@@ -647,7 +647,7 @@ describe("changed elsewhere meanwhile (#105)", () => {
     expect(requests.filter((r) => r.method === "GET" && r.url === "/api/documents/d1").length).toBe(getsBefore + 1);
     // The form: the user's title, the other change's notes, and t2 kept
     // with t3 still removed.
-    await waitFor(() => expect((detail().getByLabelText(t.fieldNotes) as HTMLTextAreaElement).value).toBe("neu"));
+    await waitFor(() => expect(detail().getByTestId("notes-rendered").textContent).toBe("neu"));
     expect(titleField().value).toBe("A2");
     expect(detail().getByRole("button", { name: t.removeChoice("Zwei") })).toBeTruthy();
     expect(detail().getByRole("button", { name: t.removeChoice("Eins") })).toBeTruthy();
@@ -662,6 +662,71 @@ describe("changed elsewhere meanwhile (#105)", () => {
     expect(stored.notes).toBe("neu");
     expect(stored.tagIds).toEqual(["t1", "t2"]);
     expect(detail().queryByText(t.documentChanged)).toBeNull();
+  });
+});
+
+describe("notes in Markdown (#12)", () => {
+  const notesArea = () => detail().queryByRole("textbox", { name: t.fieldNotes }) as HTMLTextAreaElement | null;
+  const rendered = () => detail().getByTestId("notes-rendered");
+
+  it("shows the notes rendered, with an Edit toggle to the textarea and back", async () => {
+    const notes = "# Termin\n- [x] bezahlt\n- [ ] abgelegt\n**wichtig**\n[Portal](https://portal.example/a)\n[böse](javascript:alert(1))";
+    serve(doc("d1", "A", { notes }));
+    await openAt("/?doc=d1");
+    expect(notesArea()).toBeNull();
+    expect(within(rendered()).getByRole("heading", { level: 3 }).textContent).toBe("Termin");
+    const boxes = within(rendered()).getAllByRole("checkbox") as HTMLInputElement[];
+    expect(boxes.map((b) => [b.checked, b.disabled])).toEqual([
+      [true, true],
+      [false, true],
+    ]);
+    expect(rendered().querySelector("strong")?.textContent).toBe("wichtig");
+    const links = within(rendered()).getAllByRole("link");
+    expect(links).toHaveLength(1);
+    expect(links[0]!.textContent).toBe("Portal");
+    expect(links[0]!.getAttribute("href")).toBe("https://portal.example/a");
+    expect(links[0]!.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(rendered().textContent).toContain("böse");
+
+    fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
+    expect(notesArea()!.value).toBe(notes);
+    expect(document.activeElement).toBe(notesArea());
+    // The preview shows the text as edited, unsaved.
+    fireEvent.change(notesArea()!, { target: { value: "*neu*" } });
+    fireEvent.click(detail().getByRole("button", { name: t.notesPreviewLabel }));
+    expect(notesArea()).toBeNull();
+    expect(rendered().querySelector("em")?.textContent).toBe("neu");
+    expect(detail().getByText(t.unsaved)).toBeTruthy();
+    expect(patches()).toHaveLength(0);
+  });
+
+  it("opens empty notes in the textarea, and a saved edit renders", async () => {
+    serve(doc("d1", "A", { notes: "" }));
+    await openAt("/?doc=d1");
+    expect(detail().queryByTestId("notes-rendered")).toBeNull();
+    // Nothing to preview yet.
+    expect(detail().queryByRole("button", { name: t.notesPreviewLabel })).toBeNull();
+    fireEvent.change(notesArea()!, { target: { value: "- eins\n  - zwei" } });
+    // Typing keeps the textarea.
+    expect(notesArea()!.value).toBe("- eins\n  - zwei");
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    expect(await detail().findByText(t.saved)).toBeTruthy();
+    expect(patches()[0]!.body).toEqual({ notes: "- eins\n  - zwei", expectedModifiedAt: "2026-10-21T10:00:00Z" });
+    expect(notesArea()).toBeNull();
+    expect(within(rendered()).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["•eins", "•zwei"]);
+  });
+
+  it("shows the textarea again when the server refuses the notes", async () => {
+    serve(doc("d1", "A", { notes: "alt" }));
+    await openAt("/?doc=d1");
+    fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
+    fireEvent.change(notesArea()!, { target: { value: "neu" } });
+    fireEvent.click(detail().getByRole("button", { name: t.notesPreviewLabel }));
+    patchAnswer = { status: 400, body: { error: "bad", code: "invalid_notes" } };
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    expect((await detail().findByText(t.invalidNotes)).id).toBe(notesArea()!.getAttribute("aria-describedby"));
+    expect(notesArea()!.value).toBe("neu");
+    expect(notesArea()!.getAttribute("aria-invalid")).toBe("true");
   });
 });
 

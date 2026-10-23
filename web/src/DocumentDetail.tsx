@@ -11,6 +11,7 @@ import { button, input, primary } from "./styles";
 import { buildTagTree, type TagNode } from "./tagTree";
 import { sortByName } from "./collate";
 import { formatSize } from "./uploads";
+import { renderNotes } from "./markdown";
 import { formatState, parseState, setNavigationGuard } from "./urlState";
 
 interface Props {
@@ -66,6 +67,11 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   const [saved, setSaved] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<ErrorField, ReactNode>>>({});
   const [general, setGeneral] = useState("");
+  // The notes: rendered from their Markdown, or the textarea (Edit, and
+  // always for empty notes when the document opens or is saved).
+  const [notesEditing, setNotesEditing] = useState(false);
+  const notesField = useRef<HTMLTextAreaElement>(null);
+  const focusNotes = useRef(false);
   // The pickers' rows: the document owner's (an admin may open another user's document).
   const [meta, setMeta] = useState<{ owner: number; data: Metadata } | null>(null);
   const [metaError, setMetaError] = useState("");
@@ -96,10 +102,12 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     setGeneral("");
     setSaved(false);
     setSaving(false);
+    setNotesEditing(false);
     documentsApi.get(id, ctl.signal).then(
       (d) => {
         setDoc(d);
         setForm(formFrom(d));
+        setNotesEditing(d.notes === "");
       },
       (err: unknown) => {
         if (ctl.signal.aborted) return;
@@ -208,6 +216,11 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
 
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => heading.current?.focus(), [id]);
+  // Edit puts the caret into the notes.
+  useEffect(() => {
+    if (notesEditing && focusNotes.current) notesField.current?.focus();
+    focusNotes.current = false;
+  }, [notesEditing]);
 
   const set = <K extends keyof DocumentForm>(k: K, v: DocumentForm[K]) => {
     setForm((f) => (f ? { ...f, [k]: v } : f));
@@ -287,6 +300,8 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
         formRef.current = formFrom(d);
         setDoc(d);
         setForm(formRef.current);
+        // A saved edit shows rendered.
+        setNotesEditing(d.notes === "");
         if (done) after();
         else setSaved(true);
       },
@@ -298,6 +313,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
         }
         setSaving(false);
         const e = errorOf(err);
+        if (e.field === "notes") setNotesEditing(true);
         if (e.field) setErrors({ [e.field]: e.text });
         else setGeneral(typeof e.text === "string" ? e.text : "");
       },
@@ -348,6 +364,9 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     });
     return row.id;
   };
+
+  const notesText = form?.notes ?? "";
+  const renderedNotes = useMemo(() => renderNotes(notesText), [notesText]);
 
   const metaData = meta && doc && meta.owner === doc.ownerId ? meta.data : null;
   const options = useMemo(() => {
@@ -464,10 +483,51 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
                   />
                   <Picker label={t.tags} options={options?.tags ?? []} selected={form.tagIds} multiple disabled={!options} onChange={(ids) => set("tagIds", ids)} onCreate={creator("tags")} />
                   <div className="flex flex-col gap-1">
-                    <label htmlFor={`${headingId}-notes`} className={label}>
-                      {t.fieldNotes}
-                    </label>
-                    <textarea id={`${headingId}-notes`} className={`${input} min-h-24`} value={form.notes} maxLength={100000} onChange={(e) => set("notes", e.target.value)} {...errorProps("notes")} />
+                    <div className="flex items-center justify-between gap-2">
+                      {notesEditing ? (
+                        <label htmlFor={`${headingId}-notes`} className={label}>
+                          {t.fieldNotes}
+                        </label>
+                      ) : (
+                        <span id={`${headingId}-notes-label`} className={label}>
+                          {t.fieldNotes}
+                        </span>
+                      )}
+                      {(!notesEditing || form.notes !== "") && (
+                        <button
+                          type="button"
+                          className="rounded-md px-1.5 text-sm text-accent-ink hover:bg-surface-hover pointer-coarse:min-h-11"
+                          aria-label={notesEditing ? t.notesPreviewLabel : t.notesEditLabel}
+                          onClick={() => {
+                            focusNotes.current = !notesEditing;
+                            setNotesEditing(!notesEditing);
+                          }}
+                        >
+                          {notesEditing ? t.notesPreview : t.notesEdit}
+                        </button>
+                      )}
+                    </div>
+                    {notesEditing ? (
+                      <>
+                        <textarea
+                          id={`${headingId}-notes`}
+                          ref={notesField}
+                          className={`${input} min-h-24`}
+                          value={form.notes}
+                          maxLength={100000}
+                          onChange={(e) => set("notes", e.target.value)}
+                          aria-describedby={errors.notes ? `${headingId}-notes-error` : `${headingId}-notes-hint`}
+                          aria-invalid={errors.notes ? true : undefined}
+                        />
+                        <p id={`${headingId}-notes-hint`} className="text-xs text-ink-muted">
+                          {t.notesHint}
+                        </p>
+                      </>
+                    ) : (
+                      <div role="group" aria-labelledby={`${headingId}-notes-label`} data-testid="notes-rendered" className="flex flex-col gap-2 text-sm wrap-anywhere">
+                        {form.notes !== "" ? renderedNotes : <p className="text-ink-muted">{t.notesNone}</p>}
+                      </div>
+                    )}
                     {fieldError("notes")}
                   </div>
                   <div className="flex flex-wrap gap-x-5 gap-y-2">
