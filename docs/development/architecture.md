@@ -391,12 +391,16 @@ ranking, cursors, the bulk match and saved views are unchanged.
   rank few matches or sort by date stay within noise (`erinnerung` finds
   its 0.8 % in about 100 ms). A broad word's ranking grows with its extra
   matches and alternatives (`rechnung`: 55 000 → 64 000 hits, 4.5 s →
-  5.8–8.1 s). Many short words are the worst case: 32 items of 4
-  characters make a `tsquery` of about 3 300 alternatives, which PostgreSQL
-  checks row by row (AND, by relevance: 78 ms → 3.6–5.2 s) or ranks for
-  every match (OR, by relevance: 5 min → over an hour); by date the OR
-  takes 0.3–0.5 s. The foreign key of `search_vocabulary` to `users` costs
-  no measurable time.
+  5.8–8.1 s). Many short words are the worst case. Before the cap per
+  search, 32 items of 4 characters made a `tsquery` of about 3 300
+  alternatives: AND by relevance 78 ms → 3.6–5.2 s, OR by relevance 5 min
+  → over an hour. With it (#140, the same data with and without `00021`):
+  129 → 379 alternatives, AND by relevance 56 ms → 3.2–3.5 s p95 (the
+  planner still checks the owner's rows one by one), OR by date 56 →
+  188 ms, OR by relevance 2 min 41 s → 14 min unlimited, stopped at the
+  30 s time limit by default; `rechnung` by relevance 3.6 → 4.1 s,
+  `erinnerung` by date 2.7 s (no hits) → 136 ms p95. The foreign key of
+  `search_vocabulary` to `users` costs no measurable time.
 
 **Time limit** (#140). `SearchDocuments` runs its query, in every sort,
 in a read-only transaction with `statement_timeout` set to
