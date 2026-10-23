@@ -300,6 +300,18 @@ any API.
   change (Locale and text indexes, above) covers them: `pg_trgm` splits
   words by the database's ctype. `TestMigrateRebuildsIndexesAfterLocaleChange`
   lists both.
+- **Cost** (`TestSearchBench`, 100 000 documents of one owner and 50 000
+  of another, 2.1 and 2.0 million vocabulary rows, 4 CPUs, #114; before =
+  the same generator on 00017). Per-document p95: a text update 5.2 →
+  17.8 ms, `CompleteJob` with new text 6.7 → 18.3 ms, `CreateDocument`
+  with text 6.0 → 13.9 ms, `DeleteDocument` 1.5 → 12.5 ms; an upload
+  without text is unchanged. The generation (100 documents per
+  transaction) took 35 instead of 10 minutes, a retitle of 1 000
+  documents 4.5 instead of 3.1 s. The vocabulary with its indexes is 415
+  MB (17 % of `documents`) when the backfill builds it and 623 MB (26 %)
+  when the trigger builds it document by document; a `fillfactor` of 70
+  made the generation 20 % faster and the table 15 % larger. The backfill
+  took 1 min 40 s. Searches are unchanged.
 - **`pg_trgm`** is a trusted extension like `unaccent` and must be in
   `public`; the migration checks `pg_extension.extnamespace` and fails
   with the `ALTER EXTENSION pg_trgm SET SCHEMA public` fix in its message.
