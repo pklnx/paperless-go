@@ -863,6 +863,45 @@ describe("the trash (#12)", () => {
     expect(detail().getByRole("button", { name: t.save })).toBeTruthy();
   });
 
+  it("keeps the focus in the detail after its Restore, on the title, and Escape still closes the detail (#138)", async () => {
+    serve(doc("d1", "Rechnung", trashed));
+    await openAt("/?doc=d1&trash=1");
+    const restore = within(detail().getByRole("region", { name: t.trash })).getByRole("button", { name: t.restore });
+    restore.focus();
+    fireEvent.click(restore);
+    expect((await screen.findByTestId("notice")).textContent).toContain(t.restoredDocument("Rechnung"));
+    await waitFor(() => expect(document.activeElement).toBe(titleField()));
+    expect(screen.getByTestId("notice").contains(document.activeElement)).toBe(false);
+    // Escape goes to the detail, which closes; the notice stays.
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
+    expect(screen.getByTestId("notice").textContent).toContain(t.restoredDocument("Rechnung"));
+  });
+
+  it("dims the notes of a trashed document like its other fields (#138)", async () => {
+    // Rendered notes: a dimmed box, and Edit disabled and dimmed.
+    serve(doc("d1", "Rechnung", { ...trashed, notes: "Bezahlt" }), doc("d2", "Brief", trashed));
+    await openAt("/?doc=d1&trash=1");
+    const rendered = detail().getByTestId("notes-rendered");
+    expect(rendered.className).toContain("bg-surface-hover");
+    expect(rendered.className).toContain("text-ink-muted");
+    const edit = detail().getByRole("button", { name: t.notesEditLabel });
+    expect(edit.matches(":disabled")).toBe(true);
+    expect(edit.className).toContain("disabled:opacity-50");
+    // Empty notes: the textarea, disabled and with the fields' disabled style.
+    fireEvent.click(detail().getByRole("button", { name: t.nextDocument }));
+    await waitFor(() => expect(titleField().value).toBe("Brief"));
+    const area = detail().getByRole("textbox", { name: t.fieldNotes });
+    expect(area.matches(":disabled")).toBe(true);
+    expect(area.className).toContain("disabled:bg-surface-hover");
+    expect(area.className).toContain("disabled:text-ink-muted");
+    // A live document's rendered notes are not dimmed.
+    cleanup();
+    serve(doc("d3", "Lebt", { notes: "Offen" }));
+    await openAt("/?doc=d3");
+    expect(detail().getByTestId("notes-rendered").className).not.toContain("bg-surface-hover");
+  });
+
   it("asks before Delete permanently, and closes once it is done", async () => {
     serve(doc("d1", "Rechnung", trashed));
     await openAt("/?doc=d1&trash=1");

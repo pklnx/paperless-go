@@ -171,8 +171,9 @@ so before anything is sent: "Tags…" explains the rule, and
 **Delete** in a row, in a document's form or in the bar of checked
 documents moves documents to the trash. Deleting one document asks
 nothing: a notice "… moved to the trash" offers **Undo** for 8 seconds,
-also when another page is opened meanwhile; the keyboard focus moves to it,
-and its time stands still while it has the focus or the pointer.
+also when another page is opened meanwhile. Deleted with the keyboard, the
+focus moves to Undo; deleted with a mouse click, the focus stays put. Its
+time stands still while it has the keyboard focus or the pointer.
 Deleting checked documents, or every match of a search, asks first with
 their number.
 
@@ -202,8 +203,9 @@ the documents again).
   together; deleting permanently asks with the number.
 
 Opened from the trash, a document shows "In the trash since …" with
-Restore and Delete permanently; its form is read-only until it is
-restored. Previous and next walk the trash. If the document was moved to
+Restore and Delete permanently; its form is read-only (dimmed) until it
+is restored. After Restore there the focus stays in the form, on the
+title. Previous and next walk the trash. If the document was moved to
 the trash elsewhere while you edited it, saving is refused, your changes
 stay in the form, and after Restore you can save them.
 

@@ -230,11 +230,13 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     );
   };
   // Restored from the trash: out of the trash list, or its row follows.
-  const restored = (d: DocumentSummary) => {
+  // From a row the focus goes to the notice (the row is gone); from the
+  // detail it stays in the detail, which is still open.
+  const restored = (d: DocumentSummary, focus = true) => {
     if (trash) removeDoc(d.id);
     else replaceDoc(d);
     onChanged?.();
-    showNotice({ text: t.restoredDocument(documentName(d)), focus: true });
+    showNotice({ text: t.restoredDocument(documentName(d)), focus });
   };
   const restoreDoc = (d: DocumentSummary) => {
     if (busyRef.current.has(d.id)) return;
@@ -437,7 +439,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
           trashed(d);
           closeIfOpen(d.id);
         }}
-        onRestored={restored}
+        onRestored={(d) => restored(d, false)}
         onStale={onChanged}
         onPurged={(d) => {
           purged(d);
