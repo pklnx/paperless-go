@@ -33,7 +33,8 @@ import (
 // The lock is taken inside the transaction and released at its commit or
 // rollback, also on an error or a cancelled context. A transaction that
 // holds it does no slow work: no I/O, no network, no blob store (uploads
-// store their file and OCR runs before the transaction starts).
+// store their file and OCR runs before the transaction starts), except
+// the one stat per hash of holdBlobs (blob_removals.go).
 
 // ownerLockPrefix is the text of the owner lock's key:
 // hashtextextended(ownerLockPrefix || owner_id::text, 0). It is the key
@@ -151,10 +152,46 @@ func isWriter(sql string) bool {
 	return writesOwnerTables(sql)
 }
 
+// hashWriterQueries are the sqlc queries that write a hash column of
+// documents (original_sha256, archive_sha256, thumbnail_sha256): the
+// guard refuses them unless the transaction called holdBlobs first
+// (blob_removals.go). TestHashWriterQueriesComplete checks it against
+// queries/*.sql.
+var hashWriterQueries = map[string]bool{
+	"CreateDocument":       true, // documents.sql: original_sha256, archive_sha256
+	"SetDocumentProcessed": true, // jobs.sql: archive_sha256, thumbnail_sha256
+}
+
+// hashColumnRE and hashWriteRE match SQL that inserts or updates documents
+// and mentions one of its hash columns: the definition for unnamed SQL and
+// for TestHashWriterQueriesComplete.
+var (
+	hashColumnRE = regexp.MustCompile(`(?i)\b(?:original|archive|thumbnail)_sha256\b`)
+	hashWriteRE  = regexp.MustCompile(`(?is)\b(?:INSERT\s+INTO|UPDATE|MERGE\s+INTO)\s+(?:ONLY\s+)?(?:(?:public|"public")\.)?(?:documents\b|"documents")`)
+)
+
+// writesHashColumns reports whether the SQL text sql inserts or updates
+// documents and mentions a hash column, ignoring line comments.
+func writesHashColumns(sql string) bool {
+	s := stripSQLComments(sql)
+	return hashWriteRE.MatchString(s) && hashColumnRE.MatchString(s)
+}
+
+// isHashWriter reports whether a statement needs holdBlobs before it: a
+// named query by hashWriterQueries, any other SQL by writesHashColumns.
+func isHashWriter(sql string) bool {
+	if name := queryName(sql); name != "" {
+		return hashWriterQueries[name]
+	}
+	return writesHashColumns(sql)
+}
+
 // txLocks is what a transaction has locked.
 type txLocks struct {
 	locked bool
 	owners []int64 // ascending
+	// blobsHeld: holdBlobs ran, after the owner locks.
+	blobsHeld bool
 }
 
 // guardedDB is the only way the store reaches the database (Open, inTxWith,
@@ -174,6 +211,9 @@ func (g guardedDB) check(ctx context.Context, sql string) error {
 	}
 	if w && !locked {
 		return fmt.Errorf("%w: %s", errUnlockedWrite, statementLabel(sql))
+	}
+	if isHashWriter(sql) && (g.tx == nil || !g.tx.blobsHeld) {
+		return fmt.Errorf("%w: %s", errUnheldBlobWrite, statementLabel(sql))
 	}
 	return nil
 }
@@ -308,12 +348,16 @@ func (t *writeTx) holds(owners ...int64) error {
 type lockRecorderKey struct{}
 
 // lockEvent is one call to the recorder: an ownerTx past its gate (Gated
-// set), a lockOwners call (Owners set)
-// or a statement (Query its sqlc name, Writes whether it needs the lock,
+// set), a lockOwners call (Owners set), a holdBlobs call (Held set) or a
+// statement (Query its sqlc name, Writes whether it needs the lock,
 // Locked whether the lock was held).
 type lockEvent struct {
 	Gated  []int64 // an ownerTx took the gate of these owners
 	Owners []int64
+	// Held marks a holdBlobs call, Blobs its hashes in the order of
+	// their lock keys.
+	Held   bool
+	Blobs  []string
 	Query  string
 	Writes bool
 	Locked bool

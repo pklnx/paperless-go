@@ -19,6 +19,7 @@ import (
 	"github.com/pklnx/paperless-go/internal/blobstore"
 	"github.com/pklnx/paperless-go/internal/store"
 	"github.com/pklnx/paperless-go/internal/store/storetest"
+	"github.com/pklnx/paperless-go/internal/sweep"
 )
 
 // clock is a test clock that moves only when told.
@@ -52,12 +53,13 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	st := storetest.New(t)
 	data := t.TempDir()
 	blobs, err := blobstore.New(data)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The store checks the worker's files before it names them.
+	st, _ := storetest.NewWithOptions(t, storetest.Options{Blobs: blobs})
 	var logBuf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&syncWriter{w: &logBuf}, nil))
 	wd, err := OpenWorkDir(data, log)
@@ -804,4 +806,53 @@ func TestWorkerLeaseLostDuringThumbnail(t *testing.T) {
 		t.Fatalf("stored after the lease was lost: %+v, %v", got, err)
 	}
 	e.workDirEmpty(t)
+}
+
+// The order of the review for CompleteJob: the worker's Put of the
+// archive finds the file (the archive of a purged document), the sweeper
+// removes it before the worker stores the result, and the worker's
+// CompleteJob fails with ErrBlobRemoved: the attempt is retried, and the
+// retry stores a new copy and completes.
+func TestWorkerArchiveRemovedBeforeCompletion(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	d := e.doc(t, "%PDF-1.4 scan")
+	archive := "%PDF-1.4 OCRed"
+	b, _, err := e.blobs.Put(strings.NewReader(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.QueueUnreferencedBlobs(ctx, []string{b.SHA256}, e.clock.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	e.runner.handle = poppler(pdf{pages: []string{""}, ocr: []string{longText}})
+	sw := &sweep.Sweeper{Store: e.st, Blobs: e.blobs, Now: e.clock.Now}
+	swept := 0
+	e.w.completing = func() {
+		if swept++; swept > 1 {
+			return
+		}
+		if q, err := sw.QueuePass(ctx, false); err != nil || q.Removed != 1 {
+			t.Errorf("sweep: %+v, %v", q, err)
+		}
+	}
+	e.runOnce(t, ctx, Retry)
+	if j := e.job(t, d.ID); j.State != store.JobQueued || j.Attempts != 1 {
+		t.Fatalf("after the failed completion: %+v", j)
+	}
+	if got, err := e.st.GetDocument(ctx, e.owner, d.ID); err != nil || got.ArchiveSHA256 != nil {
+		t.Fatalf("the failed completion stored %v, %v", got, err)
+	}
+	if e.blobs.Exists(b.SHA256) {
+		t.Fatal("the archive is still there")
+	}
+	e.clock.Add(time.Minute)
+	e.runOnce(t, ctx, Done)
+	got, err := e.st.GetDocument(ctx, e.owner, d.ID)
+	if err != nil || got.ArchiveSHA256 == nil || *got.ArchiveSHA256 != b.SHA256 || !e.blobs.Exists(b.SHA256) {
+		t.Fatalf("after the retry: %+v, %v", got, err)
+	}
+	if q, err := sw.QueuePass(ctx, false); err != nil || q != (sweep.QueueStats{}) {
+		t.Errorf("sweep after the retry: %+v, %v", q, err)
+	}
 }

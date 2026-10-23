@@ -418,6 +418,12 @@ func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
 		// not a duplicate any more, not importable yet.
 		w.Header().Set("Retry-After", purgeRetryAfter)
 		s.writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "the document with this file is being removed permanently; try again in a minute"})
+	case errors.Is(err, store.ErrBlobRemoved):
+		// The sweeper is removing a file of this change (an upload of a
+		// file whose last document was just purged): nothing was
+		// written, and the retry stores the file again.
+		w.Header().Set("Retry-After", "1")
+		s.writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "the file is being cleaned up; try again"})
 	case errors.Is(err, store.ErrUnknownUser):
 		// The user was removed while the request ran; the session is gone
 		// with it.

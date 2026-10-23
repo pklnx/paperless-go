@@ -323,8 +323,9 @@ type ProcessResult struct {
 // its source are replaced only when the stored text is empty or came from
 // processing ("PDF-Text", "Tesseract"); text from an import or an edit
 // stays. A document deleted meanwhile gives ErrNotFound (its job went with
-// it), a lease that is no longer j's ErrLeaseLost; either way nothing is
-// stored. Older finished jobs of the document are deleted. It takes the
+// it), a lease that is no longer j's ErrLeaseLost, an archive or
+// thumbnail that the sweeper is removing or that is missing ErrBlobRemoved
+// (the next attempt stores them again); in each case nothing is stored. Older finished jobs of the document are deleted. It takes the
 // document owner's gate and write lock first (ownerTx), without a bound:
 // its wait is limited by the worker's context.
 func (s *Store) CompleteJob(ctx context.Context, j *Job, now time.Time, r ProcessResult) error {
@@ -341,6 +342,12 @@ func (s *Store) CompleteJob(ctx context.Context, j *Job, now time.Time, r Proces
 	}
 	return s.ownerTx(ctx, []int64{owner}, func(ctx context.Context, t *writeTx) error {
 		q := t.q
+		// The archive and thumbnail must still be there, and the sweeper
+		// must not take them until this transaction ends
+		// (blob_removals.go).
+		if err := s.holdBlobs(ctx, t, r.ArchiveSHA256, r.ThumbnailSHA256); err != nil {
+			return err
+		}
 		locked, err := q.LockDocument(ctx, db.LockDocumentParams{ID: doc})
 		if err != nil {
 			return mapErr(err)

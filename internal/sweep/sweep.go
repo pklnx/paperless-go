@@ -1,16 +1,25 @@
 // Package sweep removes what the trash let go (#12;
-// docs/development/architecture.md, "Trash"). Its row pass deletes the
-// documents that are due for purge: their purge was asked for ("delete
-// permanently", "empty trash") or the retention passed since they were
-// deleted. Each purge queues the document's files for removal; the file
-// passes that remove them come with #12, part 2.
+// docs/development/architecture.md, "Trash" and "Blob removal"). Its row
+// pass deletes the documents that are due for purge: their purge was
+// asked for ("delete permanently", "empty trash") or the retention passed
+// since they were deleted. Each purge queues the document's files in
+// blob_removals. The queue pass is the only remover of files: it removes
+// a queued file once it is due and no document names it, under the
+// hash's blob lock (store.MarkBlobRemoval). The daily walk queues the
+// files no document names (left by refused uploads, failed imports or
+// crashes) and removes stale temporary files, but only in a data
+// directory bound to this installation and behind a sanity stop.
 package sweep
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
+	"github.com/pklnx/paperless-go/internal/blobstore"
 	"github.com/pklnx/paperless-go/internal/store"
 )
 
@@ -24,23 +33,57 @@ const (
 	// trigger a delete costs about 12 ms, so an owner's other writers
 	// wait at most about 1.5 s for one transaction.
 	BatchSize = 100
+	// QueueBatch is the most queued files one queue pass removes.
+	QueueBatch = 1000
+	// WalkInterval is how often serve walks the data directory; the first
+	// walk runs at start.
+	WalkInterval = 24 * time.Hour
+	// WalkBatch is how many hashes the walk looks up at a time.
+	WalkBatch = 1000
+	// TempAge is the age from which the walk removes a temporary file of
+	// Put: an upload's Put is bounded by its hour-long transfer timeout.
+	TempAge = 24 * time.Hour
+	// MinRefusal is the number of candidates above which the 10 % stop
+	// applies: a small store may well lose a tenth of its files at once.
+	MinRefusal = 100
 )
 
 // Store is the part of *store.Store the sweeper uses.
 type Store interface {
 	PurgeDueDocuments(ctx context.Context, now time.Time, retention time.Duration, limit int) (store.PurgeResult, error)
+	BlobRemovalsDue(ctx context.Context, now time.Time, limit int) ([]string, error)
+	MarkBlobRemoval(ctx context.Context, hash string, now time.Time) (store.BlobMark, error)
+	FinishBlobRemoval(ctx context.Context, hash string) error
+	UnreferencedBlobs(ctx context.Context, hashes []string) ([]string, error)
+	WalkCandidates(ctx context.Context, hashes []string) ([]string, error)
+	QueueUnreferencedBlobs(ctx context.Context, hashes []string, due time.Time) (int64, error)
+	Binder
+}
+
+// Blobs is the part of *blobstore.Store the sweeper uses.
+type Blobs interface {
+	Remove(hash string) error
+	RemoveTemp(rel string) error
+	Walk(fn func(blobstore.Entry) error) error
+	// Root is the data directory, which holds the installation marker.
+	Root() string
 }
 
 // Sweeper runs the sweeps. Retention and Now must be the store's
 // (store.Store.TrashRetention and Now), so the sweeper and the API agree
-// on what is due.
+// on what is due. Store and Blobs are required.
 type Sweeper struct {
 	Store Store
+	Blobs Blobs
 	Log   *slog.Logger
 	// Now is the clock; time.Now if nil.
 	Now func() time.Time
 	// Retention is how long a trashed document stays.
 	Retention time.Duration
+
+	// Test seams (export_test.go): called after step 1 and step 2 of
+	// the queue pass for a hash.
+	afterMark, afterRemove func(hash string)
 }
 
 // Stats is what one RunOnce did.
@@ -48,6 +91,19 @@ type Stats struct {
 	// Purged is the number of documents deleted, Retention those of them
 	// whose retention passed (the others' purge was asked for).
 	Purged, Retention int
+	Queue             QueueStats
+}
+
+// QueueStats is what one queue pass did (or, in a dry run, would do).
+type QueueStats struct {
+	// Removed files; in a dry run the due files no document names.
+	Removed int
+	// InUse are the due hashes a document names again: their rows went
+	// and the files stay.
+	InUse int
+	// Failed removals: the row stays marked and the next pass tries
+	// again.
+	Failed int
 }
 
 func (s *Sweeper) now() time.Time {
@@ -65,10 +121,10 @@ func (s *Sweeper) log() *slog.Logger {
 }
 
 // RunOnce runs the row pass until no document is due at the time it
-// started: batches of BatchSize, so emptying a trash of 5 000 documents
-// takes one call, not 50 rounds of the ticker. It stops with ctx (between
-// owners' transactions) and on the first error; what was deleted until
-// then stays deleted.
+// started (batches of BatchSize, so emptying a trash of 5 000 documents
+// takes one call, not 50 rounds of the ticker), then one queue pass. It
+// stops with ctx (between owners' transactions and between files) and on
+// the first error; what was done until then stays done.
 func (s *Sweeper) RunOnce(ctx context.Context) (Stats, error) {
 	var st Stats
 	now := s.now()
@@ -85,24 +141,225 @@ func (s *Sweeper) RunOnce(ctx context.Context) (Stats, error) {
 		// Every scanned document was deleted or is no longer due (a
 		// restore came first), so a scan below the limit was the last.
 		if r.Scanned < BatchSize {
-			return st, nil
+			break
 		}
 	}
+	q, err := s.QueuePass(ctx, false)
+	st.Queue = q
+	return st, err
+}
+
+// QueuePass removes up to QueueBatch queued files that are due and that
+// no document names, per hash in three steps: mark the row under the
+// hash's exclusive blob lock (store.MarkBlobRemoval; a hash in use loses
+// its row instead), remove the file without a lock held, delete the row.
+// A crash or error after the first step leaves the row marked, and the
+// next pass takes it again; Remove of a file already gone is fine. A
+// failed removal is logged and the pass goes on with the next hash. With
+// dryRun it only counts.
+func (s *Sweeper) QueuePass(ctx context.Context, dryRun bool) (QueueStats, error) {
+	var st QueueStats
+	now := s.now()
+	hashes, err := s.Store.BlobRemovalsDue(ctx, now, QueueBatch)
+	if err != nil || len(hashes) == 0 {
+		return st, err
+	}
+	if dryRun {
+		free, err := s.Store.UnreferencedBlobs(ctx, hashes)
+		st.Removed, st.InUse = len(free), len(hashes)-len(free)
+		return st, err
+	}
+	log := s.log()
+	for _, h := range hashes {
+		if err := ctx.Err(); err != nil {
+			return st, err
+		}
+		mark, err := s.Store.MarkBlobRemoval(ctx, h, now)
+		if err != nil {
+			return st, err
+		}
+		switch mark {
+		case store.BlobInUse:
+			st.InUse++
+			continue
+		case store.BlobKept:
+			continue
+		}
+		if s.afterMark != nil {
+			s.afterMark(h)
+		}
+		if err := s.Blobs.Remove(h); err != nil {
+			st.Failed++
+			log.Error("sweep: removing a file failed; trying again at the next round", "sha256", h, "err", err)
+			continue
+		}
+		if s.afterRemove != nil {
+			s.afterRemove(h)
+		}
+		if err := s.Store.FinishBlobRemoval(ctx, h); err != nil {
+			return st, err
+		}
+		st.Removed++
+	}
+	return st, nil
+}
+
+// WalkOptions are the choices of one walk.
+type WalkOptions struct {
+	// DryRun only counts: nothing is queued or removed.
+	DryRun bool
+	// Force overrides the sanity stop (an empty database, more than 10 %
+	// of the files) for this walk. The binding is never overridden.
+	Force bool
+}
+
+// WalkStats is what one walk saw and did.
+type WalkStats struct {
+	// Blobs is the number of files below documents/, Candidates those no
+	// document names and that are not queued yet, Queued the rows added to blob_removals (in a dry
+	// run: 0).
+	Blobs, Candidates, Queued int
+	// Temp is the number of stale temporary files removed (in a dry run:
+	// found).
+	Temp int
+	// Unexpected is the number of entries the walk left alone: symlinks,
+	// other file types, wrong names or places.
+	Unexpected int
+}
+
+// maxUnexpectedLogged bounds the warnings about unexpected entries per
+// walk; the count covers the rest.
+const maxUnexpectedLogged = 20
+
+// Walk walks the data directory once. It refuses, queues nothing and
+// removes nothing when the data directory is not bound to the database's
+// installation (ErrUnbound, ErrOtherInstallation; the binding is checked
+// first, before any file is looked at), or, unless opts.Force, when the
+// database has no documents but the data directory has files
+// (ErrEmptyDatabase) or when more than 10 % of the files and more than
+// MinRefusal would be queued (ErrTooMany): it counts all candidates (files
+// no document names and not queued yet) before it queues any. Otherwise it queues the files no document names,
+// due after store.BlobGrace (the queue pass removes them unless a writer
+// names them by then), and removes the temporary files of Put older than
+// TempAge.
+func (s *Sweeper) Walk(ctx context.Context, opts WalkOptions) (WalkStats, error) {
+	var st WalkStats
+	inst, err := s.Store.Installation(ctx)
+	if err != nil {
+		return st, err
+	}
+	if err := CheckBinding(s.Blobs.Root(), inst.ID); err != nil {
+		return st, err
+	}
+	now := s.now()
+	log := s.log()
+	var candidates, temps, batch []string
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		free, err := s.Store.WalkCandidates(ctx, batch)
+		candidates = append(candidates, free...)
+		batch = batch[:0]
+		return err
+	}
+	err = s.Blobs.Walk(func(e blobstore.Entry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		switch e.Kind {
+		case blobstore.EntryBlob:
+			st.Blobs++
+			batch = append(batch, e.SHA256)
+			if len(batch) == WalkBatch {
+				return flush()
+			}
+		case blobstore.EntryTemp:
+			if strings.HasPrefix(e.Path, "tmp/put-") && now.Sub(e.ModTime) > TempAge {
+				temps = append(temps, e.Path)
+			}
+		default:
+			st.Unexpected++
+			if st.Unexpected <= maxUnexpectedLogged {
+				log.Warn("sweep: left an unexpected entry in the data directory alone", "path", e.Path, "reason", e.Reason)
+			}
+		}
+		return nil
+	})
+	if err == nil {
+		err = flush()
+	}
+	st.Candidates = len(candidates)
+	if err != nil {
+		return st, err
+	}
+	if !opts.Force {
+		has, err := s.Store.HasDocuments(ctx)
+		if err != nil {
+			return st, err
+		}
+		switch {
+		case !has && st.Blobs > 0:
+			return st, fmt.Errorf("%w (%d files); nothing was queued", ErrEmptyDatabase, st.Blobs)
+		case st.Candidates > MinRefusal && st.Candidates*10 > st.Blobs:
+			return st, fmt.Errorf("%w (%d of %d files); nothing was queued", ErrTooMany, st.Candidates, st.Blobs)
+		}
+	}
+	if opts.DryRun {
+		st.Temp = len(temps)
+		return st, nil
+	}
+	due := now.Add(store.BlobGrace)
+	for len(candidates) > 0 {
+		n := min(len(candidates), WalkBatch)
+		q, err := s.Store.QueueUnreferencedBlobs(ctx, candidates[:n], due)
+		st.Queued += int(q)
+		if err != nil {
+			return st, err
+		}
+		candidates = candidates[n:]
+	}
+	for _, p := range temps {
+		if err := s.Blobs.RemoveTemp(p); err != nil {
+			log.Error("sweep: removing a stale temporary file failed", "path", p, "err", err)
+			continue
+		}
+		st.Temp++
+	}
+	return st, nil
+}
+
+// Refused reports whether err is one of the walk's refusals.
+func Refused(err error) bool {
+	return errors.Is(err, ErrUnbound) || errors.Is(err, ErrOtherInstallation) ||
+		errors.Is(err, ErrEmptyDatabase) || errors.Is(err, ErrTooMany)
 }
 
 // Run sweeps at once, then at every tick and whenever wake delivers, until
-// ctx ends. An error is logged; the next round tries again.
+// ctx ends: each round runs RunOnce, and the walk at the first round and
+// then once WalkInterval passed on the sweeper's clock. An error is
+// logged; the next round tries again (the walk the next day).
 func (s *Sweeper) Run(ctx context.Context, tick <-chan time.Time, wake <-chan struct{}) {
 	log := s.log()
+	var nextWalk time.Time
 	for {
 		st, err := s.RunOnce(ctx)
 		switch {
 		case ctx.Err() != nil:
 			return
 		case err != nil:
-			log.Error("sweep: purging the trash failed; trying again at the next round", "purged", st.Purged, "err", err)
-		case st.Purged > 0:
+			log.Error("sweep: the round failed; trying again at the next round", "purged", st.Purged,
+				"removed", st.Queue.Removed, "err", err)
+		}
+		if st.Purged > 0 {
 			log.Info("sweep: purged documents from the trash", "purged", st.Purged, "retention", st.Retention)
+		}
+		if q := st.Queue; q.Removed+q.InUse+q.Failed > 0 {
+			log.Info("sweep: removed files", "removed", q.Removed, "in_use", q.InUse, "failed", q.Failed)
+		}
+		if now := s.now(); !now.Before(nextWalk) {
+			nextWalk = now.Add(WalkInterval)
+			s.walk(ctx, log)
 		}
 		select {
 		case <-ctx.Done():
@@ -110,6 +367,25 @@ func (s *Sweeper) Run(ctx context.Context, tick <-chan time.Time, wake <-chan st
 		case <-tick:
 		case <-wake:
 		}
+	}
+}
+
+// walk runs the daily walk and logs what it did.
+func (s *Sweeper) walk(ctx context.Context, log *slog.Logger) {
+	w, err := s.Walk(ctx, WalkOptions{})
+	switch {
+	case ctx.Err() != nil:
+	case errors.Is(err, ErrUnbound):
+		log.Warn("sweep: the data directory is not bound to this installation, so files no document names are not removed; "+
+			"run sweep --bind once", "dir", s.Blobs.Root())
+	case Refused(err):
+		log.Error("sweep: the walk of the data directory refused to queue files", "dir", s.Blobs.Root(),
+			"files", w.Blobs, "unreferenced", w.Candidates, "err", err)
+	case err != nil:
+		log.Error("sweep: the walk of the data directory failed; trying again tomorrow", "err", err)
+	default:
+		log.Info("sweep: walked the data directory", "files", w.Blobs, "unreferenced", w.Candidates, "queued", w.Queued,
+			"temporary_removed", w.Temp, "unexpected", w.Unexpected)
 	}
 }
 

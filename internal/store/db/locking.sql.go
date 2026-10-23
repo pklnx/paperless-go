@@ -9,6 +9,44 @@ import (
 	"context"
 )
 
+const lockBlob = `-- name: LockBlob :exec
+SELECT pg_advisory_xact_lock($1::int, $2::int)
+`
+
+type LockBlobParams struct {
+	Class int32
+	Key   int32
+}
+
+func (q *Queries) LockBlob(ctx context.Context, arg LockBlobParams) error {
+	_, err := q.db.Exec(ctx, lockBlob, arg.Class, arg.Key)
+	return err
+}
+
+const lockBlobShared = `-- name: LockBlobShared :exec
+
+SELECT pg_advisory_xact_lock_shared($1::int, $2::int)
+`
+
+type LockBlobSharedParams struct {
+	Class int32
+	Key   int32
+}
+
+// The per-hash blob lock (store.holdBlobs and the sweeper's queue pass;
+// docs/development/architecture.md, "Blob removal"). It uses the two-int4
+// form, whose key space is separate from the single-bigint keys of the
+// owner lock and the other advisory locks of the code base, so a blob key
+// can never equal an owner key. class is store.blobLockClass, key the
+// first four bytes of the SHA-256 (store.blobLockKey): two hashes with the
+// same key only serialise. Writers take it shared, after their owner
+// locks, in ascending key; the sweeper takes one key exclusively and no
+// owner lock.
+func (q *Queries) LockBlobShared(ctx context.Context, arg LockBlobSharedParams) error {
+	_, err := q.db.Exec(ctx, lockBlobShared, arg.Class, arg.Key)
+	return err
+}
+
 const lockOwner = `-- name: LockOwner :exec
 
 SELECT pg_advisory_xact_lock(hashtextextended($1::text || $2::bigint::text, 0))

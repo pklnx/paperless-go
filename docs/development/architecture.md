@@ -25,14 +25,14 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 
 | Path | Purpose |
 |---|---|
-| `cmd/paperless-go` | Command line (cobra): `migrate`, `serve`, `keygen`, `user`, `audit export`, `prepare-data` (hidden, run by `./pgo migrate`). |
+| `cmd/paperless-go` | Command line (cobra): `migrate`, `serve`, `keygen`, `user`, `audit export`, `sweep`, `prepare-data` (hidden, run by `./pgo migrate`). |
 | `internal/auth` | Argon2id password hashes, session tokens, TOTP (RFC 6238) and recovery codes, the failed-login limiter and a rate limit, all with an injectable clock. |
 | `internal/crypto` | AES-256-GCM sealing of small secrets (the TOTP secrets) with `PAPERLESS_GO_SECRET_KEY`. |
 | `internal/config` | Configuration from `PAPERLESS_GO_*` environment variables. |
 | `internal/blobstore` | Content-addressed document files: named by their SHA-256 without extension (`documents/ab/cd/<sha256>`), published and removed durably (see [Blob durability](#blob-durability)). |
 | `internal/ingest` | Imports one file as a document: type detection from the content (PDF, JPEG, PNG, HEIC/HEIF), the size and 50-megapixel limits, then the blob store, the duplicate check and the row (see [Ingest](#ingest)). |
 | `internal/consume` | The consume folder: polls `consume/<user>/`, imports settled files through `internal/ingest`, deletes or moves them (see [Consume folder](#consume-folder)). |
-| `internal/sweep` | The trash's sweeper: deletes the documents due for purge and queues their files for removal (see [Trash](#trash)). |
+| `internal/sweep` | The trash's sweeper: deletes the documents due for purge, removes the queued files no document names, and walks the data directory once a day behind the installation marker (see [Trash](#trash) and [Blob removal](#blob-removal)). |
 | `internal/process` | The processing queue's worker: claims jobs, runs the tools (`Runner`) in a work directory, stores text, page count and archive PDF (see [Processing](#processing)). |
 | `internal/store` | PostgreSQL access: migrations (goose, embedded), queries (sqlc, generated into `internal/store/db`). |
 | `internal/store/storetest` | A throwaway, migrated database per test. |
@@ -98,8 +98,8 @@ checked only against the admin's own documents.
 processed and equal to the original for a PDF that already has text. Export
 writes the archive PDF, or the original when there is none. Deleting a
 document moves it to the [trash](#trash); the sweeper's purge of the row
-queues its files in `blob_removals`, and the file removal comes with #12,
-part 2.
+queues its files in `blob_removals`, and its queue pass removes those no
+document names any more (see [Blob removal](#blob-removal)).
 
 **Deletes.** Deleting a correspondent or document type leaves its documents
 without one; deleting a tag removes it from its documents and makes its
@@ -517,7 +517,14 @@ first) and its retry loop.
   network and no blob-store access: uploads write the blob and detect the
   type before `CreateDocument`, OCR runs before `CompleteJob`, the audit
   user agent is looked up before the transaction begins. The longest
-  holder is a bulk change over 5 000 documents.
+  holder is a bulk change over 5 000 documents. The one named exception
+  is `holdBlobs` (see [Blob removal](#blob-removal)): one `stat` per hash
+  a writer is about to name, microseconds and no `fsync`.
+- **Blob locks** come after the owner locks: `CreateDocument` and
+  `CompleteJob` take the shared lock of each hash they name right after
+  `lockOwners`, so the order is owner locks → blob locks → row locks. The
+  sweeper holds one blob lock and no owner lock, so no cycle forms through
+  them.
 - **What the row locks still do.** `LockDocument`/`LockDocuments` (`FOR
   NO KEY UPDATE`) return the owner, `modified_at` and the IDs in scope,
   and keep a document safe against SQL outside the store; `LockTag`,
@@ -692,11 +699,106 @@ purge too), and the sweeper deletes its row.
   no document any more (purged in between). A restore that finds the
   document live (someone restored it meanwhile, `ErrNotInTrash`) is a
   plain duplicate for an upload-only key.
-- **Not yet.** The files of a purged row stay until #12, part 2 removes
-  the queued ones that no document references (with a per-hash lock
-  against a concurrent upload of the same file). #10's export decides
+- **Files.** A purged row's files are queued with `due_at = now + 1 h`
+  and removed by the sweeper's queue pass once no document names them
+  (see [Blob removal](#blob-removal)): disk space comes back about an
+  hour and a minute after a purge. #10's export decides
   what to do with trashed documents (the app's format has `Deleted/`), and
   #11's upcoming deadlines must leave them out.
+
+## Blob removal
+
+#12, part 2 (`internal/store/blob_removals.go`, `internal/sweep`). The
+sweeper's **queue pass** is the only remover of document files; a purge
+and the walk only queue hashes in `blob_removals`. Files are shared
+between owners and between an original and an archive, so a file goes only
+when no document names it as original, archive or thumbnail (the three
+hash indexes), and a writer that is about to name a file must not lose it
+to a removal in between: an upload whose `Put` found the file
+(`created=false`) inserts its row only later, the worker stores the archive
+and thumbnail minutes before `CompleteJob`.
+
+- **The blob lock.** A transaction-level advisory lock per hash, in the
+  two-`int4` key space (`pg_advisory_xact_lock(class, key)`, class
+  `0x70676f62`, key the first four bytes of the hash), apart from the
+  single-`bigint` keys of the owner lock and the other advisory locks, so a
+  blob key never equals an owner key. Two hashes with the same key only
+  serialise. It is taken inside the writer's transaction, after the owner
+  lock, so no connection is held during an upload.
+- **Writers** (`CreateDocument`: original and archive; `CompleteJob`:
+  archive and thumbnail) call `holdBlobs` right after `lockOwners`: the
+  shared lock of each hash in ascending key; `DELETE FROM blob_removals …
+  RETURNING removed_at` (a row the sweeper marked gives `ErrBlobRemoved`);
+  `Exists` for each hash (a missing file gives `ErrBlobRemoved`). Then the
+  row is written. The guard refuses the statements that write a hash
+  column (`hashWriterQueries`; unnamed SQL by `writesHashColumns`) unless
+  `holdBlobs` ran in the transaction, and `TestEveryWriterLocksItsOwner`
+  checks that exactly the hash writers hold. A rolled-back writer (a
+  duplicate) rolls its dequeue back too. `ErrBlobRemoved` writes nothing:
+  an upload answers `503` with `Retry-After: 1` ("the file is being
+  cleaned up; try again"), the consume folder leaves the file for the next
+  scan, `import` reports the file as failed, and the worker's attempt is
+  retried. The retry's `Put` publishes a fresh copy.
+- **`Blobs` is required.** `store.Open` takes the blob store's lookup
+  (`blobstore.Files`, which creates nothing) and refuses `nil`, so no
+  command can skip the check; `openApp` passes the data directory for
+  every command (`TestOpenAppChecksTheDataDir`, and
+  `TestOnlyOpenAppOpensTheStore` keeps it the only caller). Tests that store
+  no files pass `storetest.AnyBlob`.
+- **The queue pass** (every minute in `serve`, after the row pass; up to
+  1 000 rows a run), per hash: (1) one transaction without I/O: the
+  exclusive blob lock, then `UPDATE blob_removals SET removed_at = now`
+  for a due (or already marked) row that no document names
+  (`MarkBlobRemoval`); a hash a document names loses its row instead (a
+  later purge queues it again). The exclusive lock waits for every writer
+  that holds the shared one, and under READ COMMITTED the `UPDATE` takes
+  its snapshot after the wait, so it sees every reference such a writer
+  committed. (2) `blobstore.Remove`, with no lock held; idempotent. (3)
+  `DELETE` the marked row. A failed `Remove` is logged and the pass goes on;
+  the row stays marked for the next pass.
+- **Every order is safe.** A writer that commits before step 1 makes the
+  sweeper see its reference. A writer holding its shared lock makes step 1
+  wait, then see it. A writer arriving while step 1 holds the lock waits,
+  then sees the mark. A writer between step 1 and 3 sees the mark, or
+  `Exists` fails; one after step 3 (its `Put` long before) fails at
+  `Exists`. A hash queued between a writer's `DELETE` and its commit
+  cannot be marked before the commit (the lock). Tests (a)–(d) in
+  `TestBlobRemovalRaces` run these orders for both writers, plus the
+  upload API (`TestUploadPutSweepInsert`, `TestUploadWhileTheFileIsMarked`)
+  and the worker (`TestWorkerArchiveRemovedBeforeCompletion`).
+- **Crash safety.** A crash after step 1 leaves the row marked: the next
+  pass takes it again (writers of the hash fail meanwhile, for at most a
+  minute), rechecks, removes and deletes it. A crash after step 2 leaves a
+  marked row whose file is gone: `Remove` is fine with that. A writer whose
+  `Put` re-created the file between step 2 and 3 fails once at the mark;
+  its retry finds the file.
+- **The grace** (`store.BlobGrace`, 1 h, `due_at` of every queued row) is
+  not needed for correctness. It keeps a file that an upload or the worker
+  has just stored, and no row names yet, from being queued by the walk and
+  removed before the writer's `DELETE` takes the row away, which would fail
+  that writer once.
+- **The walk** (at `serve`'s start, then every 24 h of the sweeper's clock,
+  and `sweep`): `blobstore.Walk` in batches of 1 000 hashes, the
+  candidates being files no document names and not queued yet
+  (`WalkCandidates`); it queues them due in an hour and removes `tmp/put-*`
+  files older than 24 hours (an upload's `Put` is bounded by its one-hour
+  transfer timeout; a name left after publication is only a second link).
+  Unexpected entries are logged (up to 20 per walk) and never touched.
+  Guards, each of which queues and removes nothing: the data directory must
+  hold the marker file `installation` with the database's installation
+  UUID (`store.Installation`; `ErrUnbound` without it, a warning at
+  `serve`'s start and at every walk; `ErrOtherInstallation` with another);
+  and, unless `sweep --force`, the database must have documents when the
+  directory has files (`ErrEmptyDatabase`) and one walk may queue at most
+  10 % of the files it saw or at most 100 (`ErrTooMany`), counted over all
+  candidates before any is queued. `migrate` writes the marker into a data
+  directory without a marker and without a file below `documents/`; an
+  existing installation binds once with `sweep --bind`, which needs
+  documents in the database and `--force` over another installation's
+  marker. A `PAPERLESS_GO_DATABASE_URL` typo, a restore into the wrong
+  database or a reinstall that kept `DATA_DIR` therefore cannot queue the
+  whole store; the queue pass keeps working while unbound, since it removes
+  only what this database queued.
 
 ## Blob durability
 
@@ -735,7 +837,7 @@ about durability.
   A writer that finds the file (before or through a lost link race)
   synchronizes that file and the same directories itself before it returns
   `created=false`: the file may be what an earlier, failed call published.
-  If a removal (the orphan sweep, #12) takes the file away between the
+  If a removal (the sweeper's queue pass) takes the file away between the
   lookup and its synchronization, `Put` publishes its own copy instead.
   After a failure the final file stays for the retry; the temporary name is
   removed, but not durably.
@@ -743,12 +845,12 @@ about durability.
   file was already gone: an earlier call may have unlinked it and failed
   before the barrier. If shard directories are missing, it synchronizes the
   nearest existing one and its ancestors through the store root; a missing
-  store root is an error. The caller makes sure no row refers to the file;
-  purging a document row (the [trash](#trash)) queues its files in
-  `blob_removals`, and the pass that removes unreferenced files comes with
-  #12, part 2.
+  store root is an error. The caller makes sure no row refers to the file
+  and no writer is about to name it: only the sweeper's queue pass calls it,
+  under the protocol of [Blob removal](#blob-removal).
 
-Every call that takes a hash (`OpenHash`, `Exists`, `Remove`) accepts only
+Every call that takes a hash (`OpenHash`, `Exists`, `Remove`, and
+`Files.Exists`) accepts only
 a lowercase hex SHA-256 and builds the path itself, so no input reaches a
 file outside `documents/`; a malformed hash gives `ErrNotHash` (`Exists`:
 false). There is no access by path.
@@ -757,7 +859,8 @@ Stale temporary names in `tmp/` are possible after a crash. A name left
 after publication is a second hard link to a live blob. `Walk` reports every
 file below `documents/` and `tmp/` (blobs, temporary files with their age,
 and anything unexpected such as symlinks, wrong names or extensions) without
-following symlinks, for the sweep and a later consistency check.
+following symlinks, for the sweep's walk and a later consistency check;
+`RemoveTemp` removes a `tmp/put-*` name the walk found stale.
 
 The guarantee holds on Linux, for a data directory on one local filesystem
 that supports hard links and `fsync` on regular files and directories, on a
@@ -804,7 +907,8 @@ The result is `Imported`, `Duplicate` (with the existing document's ID and
 title) or `Refused` (`unsupported`, `too_large`, `too_many_pixels`,
 `unreadable`); an error is transient, nothing was created and a retry may
 succeed. Nothing calls `blobstore.Remove`: a blob left by a failure is
-reused by the retry or swept as an orphan (#12). Images are stored as
+reused by the retry or queued by the sweep's daily walk (see [Blob
+removal](#blob-removal)). Images are stored as
 originals; the CLI `import` walks a path (files only, symlinks skipped, sources
 untouched), calls `Import` per file and writes one `document.import` audit
 entry per run (the importer's per-file transactions have no audit entry of

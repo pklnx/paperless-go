@@ -8,3 +8,19 @@
 
 -- name: LockOwner :exec
 SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(prefix)::text || sqlc.arg(owner_id)::bigint::text, 0));
+
+-- The per-hash blob lock (store.holdBlobs and the sweeper's queue pass;
+-- docs/development/architecture.md, "Blob removal"). It uses the two-int4
+-- form, whose key space is separate from the single-bigint keys of the
+-- owner lock and the other advisory locks of the code base, so a blob key
+-- can never equal an owner key. class is store.blobLockClass, key the
+-- first four bytes of the SHA-256 (store.blobLockKey): two hashes with the
+-- same key only serialise. Writers take it shared, after their owner
+-- locks, in ascending key; the sweeper takes one key exclusively and no
+-- owner lock.
+
+-- name: LockBlobShared :exec
+SELECT pg_advisory_xact_lock_shared(sqlc.arg(class)::int, sqlc.arg(key)::int);
+
+-- name: LockBlob :exec
+SELECT pg_advisory_xact_lock(sqlc.arg(class)::int, sqlc.arg(key)::int);

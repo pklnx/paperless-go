@@ -145,3 +145,43 @@ func TestTrashedDuplicateDueForPurgeStays(t *testing.T) {
 		t.Errorf("document: %+v, %v", d, err)
 	}
 }
+
+// A file whose stored copy the sweeper is removing (its last document was
+// purged, and the sweeper marked the file) stays in the consume folder
+// and is imported at a later scan.
+func TestFileBeingCleanedUpStays(t *testing.T) {
+	e := newEnv(t)
+	anna := e.user("anna", false)
+	sc := store.Scope{UserID: anna.ID}
+	ctx := context.Background()
+	e.write("anna/a.pdf", pdf("cleaned up"))
+	e.settle()
+	doc := e.docs(anna)[0]
+	if err := e.st.TrashDocument(ctx, sc, doc.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.PurgeDocument(ctx, sc, doc.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.PurgeDueDocuments(ctx, time.Now(), store.DefaultTrashRetention, 100); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := e.st.MarkBlobRemoval(ctx, doc.OriginalSHA256, time.Now().Add(2*store.BlobGrace)); err != nil || m != store.BlobMarked {
+		t.Fatalf("mark: %v, %v", m, err)
+	}
+	b := e.write("anna/b.pdf", pdf("cleaned up"))
+	if st := e.settle(); st != (consume.Stats{}) {
+		t.Errorf("stats while the file is cleaned up: %+v", st)
+	}
+	mustExist(t, b)
+	if n := e.log.count("being cleaned up", "b.pdf"); n != 1 {
+		t.Errorf("%d log lines about the clean-up, want 1:\n%s", n, e.log.String())
+	}
+	if err := e.st.FinishBlobRemoval(ctx, doc.OriginalSHA256); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.scan(); st.Imported != 1 {
+		t.Errorf("stats after the clean-up: %+v", st)
+	}
+	mustNotExist(t, b)
+}

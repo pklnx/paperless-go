@@ -50,10 +50,32 @@ type Store struct {
 	// one applies to documents already in the trash. Set it before the
 	// store is used.
 	TrashRetention time.Duration
+
+	// blobs answers whether a file is still in the blob store: the last
+	// step of holdBlobs (blob_removals.go) before a writer names a hash.
+	// Open requires it, so no command can skip the check.
+	blobs Blobs
 }
 
-// Open connects to the database.
-func Open(ctx context.Context, url string) (*Store, error) {
+// Blobs is what the store needs of the blob store: whether the file of a
+// hash is on disk (blobstore.Store.Exists, or blobstore.Files.Exists for a
+// command that only reads).
+type Blobs interface {
+	Exists(hash string) bool
+}
+
+// errNoBlobs refuses a store without its blob store: writers of a hash
+// could not check that the file is still there (#12, part 2).
+var errNoBlobs = errors.New("store: open needs the blob store")
+
+// Open connects to the database. blobs is the blob store of the same
+// installation (its data directory); it must not be nil: every writer of
+// a hash checks with it that the file is still there before it names it
+// (holdBlobs). Tests that store no files pass storetest.AnyBlob.
+func Open(ctx context.Context, url string, blobs Blobs) (*Store, error) {
+	if blobs == nil {
+		return nil, errNoBlobs
+	}
 	pool, err := pgxpool.New(ctx, url)
 	if err != nil {
 		return nil, err
@@ -65,7 +87,7 @@ func Open(ctx context.Context, url string) (*Store, error) {
 	g := guardedDB{d: pool}
 	s := &Store{
 		pool: pool, g: g, q: db.New(g), gate: newOwnerGate(), searchDB: func(d guardedDB) db.DBTX { return unnamedStatements{d} },
-		TrashRetention: DefaultTrashRetention,
+		TrashRetention: DefaultTrashRetention, blobs: blobs,
 	}
 	s.sq = db.New(s.searchDB(g))
 	return s, nil

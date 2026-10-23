@@ -6,7 +6,7 @@ command.
 
 | Command | Does |
 |---|---|
-| `migrate` (`migrate up`) | Applies all pending database migrations. `./pgo migrate` also makes a fresh data directory writable for the container user. |
+| `migrate` (`migrate up`) | Applies all pending database migrations. `./pgo migrate` also makes a fresh data directory writable for the container user. It binds a fresh data directory (without document files) to the installation by writing the file `installation` into it, and warns when the data directory is not bound. |
 | `migrate status` | Lists applied and pending migrations. |
 | `migrate down --yes` | Rolls back the most recent migration. Usually deletes data; for development. |
 | `serve [--listen ADDR]` | Runs the web server (default `127.0.0.1:8080`; `:8080` in Compose). Refuses to start without `PAPERLESS_GO_SECRET_KEY` and while migrations are pending. Also processes the queue and, with `PAPERLESS_GO_CONSUME_DIR`, imports the [consume folder](../guide/import#consume-folder). |
@@ -14,6 +14,7 @@ command.
 | `reprocess [--failed \| --all \| ID...]` | Queues documents for processing again. |
 | `keygen` | Prints a new random secret key for `PAPERLESS_GO_SECRET_KEY` (32 bytes, base64). Run it once at the first install; changing the key later breaks every two-factor login. |
 | `import PATH [--user NAME] [--dry-run]` | Imports the PDF, JPEG, PNG and HEIC/HEIF files in `PATH` (a folder, searched recursively, or one file) as new documents in a user's inbox; see [Importing files](../guide/import). |
+| `sweep [--dry-run] [--force] [--bind]` | Removes unreferenced document files now (`serve` does it on its own); see [File removal](#file-removal). |
 | `--version` | Prints the version. |
 
 ## Users
@@ -76,6 +77,25 @@ and a run a minute later imports it as new.
 and mounts it read-only into the container. A file instead of a folder is
 refused. Each run that imports something writes a `document.import` entry to
 the audit log.
+
+## File removal
+
+`sweep` runs one pass over the queue of files to remove and one walk of the
+data directory, as `serve` does every minute and once a day, and prints
+what they did. The queue holds the files of purged documents and those an
+earlier walk found unreferenced; each goes an hour after it was queued,
+when no document names it, so a file queued by this run's walk goes at a
+later pass. The walk queues the files no document names and removes
+temporary files older than a day. It refuses, queues nothing and exits with
+status 1 when the data directory is not bound to this installation, when
+the database has no documents but the data directory has files, or when it
+would queue more than 10 % of the files (and more than 100).
+
+| Flag | Does |
+|---|---|
+| `--dry-run` | Only reports what the pass and the walk would do. |
+| `--force` | Overrides the empty-database and 10 % stops for this run, after you checked that the database and the data directory belong together. Never overrides the binding. |
+| `--bind` | Binds the data directory to this installation (writes `installation` into it) and does nothing else. It refuses when the database has no documents, and when the data directory is bound to another installation, unless `--force`. Run it once on an installation from before the marker. |
 
 ## Audit log
 

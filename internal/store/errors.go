@@ -82,6 +82,13 @@ var (
 	// is neither a duplicate nor new yet; the same call can be tried again
 	// in a minute, when it imports the file as a new document.
 	ErrPurgePending = errors.New("store: the document with this file is being removed permanently")
+
+	// ErrBlobRemoved means a file a writer was about to name is being
+	// removed by the sweeper, or is gone (#12, part 2: the hash's queue
+	// row was marked removed, or the file is missing). Nothing was
+	// written. The same call succeeds once it has stored the file again:
+	// a retry's blobstore.Put publishes a fresh copy.
+	ErrBlobRemoved = errors.New("store: the file is being cleaned up")
 )
 
 // ValidationError is a refused value. errors.Is(err, ErrInvalid) holds.

@@ -278,3 +278,54 @@ func TestHashInputValidated(t *testing.T) {
 		t.Error("Exists(missing) = true")
 	}
 }
+
+// Files finds a store's blobs without opening it, and creates nothing.
+func TestFilesExists(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "data")
+	f := OpenFiles(root)
+	sum := sha256.Sum256([]byte("x"))
+	h := hex.EncodeToString(sum[:])
+	if f.Exists(h) || f.Root() != root {
+		t.Fatal("found a blob in a missing store")
+	}
+	if _, err := os.Stat(root); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("OpenFiles created the root: %v", err)
+	}
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Put(strings.NewReader("x")); err != nil {
+		t.Fatal(err)
+	}
+	if !f.Exists(h) || !s.Exists(h) || f.Exists("../../etc/passwd") {
+		t.Error("Exists")
+	}
+}
+
+// RemoveTemp removes only temporary files of Put, also one already gone.
+func TestRemoveTemp(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(root, "tmp", "put-123")
+	if err := os.WriteFile(p, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveTemp("tmp/put-123"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("still there: %v", err)
+	}
+	if err := s.RemoveTemp("tmp/put-123"); err != nil {
+		t.Errorf("already gone: %v", err)
+	}
+	for _, bad := range []string{"tmp/other", "documents/put-1", "tmp/put-1/../../x", `tmp/put-a\b`, "tmp/put-", "put-1"} {
+		if err := s.RemoveTemp(bad); !errors.Is(err, ErrNotTemp) {
+			t.Errorf("RemoveTemp(%q): %v", bad, err)
+		}
+	}
+}

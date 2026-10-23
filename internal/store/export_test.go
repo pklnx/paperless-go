@@ -222,3 +222,50 @@ func GuardedExec(ctx context.Context, s *Store, sql string, owners [][]int64) er
 		return err
 	})
 }
+
+// WithAfterBlobHold makes a writer with ctx call f in its transaction
+// right after holdBlobs: it then holds its owner and blob locks.
+func WithAfterBlobHold(ctx context.Context, f func()) context.Context {
+	return context.WithValue(ctx, afterBlobHoldKey{}, f)
+}
+
+// WithAfterBlobLock makes MarkBlobRemoval with ctx call f in its
+// transaction right after it took the hash's exclusive blob lock.
+func WithAfterBlobLock(ctx context.Context, f func()) context.Context {
+	return context.WithValue(ctx, afterBlobLockKey{}, f)
+}
+
+// BlobLockClass and BlobLockKey are the two int4 of a hash's blob lock.
+const BlobLockClass = blobLockClass
+
+// BlobLockKey is the second int4 of hash's blob lock key.
+func BlobLockKey(hash string) int32 { return blobLockKey(hash) }
+
+// IsHashWriterQuery reports whether the sqlc query name writes a hash
+// column of documents (hashWriterQueries).
+func IsHashWriterQuery(name string) bool { return hashWriterQueries[name] }
+
+// Errors of the blob guard.
+var (
+	ErrUnheldBlobWrite  = errUnheldBlobWrite
+	ErrBlobsBeforeOwner = errBlobsBeforeOwner
+	ErrBlobsHeldTwice   = errBlobsHeldTwice
+	ErrNoBlobs          = errNoBlobs
+)
+
+// HoldBlobsTwice runs holdBlobs twice in an owner transaction of owner;
+// HoldBlobsBeforeOwner runs it in a transaction without the owner lock.
+func HoldBlobsTwice(ctx context.Context, s *Store, owner int64) error {
+	return s.ownerTx(ctx, []int64{owner}, func(ctx context.Context, t *writeTx) error {
+		if err := s.holdBlobs(ctx, t); err != nil {
+			return err
+		}
+		return s.holdBlobs(ctx, t)
+	})
+}
+
+// HoldBlobsBeforeOwner runs holdBlobs in a transaction that holds no
+// owner lock.
+func HoldBlobsBeforeOwner(ctx context.Context, s *Store) error {
+	return s.inTxWith(ctx, func(t *writeTx) error { return s.holdBlobs(ctx, t) })
+}
