@@ -190,8 +190,8 @@ release (no `vX.Y.Z` tag before it) also gets a paragraph for automatic image
 updaters: the tag `26.10` stays on `26.10-1`, and tools should switch to an
 exact version or `1.0` (`1` also brings minor releases, which may include a
 migration; until `./pgo migrate` runs, the web server does not start). `1.0`
-gets nothing new once `1.1.0` is out, so the notes tell users to move the tag
-to the next minor or major release (set `PAPERLESS_GO_IMAGE`, run
+gets nothing new once a newer minor or major release is out, so the notes tell
+users to move the tag to the newest `X.Y` tag (set `PAPERLESS_GO_IMAGE`, run
 `./pgo migrate`, then `docker compose up -d web`).
 
 `./pgo --version` and `paperless-go --version` show the version. The release
