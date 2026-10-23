@@ -17,10 +17,10 @@ import (
 
 // Compound words (#56, part 2): document_search_tsquery ORs into a word
 // the lexemes of the scope's search vocabulary that contain it
-// (00019_search_infix.sql).
+// (00021_search_infix.sql).
 
 // infixVersion is the migration that adds the expansion.
-const infixVersion = 19
+const infixVersion = 21
 
 // tsqueryOf returns document_search_tsquery's text for one item in the
 // scope of owner (nil: all owners).
@@ -354,4 +354,42 @@ func TestSearchCompoundMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantTitles(t, "up again", searchIndex(t, conn, me, words("rechnung")), "plain", "power")
+}
+
+// Trash (#12): a trashed document's words stay in the vocabulary until it
+// is purged, but a live search, compound or not, never returns it; the
+// trash's own search finds it by its compound.
+func TestSearchCompoundTrash(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	textDoc(t, st, alice, "live", "Gasrechnung")
+	trashed := textDoc(t, st, alice, "trashed", "Stromrechnung")
+	textDoc(t, st, alice, "other", "Vertrag")
+	if err := st.TrashDocument(ctx, alice, trashed.ID); err != nil {
+		t.Fatal(err)
+	}
+	wantFound(t, st, alice, "rechnung", "live")
+	wantFound(t, st, alice, "stromrechnung")
+	wantFound(t, st, alice, "-rechnung", "other")
+	wantFound(t, st, alice, "rechnung OR vertrag", "live", "other")
+	for _, s := range []string{"rechnung", "-gasrechnung"} {
+		q := parseQuery(t, s, nil)
+		m, err := st.CountBulkMatches(ctx, alice, store.BulkSelection{Match: &q})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.Count != 1 {
+			t.Errorf("%q: %d bulk matches, want 1 live document", s, m.Count)
+		}
+	}
+	q := parseQuery(t, "rechnung", nil)
+	q.Trashed = true
+	if got := hitTitles(runSearch(t, st, alice, q)); !slices.Equal(got, []string{"trashed"}) {
+		t.Errorf("trash search: %v", got)
+	}
+	if _, err := st.RestoreDocument(ctx, alice, trashed.ID); err != nil {
+		t.Fatal(err)
+	}
+	wantFound(t, st, alice, "rechnung", "live", "trashed")
 }

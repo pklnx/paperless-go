@@ -212,7 +212,7 @@ free-text items as bound arrays. Each item becomes, joined by `|`:
 a word of 3 or more characters, a prefix query from the lexemes
 `paperless_simple` makes of it, each quoted by a fixed escaper plus `:*`;
 for a word of 4 or more characters, the compounds from the search
-vocabulary that contain it (Compounds, below; `00019_search_infix.sql`);
+vocabulary that contain it (Compounds, below; `00021_search_infix.sql`);
 and the link lexemes of the tags (with their descendants), correspondents
 and document types whose name contains the term, ignoring case and accents
 (`ILIKE` over `unaccent`, wildcards escaped; a term under 3 characters
@@ -329,7 +329,7 @@ word (Compounds, below). The vocabulary is never returned by any API.
   nothing outside the extension depends on it; the `pg_amproc` entries of
   `pg_trgm`'s own operator families count as part of it).
 
-**Compounds** (#56, part 2; `00019_search_infix.sql`, which replaces
+**Compounds** (#56, part 2; `00021_search_infix.sql`, which replaces
 `document_search_tsquery` and whose Down restores `00011`'s body). A word
 also matches the vocabulary's lexemes that contain it, so `rechnung` finds
 `Stromrechnung` without a second index on the documents: the expansion only

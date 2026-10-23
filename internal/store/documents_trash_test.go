@@ -836,6 +836,10 @@ func TestTrashMigration(t *testing.T) {
 	ctx := context.Background()
 	conn := connect(t, url)
 	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	// 00020 is not the latest migration any more: start right after it.
+	if err := st.MigrateDownTo(ctx, 20); err != nil {
+		t.Fatal(err)
+	}
 	doc := mustDoc(t, st, alice, newDoc("doc"))
 	mustDoc(t, st, alice, newDoc("live"))
 	if err := st.TrashDocument(ctx, alice, doc.ID); err != nil {
@@ -874,6 +878,9 @@ func TestTrashMigration(t *testing.T) {
 	}
 	if err := insertTarget(conn, "audit_log", store.TargetSavedView, uuid); err != nil {
 		t.Fatalf("saved view target: %v", err)
+	}
+	if err := st.MigrateDownTo(ctx, 20); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := st.MigrateDown(ctx); err == nil || !strings.Contains(err.Error(), "saved views") {
 		t.Fatalf("down with a saved-view entry: %v", err)

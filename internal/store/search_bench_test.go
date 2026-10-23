@@ -43,8 +43,8 @@ import (
 //
 // SEARCHBENCH_BEFORE=<version> runs the same generator on a database
 // migrated only to that version, and at the end times migrating up: 17 is
-// part 1's "before" (no vocabulary; the migration times the backfill), 18
-// part 2's (the vocabulary without the expansion of 00019).
+// part 1's "before" (no vocabulary; the migration times the backfill), 20
+// part 2's (the vocabulary and the trash, without the expansion of 00021).
 // SEARCHBENCH_FILLFACTOR sets the fillfactor of search_vocabulary before
 // the generation. "Before" and "after" are two runs on the same host and
 // server, with the same seed.
@@ -255,7 +255,7 @@ func TestSearchBench(t *testing.T) {
 	measure("negation only -zahlungserinnerung, sort=relevance", 10, search1(query("-Zahlungserinnerung", search.SortRelevance)))
 	measure("tag:Steuer (10 %), sort=added", 20, search1(query("tag:Steuer", "")))
 
-	// Compound words (#56, part 2). Before 00019 these find only exact
+	// Compound words (#56, part 2). Before 00021 these find only exact
 	// words and prefixes; the hit counts show the difference.
 	measure("selective infix erinnerung (0.8 %), relevance", 40, search1(query("erinnerung", "")))
 	measure("selective infix erinnerung, sort=added", 40, search1(query("erinnerung", search.SortAdded)))
@@ -269,11 +269,15 @@ func TestSearchBench(t *testing.T) {
 		"bcdf ghjk lmnp qrst dfgh jklm npqr stbc cdfg hjkl mnpq rstb fghj klmn pqrs tbcd")
 	measure("32 items of 4 characters, AND, relevance", 10, search1(query(strings.Join(worst, " "), "")))
 	measure("32 items of 4 characters, OR, sort=added", 10, search1(query(strings.Join(worst, " OR "), search.SortAdded)))
-	// Ranking every match against thousands of alternatives is slow:
-	// one cold run, no EXPLAIN (it would run the query again).
-	start = time.Now()
-	search1(query(strings.Join(worst, " OR "), ""))()
-	t.Logf("%-55s %v (1 run)", "32 items of 4 characters, OR, relevance", time.Since(start).Round(time.Millisecond))
+	// Ranking every match against thousands of alternatives is slow (#115:
+	// 4 min 55 s before the expansion, over an hour with it on 100 000
+	// documents), so it runs only with SEARCHBENCH_OR_RELEVANCE=1: one
+	// cold run, no EXPLAIN (it would run the query again).
+	if os.Getenv("SEARCHBENCH_OR_RELEVANCE") == "1" {
+		start = time.Now()
+		search1(query(strings.Join(worst, " OR "), ""))()
+		t.Logf("%-55s %v (1 run)", "32 items of 4 characters, OR, relevance", time.Since(start).Round(time.Millisecond))
+	}
 	tsquery := func(owner *int64, terms ...string) string {
 		n := len(terms)
 		groups := make([]int32, n)
@@ -392,7 +396,7 @@ func TestSearchBench(t *testing.T) {
 		if _, err := st.Migrate(ctx); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("migrate up from %05d (with 00018: the backfill of the vocabulary, its indexes): %v",
+		t.Logf("migrate up from %05d (from 00017 on, with the backfill of the vocabulary and its indexes): %v",
 			beforeVersion, time.Since(start).Round(time.Millisecond))
 		hasVocabulary = true
 		analyze()
