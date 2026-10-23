@@ -5,7 +5,15 @@
 -- it. A trigram index on it lets a search find the lexemes that contain a
 -- typed word (part 2: Stromrechnung for rechnung). It is derived data:
 -- documents is only read, and Down loses nothing.
---
+
+-- Close the backfill race: no writer may commit between the backfill's
+-- snapshot and the triggers. SHARE ROW EXCLUSIVE waits for open writers
+-- of documents and blocks new ones until this migration commits; readers
+-- go on. It comes first, before CREATE TABLE … REFERENCES users locks
+-- users, so this migration takes documents before any other table, in the
+-- order writers do.
+LOCK TABLE documents IN SHARE ROW EXCLUSIVE MODE;
+
 -- pg_trgm is a trusted contrib extension like unaccent (00011): the database
 -- owner creates it without superuser rights, and it ships with postgres:18.
 -- It must live in public, as the index names public.gin_trgm_ops.
@@ -21,9 +29,11 @@ BEGIN
     WHERE x.extname = 'pg_trgm';
     IF schema IS DISTINCT FROM 'public' THEN
         -- The fix is in the message itself: the command line prints the
-        -- message, not PostgreSQL's hint.
+        -- message, not PostgreSQL's hint. Moving the extension needs its
+        -- owner (usually a superuser), not the app's role.
         RAISE EXCEPTION 'the extension pg_trgm is installed in schema %, it must be in public: '
-            'run ALTER EXTENSION pg_trgm SET SCHEMA public; and migrate again', schema;
+            'have its owner or a superuser run ALTER EXTENSION pg_trgm SET SCHEMA public; '
+            '(or, if nothing else uses it, DROP EXTENSION pg_trgm;) and migrate again', schema;
     END IF;
 END;
 $$;
@@ -101,12 +111,6 @@ BEGIN
 END;
 $$;
 -- +goose StatementEnd
-
--- Close the backfill race: no writer may commit between the backfill's
--- snapshot and the triggers. SHARE ROW EXCLUSIVE waits for open writers
--- of documents and blocks new ones until this migration commits; readers
--- go on.
-LOCK TABLE documents IN SHARE ROW EXCLUSIVE MODE;
 
 INSERT INTO search_vocabulary (owner_id, lexeme, n)
 SELECT d.owner_id, l, count(*)

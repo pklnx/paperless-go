@@ -474,8 +474,10 @@ func TestSearchVocabularyMigrationNeedsTrgmInPublic(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "pg_trgm is installed in schema extensions, it must be in public") {
 		t.Fatalf("migrate with pg_trgm elsewhere: %v", err)
 	}
-	if !strings.Contains(err.Error(), "ALTER EXTENSION pg_trgm SET SCHEMA public") {
-		t.Errorf("no hint in %q", err)
+	for _, hint := range []string{"its owner or a superuser run ALTER EXTENSION pg_trgm SET SCHEMA public", "DROP EXTENSION pg_trgm"} {
+		if !strings.Contains(err.Error(), hint) {
+			t.Errorf("no %q in %q", hint, err)
+		}
 	}
 	if _, err := conn.Exec(ctx, "SELECT 1 FROM search_vocabulary"); err == nil {
 		t.Error("search_vocabulary created by the failed migration")

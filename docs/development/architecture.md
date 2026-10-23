@@ -290,7 +290,8 @@ any API.
   should disable the trigger and rebuild the vocabulary set-based, as the
   backfill does.
 - **Backfill.** The migration takes `SHARE ROW EXCLUSIVE` on `documents`
-  first, so no writer can commit between the backfill's snapshot and the
+  as its first statement (before `CREATE TABLE … REFERENCES users` locks
+  `users`), so no writer can commit between the backfill's snapshot and the
   triggers (`TestSearchVocabularyMigrationWaitsForWriters`); readers go
   on. Then one `INSERT … SELECT … GROUP BY owner_id, lexeme` over
   `search_vocabulary_lexemes(search_text)`, then the primary key and the
@@ -314,7 +315,9 @@ any API.
   took 1 min 40 s. Searches are unchanged.
 - **`pg_trgm`** is a trusted extension like `unaccent` and must be in
   `public`; the migration checks `pg_extension.extnamespace` and fails
-  with the `ALTER EXTENSION pg_trgm SET SCHEMA public` fix in its message.
+  with the fix in its message: the extension's owner or a superuser runs
+  `ALTER EXTENSION pg_trgm SET SCHEMA public` (the app's role cannot), or
+  drops it when nothing else uses it.
   Down drops the triggers, the function, the table and, under the
   conditions of `unaccent` in `00011`, `pg_trgm` (owned by the current user,
   nothing outside the extension depends on it; the `pg_amproc` entries of

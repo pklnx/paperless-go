@@ -293,10 +293,12 @@ distinct words on 4 CPUs), during which documents cannot be written (the
 web server does not run while migrations are pending), and on disk space
 of about a sixth of the documents table: 415 MB next to 2.4 GB in that
 measurement. As documents are added and changed afterwards, the list grows
-to about a quarter (620 MB when the same documents were added one by one).
-Saving a document's text now also updates the list: an import with text,
-an OCR result or a delete takes about 10 ms longer, and adding documents
-in bulk (a large import) about three times as long in the database.
+to about 1.2 times its size after the migration. Saving a document's text
+now also updates the list: an upload's OCR result, an import with text or
+a delete takes about 10 ms longer, and `import` (one document per
+transaction) spends about 2.2 times as long in the database. The
+benchmark's figures of 3.4 times the time and a list of 26 % of the
+documents table come from adding 100 documents per transaction.
 
 It creates the PostgreSQL extension `pg_trgm`, a trusted extension like
 `unaccent` (#6) that needs only the `CREATE` privilege on the database: in
@@ -305,8 +307,11 @@ PostgreSQL server and a user without that privilege, have an administrator
 run `CREATE EXTENSION pg_trgm SCHEMA public;` in the database first. The
 extension must be in the `public` schema: if it is already installed in
 another one, the migration stops with `the extension pg_trgm is installed
-in schema …, it must be in public`; run `ALTER EXTENSION pg_trgm SET SCHEMA
-public;` and migrate again. Rolling the migration back (`migrate down`)
+in schema …, it must be in public`. Moving it needs the extension's owner,
+usually a superuser, not the paperless-go user: have them run `ALTER
+EXTENSION pg_trgm SET SCHEMA public;` and migrate again. If nothing else
+in the database uses `pg_trgm`, its owner can instead run `DROP EXTENSION
+pg_trgm;` and the migration creates it in `public`. Rolling the migration back (`migrate down`)
 drops the list, and `pg_trgm` too if the paperless-go database user owns
 it (it created it) and nothing else uses it; one an administrator created
 stays. No document data changes either way.
