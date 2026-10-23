@@ -31,5 +31,5 @@ EOF
 
 cat << EOF
 
-**First release with semantic versioning.** Earlier releases were named \`YY.MM-N\` (\`26.10-1\`); their tags and images stay. The image tag \`26.10\` stays on \`26.10-1\` and gets no more updates. If a tool updates the image automatically (Watchtower, Renovate, Diun), switch it once to an exact version, \`$minor\` or \`$major\` (\`$major\` also brings migrations, which need \`./pgo migrate\`): on \`26.10\` it gets nothing new, tools that compare tags may rank \`26.10\` above \`$version\`, and on \`latest\` it installs this release without its upgrade steps. See [Versions](https://pklnx.github.io/paperless-go/guide/operations#versions).
+**First release with semantic versioning.** The earlier release was named \`YY.MM-N\` (\`26.10-1\`); its tag and images stay. The image tag \`26.10\` stays on \`26.10-1\` and gets no more updates. If a tool updates the image automatically (Watchtower, Renovate, Diun), switch it once to an exact version or \`$minor\` (\`$major\` also brings minor releases, whose migrations stop the web server until \`./pgo migrate\` runs): on \`26.10\` it gets nothing new, tools that compare tags may rank \`26.10\` above \`$version\`, and on \`latest\` it installs this release without its upgrade steps. See [Versions](https://pklnx.github.io/paperless-go/guide/operations#versions).
 EOF

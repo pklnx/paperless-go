@@ -581,12 +581,13 @@ tags:
 | `latest` | The newest release. | Everything, breaking changes included. |
 
 Releases before 1.0.0 were named after the year and month, plus a build
-number (`26.10-1`). Its tag and images stay. The image tag `26.10` stays on
-`26.10-1` and gets no more updates. Tools that update images automatically
-(Watchtower, Renovate, Diun) may rank `26.10` above `1.0.0`: switch them once
-to an exact version, `1.0` or `1` (`1` also brings migrations, which need
-`./pgo migrate`). A tool on `latest` installs breaking changes without their
-upgrade steps.
+number: the earlier release was named `26.10-1`; its tag and images stay. The
+image tag `26.10` stays on `26.10-1` and gets no more updates. Tools that
+update images automatically (Watchtower, Renovate, Diun) may rank `26.10`
+above `1.0.0`: switch them once to an exact version or `1.0` (patch releases,
+which normally have no migration). `1` also installs minor releases, whose
+migrations stop the web server until `./pgo migrate` runs. A tool on `latest`
+installs breaking changes without their upgrade steps.
 
 Set `PAPERLESS_GO_IMAGE` in `.env` to use another tag or your own build;
 pinning an exact version is safer than `latest`, because migrations only run

@@ -79,8 +79,10 @@ Whatever proxy you use needs the same things:
 
 The server sends `Strict-Transport-Security: max-age=31536000` itself over
 HTTPS. Do not set it a second time in the proxy, or give it the same value.
-Browsers then refuse plain HTTP for this host name, on every port, for a
-year: do not serve the same name over plain HTTP later (see
+Browsers that have seen the header then switch to HTTPS for this host name,
+on every port, and the year counts from the last HTTPS visit: a service
+under the same name that only speaks plain HTTP becomes unreachable in those
+browsers, so do not serve it that way later (see
 [Headers](../reference/security#headers)).
 
 ### Caddy on the host
@@ -233,7 +235,9 @@ before you open the site to others:
 
 To find the address, log in through the proxy once and read the client
 address of that login on the Log page; that is the proxy as the server
-sees it.
+sees it. Whenever that first login did not count as HTTPS (in Docker
+Compose, or with a proxy over a tunnel, for example), you log in once more
+after setting the variable.
 
 List only the proxy, and only if all access goes through it: whoever can
 connect from a listed address can claim any client address. The server

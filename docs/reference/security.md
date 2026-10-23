@@ -57,10 +57,20 @@ over plain HTTP or from another host name of the domain; over HTTPS it
 must not log the browser into someone else's session. A `__Host-` cookie
 on a plain request is one from a time the header counted; the server does
 not set that name there, so it does not count either, and the next login
-expires it. A login and a logout end the sessions of both cookies the
-browser sends. So setting, removing or changing
-`PAPERLESS_GO_TRUSTED_PROXIES` later, in a way that changes whether
-requests count as HTTPS, means every user logs in once more.
+expires it.
+
+This protection works only where requests count as HTTPS: with
+`X-Forwarded-Proto: https` from loopback (a proxy or `tailscale serve` on
+the same computer, with the server run without Docker) or from an address
+in `PAPERLESS_GO_TRUSTED_PROXIES`. In Docker Compose, `tailscale serve`
+included, that needs the variable. Without it every request is plain,
+whatever the proxy is, so a planted plain cookie can still log a browser
+in as the planter.
+
+Setting, removing or changing `PAPERLESS_GO_TRUSTED_PROXIES` later, in a
+way that changes whether requests count as HTTPS, makes the cookie each
+browser holds the wrong one, so every user logs in once more. A login and a
+logout end the sessions of both cookies the browser sends.
 
 ### Trusted proxies
 
@@ -84,6 +94,10 @@ the server sees it (in Docker Compose usually the gateway of the Compose
 network, an address in `172.16.0.0/12`). List that address or its network,
 and only if all access goes through the proxy: whoever can connect from a
 listed address can claim any client address and HTTPS.
+
+Whenever that first login did not count as HTTPS (in Docker Compose, for
+example), you log in once more after setting the variable, because the
+cookie of the first login is the wrong one then.
 
 ### Tailscale
 
@@ -441,9 +455,12 @@ Over HTTPS (TLS, or `X-Forwarded-Proto: https` from loopback or a
 `Strict-Transport-Security: max-age=31536000`, so the browser uses HTTPS
 for the host for a year. It has no `includeSubDomains` or `preload`, since
 other services may share the domain. Over plain HTTP it is not sent.
-HSTS covers the host name on all its ports for that year, so do not serve
-the same name over plain HTTP later (for example for access in the LAN):
-browsers that saw HSTS refuse it until the year is over.
+Browsers that have seen the header switch to HTTPS for that host name, on
+all its ports (they do not refuse plain HTTP, they rewrite it to HTTPS),
+and the year counts from the last HTTPS visit, since every HTTPS answer
+carries the header. So do not serve the same name over plain HTTP later
+(for example for access in the LAN): a plain-HTTP-only service under that
+name becomes unreachable in those browsers until the year is over.
 
 Document files (`GET /api/documents/{id}/file`) are always sent as a
 download (`Content-Disposition: attachment`) with `nosniff` and
