@@ -44,6 +44,8 @@ export interface Server {
   correspondents: NamedRow[];
   types: NamedRow[];
   counts: { inbox: number; favorites: number; total: number; trash?: number };
+  /** The answer to GET /api/documents/counts?owner=me, when it differs from counts. */
+  ownCounts?: { inbox: number; favorites: number; total: number; trash?: number };
   /** The answer to GET /api/documents for its parameters. */
   documents: (p: URLSearchParams) => Reply | Promise<Reply>;
   /** The answer to POST /api/documents/bulk for its body. */
@@ -97,7 +99,7 @@ export function stubServer(): { server: Server; requests: Request[] } {
     const reply = (r: Reply) => json(r.status ?? 200, r.body);
     if (path === "/api/session") return json(200, { user: { mustChangePassword: false, twoFactorEnabled: false, twoFactorRequired: false, ...server.user } });
     if (path === "/healthz") return new Response("ok", { status: 200 });
-    if (path === "/api/documents/counts") return json(200, server.counts);
+    if (path === "/api/documents/counts") return json(200, p.get("owner") === "me" && server.ownCounts ? server.ownCounts : server.counts);
     if (path === "/api/documents/bulk" && method === "POST") return reply(await server.bulk(body ?? {}));
     if (method === "GET" && path === "/api/tags") return json(200, { tags: server.tags });
     if (method === "GET" && path === "/api/correspondents") return json(200, { correspondents: server.correspondents });

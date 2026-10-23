@@ -137,7 +137,8 @@ so before anything is sent: "Tags…" explains the rule, and
 **Delete** in a row, in a document's form or in the bar of checked
 documents moves documents to the trash. Deleting one document asks
 nothing: a notice "… moved to the trash" offers **Undo** for 8 seconds,
-also when another page is opened meanwhile; the keyboard focus moves to it.
+also when another page is opened meanwhile; the keyboard focus moves to it,
+and its time stands still while it has the focus or the pointer.
 Deleting checked documents, or every match of a search, asks first with
 their number.
 
@@ -158,7 +159,7 @@ the documents again).
   type, archive serial number, inbox and favourite.
 - **Delete permanently** removes a document and its files for good. It
   always asks first, and it cannot be undone.
-- **Empty trash** counts your trash, asks "Remove N documents
+- **Empty trash** (shown while your own trash holds documents) counts your trash, asks "Remove N documents
   permanently?" and then removes exactly those. If the trash changed in
   between, nothing is removed and it counts and asks again. At most 5 000
   documents go at once; for a larger trash, search it to narrow it down,

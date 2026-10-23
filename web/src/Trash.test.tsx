@@ -7,7 +7,7 @@ import { FakeXHR } from "./fakeXHR";
 import { t } from "./i18n";
 import { noticeDuration, noticeTimer } from "./Toast";
 import { trashDay, trashErrorText } from "./Trash";
-import { doc, page, stubServer, type Request, type Server } from "./testServer";
+import { doc, held, page, stubServer, type Reply, type Request, type Server } from "./testServer";
 
 // The trash in the web UI (#12, part 3) against a fake server: what the
 // list, the bulk bar and "Empty trash" send, and what they show.
@@ -84,12 +84,16 @@ async function openTrash() {
   await waitFor(() => expect(screen.queryByText(t.loading)).toBeNull());
 }
 
-/** Captures the notices' timers, so a test can let one run out. */
+/** Captures the notices' timers, so a test can let one run out; active are those set and not cleared. */
 function holdNoticeTimers() {
-  const timers: { fn: () => void; ms: number }[] = [];
-  vi.spyOn(noticeTimer, "set").mockImplementation((fn, ms) => timers.push({ fn, ms }));
-  vi.spyOn(noticeTimer, "clear").mockImplementation(() => {});
-  return timers;
+  const timers = new Map<number, { fn: () => void; ms: number }>();
+  let next = 0;
+  vi.spyOn(noticeTimer, "set").mockImplementation((fn, ms) => {
+    timers.set(++next, { fn, ms });
+    return next;
+  });
+  vi.spyOn(noticeTimer, "clear").mockImplementation((id) => void timers.delete(id));
+  return { active: () => [...timers.values()] };
 }
 
 describe("the Trash entry and list", () => {
@@ -175,7 +179,13 @@ describe("delete with Undo", () => {
     await start();
     fireEvent.click(screen.getByRole("button", { name: t.deleteDocumentLabel("Rechnung") }));
     await notice();
-    const timer = timers.at(-1)!;
+    // The focus is in the notice: its time stands still.
+    await waitFor(() => expect(document.activeElement?.textContent).toBe(t.undo));
+    expect(timers.active()).toHaveLength(0);
+    // Focus elsewhere: the full time runs again.
+    act(() => screen.getByRole("searchbox", { name: t.searchLabel }).focus());
+    expect(timers.active()).toHaveLength(1);
+    const timer = timers.active()[0]!;
     expect(timer.ms).toBe(noticeDuration);
     expect(noticeDuration).toBe(8000);
     act(() => timer.fn());
@@ -192,7 +202,7 @@ describe("delete with Undo", () => {
     store.delete("1");
     fireEvent.click(n.getByRole("button", { name: t.undo }));
     await waitFor(async () => expect((await notice()).textContent).toContain(t.notInTrashAnyMore));
-    expect((await notice()).getAttribute("role")).toBe("alert");
+    expect((await notice()).parentElement!.getAttribute("aria-live")).toBe("assertive");
   });
 });
 
@@ -213,7 +223,7 @@ describe("notices and row actions (review follow-ups)", () => {
     fireEvent.click(restore);
     await noticeSays(t.restoredDocument("Alt"));
     expect(sent("POST", "/api/documents/2/restore")).toHaveLength(1);
-    expect(screen.getByTestId("notice").getAttribute("role")).toBe("status");
+    expect(screen.getByTestId("notice").parentElement!.getAttribute("aria-live")).toBe("polite");
   });
 
   it("moves the focus to the notice's Undo after a row's Delete", async () => {
@@ -285,6 +295,91 @@ describe("notices and row actions (review follow-ups)", () => {
     expect(trashErrorText(new ApiError(404, "x"), "trash")).toBe(t.documentNotFound);
     expect(trashErrorText(new ApiError(404, "x"), "purge")).toBe(t.notInTrashAnyMore);
     expect(trashErrorText(new ApiError(503, "x", {}, 5), "restore")).toBe(t.tryAgainIn(5));
+  });
+});
+
+describe("second review follow-ups", () => {
+  it("brings the restored document back into a list mounted anew since the delete", async () => {
+    put(doc("1", "Rechnung"), doc("2", "Brief"));
+    await start();
+    fireEvent.click(screen.getByRole("button", { name: t.deleteDocumentLabel("Rechnung") }));
+    await noticeSays(t.movedToTrash("Rechnung"));
+    // Another page and back: a new list, loaded without the row.
+    fireEvent.click(sidebar().getByRole("button", { name: t.manageMetadata }));
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Brief" })).toBeNull());
+    fireEvent.click(sidebar().getByRole("button", { name: new RegExp(`^${t.allDocuments}`) }));
+    await screen.findByRole("link", { name: "Brief" });
+    expect(screen.queryByRole("link", { name: "Rechnung" })).toBeNull();
+    fireEvent.click(within(screen.getByTestId("notice")).getByRole("button", { name: t.undo }));
+    expect(await screen.findByRole("link", { name: "Rechnung" })).toBeTruthy();
+  });
+
+  it("does not open the purge question again when its request fails after Cancel, and says so in the notice", async () => {
+    put(doc("2", "Alt", deleted));
+    const answer = held();
+    const plain = server.document;
+    server.document = (method, path, body) => (path.endsWith("/purge") ? answer.promise : plain(method, path, body));
+    await start("/?trash=1");
+    fireEvent.click(screen.getByRole("button", { name: t.purgeLabel("Alt") }));
+    const ask = within(await screen.findByRole("dialog", { name: t.purgeTitle("Alt") }));
+    fireEvent.click(ask.getByRole("button", { name: t.purgeConfirm(1) }));
+    await waitFor(() => expect(sent("POST", "/api/documents/2/purge")).toHaveLength(1));
+    fireEvent.click(ask.getByRole("button", { name: t.cancel }));
+    await act(async () => answer.release({ status: 503, body: { error: "busy" } } as Reply));
+    await noticeSays(t.tryAgainLater);
+    expect(screen.queryByRole("dialog", { name: t.purgeTitle("Alt") })).toBeNull();
+  });
+
+  it("keeps the notice's live regions in the page, and returns the focus after Undo", async () => {
+    put(doc("1", "Rechnung"));
+    await start();
+    // Mounted empty before any notice, so a new text is announced.
+    expect(screen.getByTestId("notice-polite").getAttribute("aria-live")).toBe("polite");
+    expect(screen.getByTestId("notice-assertive").getAttribute("aria-live")).toBe("assertive");
+    expect(screen.getByTestId("notice-polite").textContent).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: t.deleteDocumentLabel("Rechnung") }));
+    await waitFor(() => expect(document.activeElement?.textContent).toBe(t.undo));
+    expect(screen.getByTestId("notice-polite").contains(screen.getByTestId("notice"))).toBe(true);
+    fireEvent.click(within(screen.getByTestId("notice")).getByRole("button", { name: t.undo }));
+    expect(document.activeElement).toBe(document.getElementById("list-title"));
+  });
+
+  it("pauses the notice's time while the pointer is on it", async () => {
+    const timers = holdNoticeTimers();
+    put(doc("1", "Rechnung"));
+    await start();
+    fireEvent.click(screen.getByRole("button", { name: t.deleteDocumentLabel("Rechnung") }));
+    await waitFor(() => expect(document.activeElement?.textContent).toBe(t.undo));
+    act(() => screen.getByRole("searchbox", { name: t.searchLabel }).focus());
+    expect(timers.active()).toHaveLength(1);
+    fireEvent.mouseEnter(screen.getByTestId("notice"));
+    expect(timers.active()).toHaveLength(0);
+    fireEvent.mouseLeave(screen.getByTestId("notice"));
+    expect(timers.active().map((x) => x.ms)).toEqual([noticeDuration]);
+  });
+
+  it("shows Empty trash by the own trash's count, not by the rows shown", async () => {
+    server.counts = { inbox: 0, favorites: 0, total: 0, trash: 2 };
+    // A search in the trash that finds nothing: the own trash still has 2.
+    server.documents = () => page([]);
+    await start("/?trash=1&q=nichts");
+    expect(await screen.findByRole("button", { name: t.emptyTrash })).toBeTruthy();
+  });
+
+  it("hides Empty my trash from an admin whose own trash is empty while others' documents show", async () => {
+    server.user = { id: 1, name: "root", admin: true };
+    server.counts = { inbox: 0, favorites: 0, total: 0, trash: 1 };
+    server.ownCounts = { inbox: 0, favorites: 0, total: 0, trash: 0 };
+    put(doc("2", "Von Bob", { ...deleted, ownerId: 3, ownerName: "bob" }));
+    await start("/?trash=1&all=1");
+    await screen.findByText("Von Bob");
+    await waitFor(() => expect(gets("/api/documents/counts").some((r) => r.url.endsWith("?owner=me"))).toBe(true));
+    await waitFor(() => expect(screen.queryByRole("button", { name: t.emptyMyTrash })).toBeNull());
+    // With an own trashed document it shows.
+    server.ownCounts = { inbox: 0, favorites: 0, total: 0, trash: 1 };
+    fireEvent.click(screen.getByRole("button", { name: t.purgeLabel("Von Bob") }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: t.purgeTitle("Von Bob") })).getByRole("button", { name: t.purgeConfirm(1) }));
+    expect(await screen.findByRole("button", { name: t.emptyMyTrash })).toBeTruthy();
   });
 });
 

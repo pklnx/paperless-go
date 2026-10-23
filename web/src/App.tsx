@@ -85,7 +85,34 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
   }, [inTrashView, onChanged]);
   // The notices (Delete's Undo, results of changes) live here, so they
   // outlive the list: another page opened within their time keeps them.
-  const { notice, show: notify, close: closeNotice } = useNotice();
+  const notices = useNotice();
+  const notify = notices.show;
+  // An Undo of a delete: the list now shown loads every page again (the
+  // list that showed the notice may be gone and mounted anew since).
+  const [undone, setUndone] = useState(0);
+  const onUndone = useCallback(() => setUndone((n) => n + 1), []);
+  // The caller's own trash, for "Empty trash" (always the own trash): the
+  // sidebar's count is everyone's while an admin's switch is on.
+  const [ownTrash, setOwnTrash] = useState<number | null>(null);
+  useEffect(() => {
+    if (!everyone) {
+      setOwnTrash(counts?.trash ?? null);
+      return;
+    }
+    // Asked for only where the button is: in the trash.
+    if (!inTrashView) {
+      setOwnTrash(null);
+      return;
+    }
+    const ctl = new AbortController();
+    documentsApi.counts(true, ctl.signal).then(
+      (c) => setOwnTrash(c.trash ?? null),
+      () => {
+        if (!ctl.signal.aborted) setOwnTrash(null);
+      },
+    );
+    return () => ctl.abort();
+  }, [everyone, counts, inTrashView]);
 
   // "All documents" lists everything: no filter, no search. Another entry
   // keeps the search and replaces the filter.
@@ -167,6 +194,9 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
                 onMaxUploadSize={onMaxUploadSize}
                 onChanged={onChanged}
                 notify={notify}
+                onUndone={onUndone}
+                undone={undone}
+                ownTrash={ownTrash}
               />
             </div>
           )}
@@ -176,7 +206,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
           {view === "users" && <UsersPage />}
         </main>
       </div>
-      <Toast notice={notice} close={closeNotice} />
+      <Toast notice={notices.notice} close={notices.close} pause={notices.pause} resume={notices.resume} />
       <Sheet open={menuOpen} onClose={closeMenu} title={t.navigation}>
         {sidebar}
       </Sheet>

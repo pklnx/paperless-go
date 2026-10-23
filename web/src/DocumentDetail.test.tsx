@@ -93,6 +93,8 @@ let requests: Sent[];
 let patchAnswer: { status: number; body: unknown } | null;
 /** While set, a PATCH waits for it before it answers (a slow server). */
 let patchHold: Promise<void> | null;
+/** While set, a DELETE or purge waits for it before it answers. */
+let trashHold: Promise<void> | null;
 /** Each saved change gets a new modifiedAt with microseconds, as the server's. */
 let stamp: number;
 
@@ -138,6 +140,7 @@ beforeEach(() => {
   requests = [];
   patchAnswer = null;
   patchHold = null;
+  trashHold = null;
   stamp = 0;
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
@@ -171,6 +174,7 @@ beforeEach(() => {
       if (!d) return json(404, { error: "not found" });
       if (!d.deletedAt) return json(409, { error: "not in the trash", code: "not_in_trash" });
       if (tr[2] === "purge") {
+        if (trashHold) await trashHold;
         docs.delete(d.id);
         return new Response(null, { status: 204 });
       }
@@ -183,6 +187,7 @@ beforeEach(() => {
       const d = docs.get(decodeURIComponent(m[1]!));
       if (!d) return json(404, { error: "not found" });
       if (method === "DELETE") {
+        if (trashHold) await trashHold;
         if (d.deletedAt) return json(409, { error: "in the trash", code: "in_trash" });
         docs.set(d.id, { ...d, deletedAt: "2026-10-22T08:00:00Z", purgeAt: "2026-11-21T08:00:00Z" });
         return new Response(null, { status: 204 });
@@ -947,5 +952,78 @@ describe("the trash (#12)", () => {
     fireEvent.click(detail().getByRole("button", { name: t.nextDocument }));
     await waitFor(() => expect(titleField().value).toBe("Zwei"));
     expect((detail().getByRole("button", { name: t.nextDocument }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("a delete or purge answered after the detail was left (#135 review B)", () => {
+  const trashed = { deletedAt: "2026-10-01T08:00:00Z", purgeAt: "2026-10-31T08:00:00Z" };
+  function holdTrash(): () => Promise<void> {
+    let release: () => void = () => {};
+    trashHold = new Promise<void>((r) => (release = r));
+    return async () => {
+      trashHold = null;
+      await act(async () => release());
+    };
+  }
+  const press = (key: string) => fireEvent.keyDown(document, { key });
+
+  it("still drops the row and offers Undo when Escape closed the detail before the DELETE answered", async () => {
+    serve(doc("d1", "Rechnung"), doc("d2", "Brief"));
+    window.history.replaceState(null, "", "/");
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Rechnung" }));
+    await waitFor(() => expect(titleField().value).toBe("Rechnung"));
+    const release = holdTrash();
+    fireEvent.click(detail().getByRole("button", { name: t.deleteDocumentLabel("Rechnung") }));
+    await waitFor(() => expect(requests.some((r) => r.method === "DELETE")).toBe(true));
+    // While it runs, previous and next wait.
+    expect((detail().getByRole("button", { name: t.nextDocument }) as HTMLButtonElement).disabled).toBe(true);
+    press("ArrowRight");
+    expect(docParam()).toBe("d1");
+    press("Escape");
+    await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
+    const countsBefore = requests.filter((r) => r.url.startsWith("/api/documents/counts")).length;
+    await release();
+    const notice = within(await screen.findByTestId("notice"));
+    expect(notice.getByText(t.movedToTrash("Rechnung"))).toBeTruthy();
+    expect(notice.getByRole("button", { name: t.undo })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Rechnung" })).toBeNull());
+    await waitFor(() => expect(requests.filter((r) => r.url.startsWith("/api/documents/counts")).length).toBeGreaterThan(countsBefore));
+  });
+
+  it("does not close another document opened meanwhile", async () => {
+    serve(doc("d1", "Rechnung"), doc("d2", "Brief"));
+    await openAt("/?doc=d1");
+    const release = holdTrash();
+    fireEvent.click(detail().getByRole("button", { name: t.deleteDocumentLabel("Rechnung") }));
+    await waitFor(() => expect(requests.some((r) => r.method === "DELETE")).toBe(true));
+    press("Escape");
+    await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
+    fireEvent.click(await screen.findByRole("link", { name: "Brief" }));
+    await waitFor(() => expect(titleField().value).toBe("Brief"));
+    await release();
+    await screen.findByTestId("notice");
+    expect(docParam()).toBe("d2");
+    expect(screen.getByTestId("document-detail")).toBeTruthy();
+  });
+
+  it("still drops a purged row when the detail was left before the purge answered", async () => {
+    serve(doc("d1", "Rechnung", trashed), doc("d2", "Bleibt", trashed));
+    window.history.replaceState(null, "", "/?trash=1");
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Rechnung" }));
+    await waitFor(() => expect(titleField().value).toBe("Rechnung"));
+    fireEvent.click(within(detail().getByRole("region", { name: t.trash })).getByRole("button", { name: t.purge }));
+    const release = holdTrash();
+    fireEvent.click(within(await screen.findByRole("dialog", { name: t.purgeTitle("Rechnung") })).getByRole("button", { name: t.purgeConfirm(1) }));
+    await waitFor(() => expect(requests.some((r) => r.url.endsWith("/purge"))).toBe(true));
+    // Escape closes the question, then the detail.
+    fireEvent.click(within(screen.getByRole("dialog", { name: t.purgeTitle("Rechnung") })).getByRole("button", { name: t.cancel }));
+    press("Escape");
+    await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
+    await release();
+    expect((await screen.findByTestId("notice")).textContent).toContain(t.purgedDocument("Rechnung"));
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Rechnung" })).toBeNull());
+    expect(screen.getByRole("link", { name: "Bleibt" })).toBeTruthy();
   });
 });

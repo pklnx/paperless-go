@@ -12,7 +12,7 @@ import { button, input } from "./styles";
 import { chipInk } from "./tagTree";
 import type { Notice, Notify } from "./Toast";
 import { EmptyTrash, foreignOwners, PurgeConfirm, trashDay, trashErrorText } from "./Trash";
-import { activeFilter, filterPatch, formatState, type UpdateState, type ViewState } from "./urlState";
+import { activeFilter, filterPatch, formatState, parseState, type UpdateState, type ViewState } from "./urlState";
 
 /** How many documents a page of the list holds. */
 export const pageSize = 50;
@@ -59,6 +59,11 @@ interface Props {
   onChanged?: () => void;
   /** Shows a notice of the shell (Undo, results): it outlives the list. */
   notify?: Notify;
+  /** An Undo went through: the shell counts it (undone), and the list shown then loads again. */
+  onUndone?: () => void;
+  undone?: number;
+  /** The caller's own trash count (Empty trash empties only that); null when unknown. */
+  ownTrash?: number | null;
 }
 
 /**
@@ -68,7 +73,7 @@ interface Props {
  * documents, with Restore and Delete permanently instead of Delete, and
  * "Empty trash".
  */
-export function DocumentList({ state, update, query, user, metadata, everyone, reload, onMaxUploadSize, onChanged, notify }: Props) {
+export function DocumentList({ state, update, query, user, metadata, everyone, reload, onMaxUploadSize, onChanged, notify, onUndone, undone = 0, ownTrash = null }: Props) {
   const key = JSON.stringify(query);
   const [list, setList] = useState<ListState>({ key, docs: null, first: new Set(), cursor: "", loading: true, error: "" });
   const ctl = useRef<AbortController | null>(null);
@@ -160,14 +165,6 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
 
   const trash = query.trashed;
   const showNotice = (n: Notice) => notify?.(n);
-  // Whether the list is still shown: an Undo clicked on another page has no list to reload.
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
   // Rows with a Delete or Restore in flight: a second click sends nothing.
   const busyRef = useRef(new Set<string>());
   const [busyRows, setBusyRows] = useState<ReadonlySet<string>>(() => new Set());
@@ -188,6 +185,11 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     onChanged?.();
   };
   const openDoc = (id: string) => update({ doc: id });
+  // A delete answered late: the detail closes only if it still shows that
+  // document (the user may have gone to another one, or closed it).
+  const closeIfOpen = (id: string) => {
+    if (parseState(window.location.search).doc === id) update({ doc: "" });
+  };
 
   // Undo of a delete: restore, then the list as it is now (the latest
   // refresh, for the list shown when Undo is clicked).
@@ -196,7 +198,9 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     documentsApi.restore(d.id).then(
       () => {
         showNotice({ text: t.restoredDocument(documentName(d)) });
-        if (mounted.current) refreshRef.current();
+        // Through the shell: the list shown now may be another instance.
+        if (onUndone) onUndone();
+        else refreshRef.current();
         onChanged?.();
       },
       (err: unknown) => showNotice({ text: trashErrorText(err, "restore"), error: true }),
@@ -251,16 +255,28 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   };
   // Deleting permanently always asks first.
   const [purging, setPurging] = useState<{ doc: DocumentSummary; busy: boolean; error: string } | null>(null);
+  // Which question is shown: an answer for one closed meanwhile (Cancel)
+  // does not open it again; its error goes to the notice.
+  const purgeAsk = useRef(0);
+  const askPurge = (d: DocumentSummary | null) => {
+    purgeAsk.current++;
+    setPurging(d && { doc: d, busy: false, error: "" });
+  };
   const purgeDoc = () => {
     if (!purging || purging.busy) return;
     const d = purging.doc;
+    const mine = purgeAsk.current;
     setPurging({ doc: d, busy: true, error: "" });
     documentsApi.purge(d.id).then(
       () => {
-        setPurging(null);
+        if (purgeAsk.current === mine) setPurging(null);
         purged(d);
       },
-      (err: unknown) => setPurging({ doc: d, busy: false, error: trashErrorText(err, "purge") }),
+      (err: unknown) => {
+        const text = trashErrorText(err, "purge");
+        if (purgeAsk.current === mine) setPurging({ doc: d, busy: false, error: text });
+        else showNotice({ text, error: true });
+      },
     );
   };
 
@@ -299,6 +315,13 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     );
   };
   refreshRef.current = refresh;
+  // An Undo since this list was shown (not the count it started with).
+  const seenUndone = useRef(undone);
+  useEffect(() => {
+    if (seenUndone.current === undone) return;
+    seenUndone.current = undone;
+    refreshRef.current();
+  }, [undone]);
 
   // The selection: checked IDs of loaded documents (at most maxSelection),
   // or, after "Select all matches", every match of the search.
@@ -410,25 +433,27 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
         onSaved={savedDoc}
         onTrashed={(d) => {
           trashed(d);
-          update({ doc: "" });
+          closeIfOpen(d.id);
         }}
         onRestored={restored}
         onStale={onChanged}
         onPurged={(d) => {
           purged(d);
-          update({ doc: "" });
+          closeIfOpen(d.id);
         }}
+        onTrashError={(text) => showNotice({ text, error: true })}
       />
     )}
     <section className="flex flex-col gap-3" aria-labelledby="list-title" inert={detail}>
       <SearchField q={state.q} search={(q) => update({ q, doc: "" })} />
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 id="list-title" className="min-w-0 font-semibold wrap-anywhere">
+        <h2 id="list-title" tabIndex={-1} className="min-w-0 font-semibold wrap-anywhere outline-none">
           {title}
         </h2>
         <SortControls state={state} query={query} update={update} />
       </div>
-      {trash && docs && docs.length > 0 && (
+      {/* Empty trash acts on the own trash, whatever the list shows: by its count, else by the rows. */}
+      {trash && (ownTrash !== null ? ownTrash > 0 : (docs?.length ?? 0) > 0) && (
         <EmptyTrash
           everyone={everyone}
           notify={showNotice}
@@ -477,7 +502,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
         busy={purging?.busy}
         error={purging?.error}
         confirm={purgeDoc}
-        cancel={() => setPurging(null)}
+        cancel={() => askPurge(null)}
       />
       {docs && docs.length > 0 && (
         <ul aria-label={title} className="flex flex-col gap-2 md:gap-0 md:divide-y md:divide-line md:rounded-lg md:border md:border-line">
@@ -497,7 +522,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
               busy={busyRows.has(d.id)}
               onDelete={() => trashDoc(d)}
               onRestore={() => restoreDoc(d)}
-              onPurge={() => setPurging({ doc: d, busy: false, error: "" })}
+              onPurge={() => askPurge(d)}
             />
           ))}
         </ul>

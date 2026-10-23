@@ -35,6 +35,8 @@ interface Props {
   onPurged: (d: Doc) => void;
   /** The document turned out to be changed elsewhere (trashed): the counts load again. */
   onStale?: () => void;
+  /** A delete or purge failed after the detail moved on: the list says so instead. */
+  onTrashError?: (text: string) => void;
 }
 
 /** The fields an error can be shown at. */
@@ -67,7 +69,7 @@ function tagOptions(nodes: TagNode[], depth = 0): PickerOption[] {
  * or next document of the list, Escape closes. Unsaved changes are asked
  * about before leaving (in the app and when the page is left).
  */
-export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved, onTrashed, onRestored, onPurged, onStale }: Props) {
+export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved, onTrashed, onRestored, onPurged, onStale, onTrashError }: Props) {
   const headingId = useId();
   const [doc, setDoc] = useState<Doc | null>(null);
   const [form, setForm] = useState<DocumentForm | null>(null);
@@ -177,8 +179,10 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   // keys, swipe): Done may still navigate when it answers. Escape, close,
   // Back and the sidebar still go through the guard; a late answer is
   // dropped then (visit).
-  const nav = useRef({ prev, next, close, open, saving });
-  nav.current = { prev, next, close, open, saving };
+  // Nor while a delete, restore or purge runs: its answer belongs to this document.
+  const busy = saving || trashBusy;
+  const nav = useRef({ prev, next, close, open, saving: busy });
+  nav.current = { prev, next, close, open, saving: busy };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -397,15 +401,21 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     setGeneral("");
     documentsApi.trash(d.id).then(
       () => {
-        if (visit.current !== mine) return;
-        setTrashBusy(false);
-        // Nothing unsaved any more: the close that follows is not asked about.
-        formRef.current = formFrom(d);
-        setForm(formRef.current);
+        if (visit.current === mine) {
+          setTrashBusy(false);
+          // Nothing unsaved any more: the close that follows is not asked about.
+          formRef.current = formFrom(d);
+          setForm(formRef.current);
+        }
+        // The delete happened: the list drops the row and offers Undo even
+        // when the detail was left meanwhile (it closes only if still open).
         onTrashed(d);
       },
       (err: unknown) => {
-        if (visit.current !== mine) return;
+        if (visit.current !== mine) {
+          onTrashError?.(trashErrorText(err, "trash"));
+          return;
+        }
         setTrashBusy(false);
         setGeneral(trashErrorText(err, "trash"));
         // Trashed elsewhere meanwhile: show it as it is now (the banner).
@@ -460,13 +470,18 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     setTrashBusy(true);
     documentsApi.purge(d.id).then(
       () => {
-        if (visit.current !== mine) return;
-        setTrashBusy(false);
-        setPurgeAsk(null);
+        if (visit.current === mine) {
+          setTrashBusy(false);
+          setPurgeAsk(null);
+        }
+        // As for a delete: the list follows even when the detail was left.
         onPurged(d);
       },
       (err: unknown) => {
-        if (visit.current !== mine) return;
+        if (visit.current !== mine) {
+          onTrashError?.(trashErrorText(err, "purge"));
+          return;
+        }
         setTrashBusy(false);
         setPurgeAsk({ error: trashErrorText(err, "purge") });
       },
@@ -526,12 +541,12 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
           <h2 id={headingId} ref={heading} tabIndex={-1} className="min-w-0 flex-1 truncate px-1 font-semibold outline-none">
             {doc ? name : loadError ? t.document : t.loading}
           </h2>
-          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!prev || saving} aria-label={t.previousDocument} title={t.previousDocument} onClick={() => prev && !saving && open(prev.id)}>
+          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!prev || busy} aria-label={t.previousDocument} title={t.previousDocument} onClick={() => prev && !busy && open(prev.id)}>
             <span className="-rotate-90">
               <ArrowIcon up />
             </span>
           </button>
-          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!next || saving} aria-label={t.nextDocument} title={t.nextDocument} onClick={() => next && !saving && open(next.id)}>
+          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!next || busy} aria-label={t.nextDocument} title={t.nextDocument} onClick={() => next && !busy && open(next.id)}>
             <span className="rotate-90">
               <ArrowIcon up />
             </span>
