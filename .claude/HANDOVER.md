@@ -3,15 +3,14 @@
 State of the work for the next session. Update before a session ends.
 
 ## Open PRs
-- #109 (#105, detail view: late save, `expectedModifiedAt` precondition, monotonic `modified_at`): review A approved. Being updated: merge main (with #111) — conflicts in `internal/store/documents_edit.go` (`ErrMatchChanged` + `ErrDocumentChanged`), `internal/web/documents_edit.go` (`codeMatchChanged` + `codeDocChanged`; both branches declare `var changed` in `failDocument`, rename one), `web/src/BulkBar.test.tsx`; every `server.user = {…}` that #111 added needs `id`; plus review A's two missing tests (arrow-key/swipe guard with `confirm` true; A → B → A). Then review B.
+- #120 (#114, #56 part 1: search vocabulary, migration 00018): both reviews approved (A, B), CI green, three small fixes pushed after the reviews (`ec7d361`). **Do not merge before the maintainer decides on the two missed plan thresholds** (bulk generation 3.4× vs ≤ 1.5×, vocabulary 26 % vs ≤ 20 %; real `import` 2.2×, single writes +7–12 ms p95). Both reviewers recommend accepting; options in the PR body. Then #115 (part 2).
 - #100 (#92, iPhone guide): approved; waits for the maintainer's device checks listed in the PR body (raw bytes vs multipart is the key one). Don't merge before.
 
 ## Next tickets
-- Order (decided on #102): #111 (#106, merged) → #109 (#105) → #107 (merged as #112) → #108 (issue, no PR yet). `before` numbers in #112's body.
-- #108 (#102 part 2, per-owner write lock): plan + plan review (9 must-dos) on #102; build after #109; re-measure before/after on one host with the script; acceptance in the #102 decisions (≥ half S2 throughput, same-owner upload waits ≤ one bulk, 0 deadlocks).
-- #56 (compound words): plan after #7 (now done) when a ticket slot is free.
-- Backlog (step numbers as in #100's roadmap, valid once #100 merges; main and the bodies of #8–#12 still use the old numbers): roadmap 9 archive import/export (#10), 10 automatic assignment (#8), 11 external OCR/classification (#9), 12 deadlines (#11), 13 notes/saved views/trash (#12), 14 native iPhone app in its own repository (later); #21 (transfer a user's data); #102's follow-ups.
-- No release: the maintainer said "noch nicht" (2026-10-22); ask before running the release workflow.
+- #115 (#56 part 2, compound expansion) after #120; plan review must-do 8 belongs to it.
+- #121 (`pg_restore --clean` fails on audit-log partitions, pre-existing): needs a plan.
+- Backlog (step numbers as in #100's roadmap, valid once #100 merges; main and the bodies of #8–#12 still use the old numbers): roadmap 9 archive import/export (#10), 10 automatic assignment (#8), 11 external OCR/classification (#9), 12 deadlines (#11), 13 notes/saved views/trash (#12), 14 native iPhone app in its own repository (later); #21 (transfer a user's data).
+- No release: the maintainer said "noch nicht" (2026-10-22); ask before running the release workflow. #117 (pool exhaustion) was the known blocker before a release and is done.
 
 ## Maintainer decisions (2026-10-21)
 - Owner per document; tags, correspondents, document types and saved views per owner.
@@ -42,6 +41,14 @@ State of the work for the next session. Update before a session ends.
 - Locking: after four rounds of deadlock holes, rebuild on a per-owner advisory lock (#102); serialisation cost accepted within the limits above.
 - #105: on a conflicting save, reload and keep the user's edits on top; #106: several owners are explained before sending.
 - Model use (chat): Fable for large plans, Opus for routine plans, building and reviews.
+
+## Coordinator decisions (night 2026-10-22/23, delegated by the maintainer; reversible)
+- #56: plan's recommendations (trigram vocabulary per owner, no compound dictionary, infix from 4 letters, cap 100 words per term, false hits like "Berechnung" for "rechnung" accepted), comment on #56.
+- #117: 15 s bound for API requests, `Retry-After: 5`; background writers unbounded; no separate pool; gate per process (comment on #117).
+- Merge order kept: #109 → #108 → #117 → #114.
+
+## Done (night 2026-10-22/23)
+- #109 (#105), #116 (#108, #102 closed: per-owner advisory lock, 0 deadlocks in S1–S3), #118 (#117: per-owner in-process gate + bounded wait), #119 (flaky DocumentList poll test).
 
 ## Done (2026-10-22, evening)
 - #81 (#49), #82 (#75), #83/#89/#86/#104/#101 (#7 parts 1–5, #7 closed), #90 (#84), #95 (#85), #96 (#91), #97/#98 (#88 closed), #103 (#99), #110 (test fix), #111 (#106), #112 (#107).
