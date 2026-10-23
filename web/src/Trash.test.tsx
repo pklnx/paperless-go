@@ -236,6 +236,63 @@ describe("notices and row actions (review follow-ups)", () => {
     await waitFor(() => expect(document.activeElement?.textContent).toBe(t.undo));
   });
 
+  it("leaves the focus and the notice's time alone after a mouse click on Delete (#138)", async () => {
+    const timers = holdNoticeTimers();
+    put(doc("1", "Rechnung"), doc("2", "Brief"));
+    await start();
+    const del = screen.getByRole("button", { name: t.deleteDocumentLabel("Rechnung") });
+    fireEvent.pointerDown(del);
+    del.focus();
+    fireEvent.click(del);
+    await noticeSays(t.movedToTrash("Rechnung"));
+    // No focus moved into the notice, and its 8 s run.
+    expect(screen.getByTestId("notice").contains(document.activeElement)).toBe(false);
+    expect(timers.active().map((x) => x.ms)).toEqual([noticeDuration]);
+    // Focus from a pointer click into the notice does not stop the time either.
+    const n = within(screen.getByTestId("notice"));
+    const close = n.getByRole("button", { name: t.closeDialog });
+    fireEvent.pointerDown(close);
+    act(() => close.focus());
+    expect(timers.active().map((x) => x.ms)).toEqual([noticeDuration]);
+    // Tab moves the keyboard focus within it: now the time stands still.
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    act(() => n.getByRole("button", { name: t.undo }).focus());
+    expect(timers.active()).toHaveLength(0);
+    act(() => screen.getByRole("searchbox", { name: t.searchLabel }).focus());
+    expect(timers.active().map((x) => x.ms)).toEqual([noticeDuration]);
+
+    // A keyboard Delete after that still moves the focus to Undo, and pauses.
+    const del2 = screen.getByRole("button", { name: t.deleteDocumentLabel("Brief") });
+    act(() => del2.focus());
+    fireEvent.keyDown(del2, { key: "Enter" });
+    fireEvent.click(del2);
+    await noticeSays(t.movedToTrash("Brief"));
+    await waitFor(() => expect(document.activeElement?.textContent).toBe(t.undo));
+    expect(timers.active()).toHaveLength(0);
+  });
+
+  it("keeps the notice paused while keyboard focus or pointer remains, and runs once both left (#138)", async () => {
+    const timers = holdNoticeTimers();
+    put(doc("1", "Rechnung"));
+    await start();
+    fireEvent.click(screen.getByRole("button", { name: t.deleteDocumentLabel("Rechnung") }));
+    await waitFor(() => expect(document.activeElement?.textContent).toBe(t.undo));
+    expect(timers.active()).toHaveLength(0);
+    const box = screen.getByTestId("notice");
+    fireEvent.mouseEnter(box);
+    // The keyboard focus leaves, the pointer stays: still paused.
+    act(() => screen.getByRole("searchbox", { name: t.searchLabel }).focus());
+    expect(timers.active()).toHaveLength(0);
+    fireEvent.mouseLeave(box);
+    expect(timers.active().map((x) => x.ms)).toEqual([noticeDuration]);
+    // And the other way round: the pointer leaves while the keyboard focus stays.
+    fireEvent.keyDown(document.activeElement!, { key: "Tab" });
+    act(() => within(box).getByRole("button", { name: t.undo }).focus());
+    fireEvent.mouseEnter(box);
+    fireEvent.mouseLeave(box);
+    expect(timers.active()).toHaveLength(0);
+  });
+
   it("keeps the Undo when another page opens within its time", async () => {
     put(doc("1", "Rechnung"));
     await start();

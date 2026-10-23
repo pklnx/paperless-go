@@ -86,6 +86,11 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   const [notesEditing, setNotesEditing] = useState(false);
   const notesField = useRef<HTMLTextAreaElement>(null);
   const focusNotes = useRef(false);
+  // The trash banner, and whether the title takes the focus once a Restore
+  // from it has made the form editable.
+  const banner = useRef<HTMLDivElement>(null);
+  const titleField = useRef<HTMLInputElement>(null);
+  const focusTitle = useRef(false);
   // The pickers' rows: the document owner's (an admin may open another user's document).
   const [meta, setMeta] = useState<{ owner: number; data: Metadata } | null>(null);
   const [metaError, setMetaError] = useState("");
@@ -234,6 +239,14 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
 
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => heading.current?.focus(), [id]);
+  // In the trash the form is read-only: the server refuses changes there (409 in_trash).
+  const trashedNow = doc !== null && inTrash(doc);
+  // Restored from the banner: the title, no longer read-only, has the focus.
+  useEffect(() => {
+    if (trashedNow || !focusTitle.current) return;
+    focusTitle.current = false;
+    titleField.current?.focus();
+  }, [trashedNow]);
   // Edit puts the caret into the notes.
   useEffect(() => {
     if (notesEditing && focusNotes.current) notesField.current?.focus();
@@ -446,6 +459,10 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
       (d) => {
         onRestored(d);
         if (visit.current !== mine) return;
+        // The banner with its Restore goes away: the focus stays in the
+        // detail, on the title, which can be edited now.
+        const active = document.activeElement;
+        if (!active || active === document.body || (banner.current?.contains(active) ?? false)) focusTitle.current = true;
         setTrashBusy(false);
         // Edits kept from a save refused in the trash stay, ready to save.
         const kept = formRef.current ? rebaseForm(before, formRef.current, d) : formFrom(d);
@@ -513,8 +530,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
 
   const name = doc ? documentName({ title: form?.title ?? doc.title, originalFileName: doc.originalFileName }) : "";
   const foreignOwner = doc && user.admin && doc.ownerName && doc.ownerId !== user.id ? doc.ownerName : "";
-  // In the trash the form is read-only: the server refuses changes there (409 in_trash).
-  const trashed = doc !== null && inTrash(doc);
+  const trashed = trashedNow;
   const fieldError = (f: ErrorField) =>
     errors[f] ? (
       <p id={`${headingId}-${f}-error`} role="alert" className="text-sm text-danger">
@@ -523,6 +539,8 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     ) : null;
   const errorProps = (f: ErrorField) => (errors[f] ? { "aria-invalid": true, "aria-describedby": `${headingId}-${f}-error` } : {});
   const label = "text-sm font-medium";
+  // The rendered notes of a trashed document look like the disabled fields around them.
+  const notesReadOnly = "rounded-md border border-line-control bg-surface-hover px-2.5 py-1.5 text-ink-muted";
 
   return (
     <>
@@ -565,7 +583,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
             <div className="flex flex-col gap-4 border-line p-4 md:min-h-0 md:overflow-y-auto md:border-l">
               {foreignOwner && <p className="text-sm text-ink-muted">{t.ownedBy(foreignOwner)}</p>}
               {trashed && (
-                <div role="region" aria-label={t.trash} className="flex flex-col gap-2 rounded-lg border border-warning-line bg-warning-soft p-3 text-sm">
+                <div ref={banner} role="region" aria-label={t.trash} className="flex flex-col gap-2 rounded-lg border border-warning-line bg-warning-soft p-3 text-sm">
                   <p>
                     {t.trashBanner(trashDay(doc.deletedAt))} {doc.purgeAt && t.trashBannerRemoved(trashDay(doc.purgeAt))}
                   </p>
@@ -592,7 +610,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
                     <label htmlFor={`${headingId}-title`} className={label}>
                       {t.fieldTitle}
                     </label>
-                    <input id={`${headingId}-title`} className={input} value={form.title} maxLength={1024} placeholder={doc.originalFileName} onChange={(e) => set("title", e.target.value)} {...errorProps("title")} />
+                    <input id={`${headingId}-title`} ref={titleField} className={input} value={form.title} maxLength={1024} placeholder={doc.originalFileName} onChange={(e) => set("title", e.target.value)} {...errorProps("title")} />
                     {fieldError("title")}
                   </div>
                   <div className="grid grid-cols-2 gap-3">
@@ -649,7 +667,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
                       {(!notesEditing || form.notes !== "") && (
                         <button
                           type="button"
-                          className="rounded-md px-1.5 text-sm text-accent-ink hover:bg-surface-hover pointer-coarse:min-h-11"
+                          className="rounded-md px-1.5 text-sm text-accent-ink hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent pointer-coarse:min-h-11"
                           aria-label={notesEditing ? t.notesPreviewLabel : t.notesEditLabel}
                           onClick={() => {
                             focusNotes.current = !notesEditing;
@@ -677,7 +695,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
                         </p>
                       </>
                     ) : (
-                      <div role="group" aria-labelledby={`${headingId}-notes-label`} data-testid="notes-rendered" className="flex min-w-0 flex-col gap-2 text-sm wrap-anywhere">
+                      <div role="group" aria-labelledby={`${headingId}-notes-label`} data-testid="notes-rendered" className={`flex min-w-0 flex-col gap-2 text-sm wrap-anywhere ${trashed ? notesReadOnly : ""}`}>
                         {form.notes !== "" ? <NotesView text={form.notes} /> : <p className="text-ink-muted">{t.notesNone}</p>}
                       </div>
                     )}
