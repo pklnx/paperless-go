@@ -127,6 +127,21 @@ not interpret it: unknown keys and values are kept, while whitespace and key
 order are normalized by PostgreSQL. Lists are ordered as in the app: by
 `sort_index`, then `created_at`, then `id`.
 
+The web keeps its own list parameters in that object under one key,
+`paperless-go`: `{"v": 1, "q", "tag", "correspondent", "type", "inbox",
+"favorite", "sort", "order", "everyone"}`, the parameters of
+`GET /api/documents` and an admin's "Everyone's documents". The app's
+schema is in `DocumentArchive/Services/DocumentFilter.swift` (`tags`,
+`tagMode`, `includeSubTags`, `excludedTags`, `correspondents`,
+`documentTypes` as `Ref {id, name, key}`, `dateField`, `dateRange`,
+`inbox`, `favorite`, `hasASN`, `query`, `sort`, `ascending`), and
+`DocumentFilter.json(_:preserving:)` keeps unknown keys, so the
+`paperless-go` key survives a round trip through the app and the app's keys
+survive the web. The two do not map one to one (the server's `q` syntax is
+not the app's `query`, nor are its IDs the app's `Ref.key` merge names), so
+the mapping between them is the archive import's and export's (#10); until
+then the web shows only views with its key.
+
 **Locale and text indexes.** Unique names (`users.name`, `lower(name)` of
 tags, correspondents and document types, passkey and API key names) and a
 few other text columns have B-tree indexes, sorted by the database's
@@ -1502,6 +1517,48 @@ answers `404` and an admin may change everyone's (the row keeps its owner).
   names of the fields an update sent) and `ownerId` when the owner is not
   the acting user (an admin's change). Values other than names are never
   recorded.
+
+## Saved views API
+
+`internal/web/saved_views.go`, on `store` functions in `saved_views.go`
+(#12, part 4). `GET /api/saved-views` (`accessRead`) answers
+`{savedViews: [...]}` in the stored order, each with `id`, `name`,
+`symbol`, `sortIndex`, `filter`, `createdAt` and `modifiedAt`; `POST`,
+`PATCH /api/saved-views/{id}` and `DELETE` are `accessWrite`. Saved views
+are personal: every call uses `Scope{UserID: caller}`, also for an admin,
+so another user's view answers `404` to everybody.
+
+- **`POST`** takes `name` (as metadata names: 1 to 128 characters after
+  trimming, no control characters, `invalid_name`; names may repeat),
+  `filter` (default `{}`) and `sortIndex` (default: after the caller's last
+  view, `NextSavedViewSortIndex` in the insert's transaction). `symbol`
+  stays the app's default. A `sortIndex` sent to `POST` or `PATCH` must lie
+  within ±(2^53 − 1), the integers a JavaScript number holds exactly
+  (`400`); the next index is capped at 2^53 − 1, so a larger stored one
+  cannot make it overflow.
+- **`PATCH`** changes only the fields sent (`name`, `filter`, `sortIndex`);
+  `filter` replaces the whole object, so the web sends the view's filter
+  back with only its own key replaced. `store.PatchSavedView` locks the row
+  (`LockSavedView`, `FOR UPDATE`), merges and writes in one transaction.
+  `saved_views` is not an owner table (nothing links to it), so no owner
+  lock. Reordering is two `PATCH`es swapping `sortIndex`, or, while any two
+  of the web's views share an index (views from the app may), new indexes
+  for the web's views in their new order.
+- **Filter check** (`400` `invalid_filter`): a JSON object of at most
+  16 KiB; its `paperless-go` part, if present, must be a version-1 object
+  of the fields above, matched by their exact names and each at most once
+  (`encoding/json` alone matches names case-insensitively, so `"Q"` next
+  to `"q"` would slip past the check), the IDs UUIDs, and its parameters
+  must pass `listQuery`, the parser of `GET /api/documents`. Only what the
+  web can open exactly is accepted: at most one tag, correspondent and
+  type, and `inbox`/`favorite` `true` or `null`; the sidebar hides any
+  other view as well. Every other key is kept unchecked. Text jsonb cannot
+  hold (bytes that are not UTF-8, a lone surrogate escape such as
+  `"\ud800"`) is `invalid_filter` too.
+- **Audit.** `saved_view.create`, `saved_view.update`, `saved_view.delete`
+  in the transaction of the change (`503` and no change without the log):
+  the view's UUID and name as target, `name`, `oldName` on a rename and
+  `fields` for an update. The filter is never recorded.
 
 ## Login
 

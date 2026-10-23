@@ -86,6 +86,7 @@ beforeEach(() => {
     if (path === "/api/tags") return json(200, { tags: server.tags });
     if (path === "/api/correspondents") return json(200, { correspondents: server.correspondents });
     if (path === "/api/document-types") return json(200, { documentTypes: server.types });
+    if (path === "/api/saved-views") return json(200, { savedViews: [] });
     if (path === "/api/documents" && method === "GET") {
       lists.push(p);
       const r = server.documents(p);

@@ -426,7 +426,7 @@ func TestEveryWriterLocksItsOwner(t *testing.T) {
 		"ListCorrespondents", "ListCorrespondentsWithCounts", "ListDeadlines", "ListDocumentTypes",
 		"ListDocumentTypesWithCounts", "ListDocuments", "ListPasskeys", "ListSavedViews", "ListTags",
 		"ListTagsWithCounts", "ListUsers", "ListenJobs", "Migrate", "MigrateAndRebuild", "MigrateDown",
-		"MigrateDownTo", "MigrationStatus", "OwnedRowCounts", "OwnerGateWaiters", "PasskeyCounts", "Ping", "ReapJobs",
+		"MigrateDownTo", "MigrationStatus", "OwnedRowCounts", "OwnerGateWaiters", "PasskeyCounts", "PatchSavedView", "Ping", "ReapJobs",
 		"RehashUserPassword", "ReleaseJob", "RemoveOwnPasskey", "RemovePasskeys", "ReplaceRecoveryCodes",
 		"Reprocess", "ResetTwoFactor", "ResetUserPassword", "RetryJob", "RevokeAPIKey", "RevokeUserAPIKeys",
 		"SchemaVersions", "SearchDocuments", "SetUserAdmin", "SetUserLocked", "SetUserPassword", "StartSession",

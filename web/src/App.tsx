@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { documentsApi, metadataApi, type DocumentCounts, type Metadata, type User } from "./api";
+import { documentsApi, metadataApi, savedViewsApi, type DocumentCounts, type Metadata, type SavedView, type User } from "./api";
 import { AuthGate } from "./Auth";
 import { DocumentList } from "./DocumentList";
 import { DocumentsUpload, WindowDrop, useQueue } from "./Documents";
@@ -10,13 +10,14 @@ import logo from "./logo.svg";
 import { LogPage } from "./LogPage";
 import { MetadataPage } from "./MetadataPage";
 import { ProfilePage } from "./Profile";
+import { SaveViewButton, SavedViewList } from "./SavedViews";
 import { Sheet } from "./Sheet";
 import { Sidebar, type Loaded } from "./Sidebar";
 import { Toast, useNotice } from "./Toast";
 import { useCollapsedTags } from "./tagTree";
 import { UploadQueue } from "./uploads";
 import { UsersPage } from "./UsersPage";
-import { confirmLeave, documentQuery, filterPatch, useViewState, type Filter } from "./urlState";
+import { confirmLeave, documentQuery, filterPatch, useViewState, type Filter, type ViewState } from "./urlState";
 
 /** The app: the login gate, then the logged-in shell. */
 export function App() {
@@ -77,6 +78,20 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
     );
     return () => ctl.abort();
   }, [ownOnly, imported, edits]);
+  // The caller's saved views, again after each change of one.
+  const [views, setViews] = useState<Loaded<SavedView[]>>({ data: null, error: "" });
+  const [viewEdits, setViewEdits] = useState(0);
+  const reloadViews = useCallback(() => setViewEdits((n) => n + 1), []);
+  useEffect(() => {
+    const ctl = new AbortController();
+    savedViewsApi.list(ctl.signal).then(
+      (data) => setViews({ data, error: "" }),
+      (err: unknown) => {
+        if (!ctl.signal.aborted) setViews((v) => ({ data: v.data, error: errorText(err) }));
+      },
+    );
+    return () => ctl.abort();
+  }, [viewEdits]);
   const collapsed = useCollapsedTags(user.name, metadata.data?.tags ?? null);
   // Opening the trash counts again: a document may have been deleted elsewhere.
   const inTrashView = state.trash === "1" && state.view === "";
@@ -117,11 +132,15 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
   // "All documents" lists everything: no filter, no search. Another entry
   // keeps the search and replaces the filter.
   const select = (f: Filter | null) => {
-    update({ ...filterPatch(f), ...(f === null ? { q: "" } : {}), view: "", doc: "" });
+    update({ ...filterPatch(f), ...(f === null ? { q: "" } : {}), view: "", doc: "", sv: "" });
     closeMenu();
   };
   const show = (view: string) => {
-    update({ view, doc: "" });
+    update({ view, doc: "", sv: "" });
+    closeMenu();
+  };
+  const openView = (patch: Partial<ViewState>) => {
+    update(patch);
     closeMenu();
   };
   const setEveryone = (on: boolean) => update({ all: on ? "1" : "" });
@@ -151,6 +170,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
       everyone={everyone}
       setEveryone={setEveryone}
       health={health}
+      savedViews={<SavedViewList views={views.data} error={views.error} state={state} admin={user.admin} open={openView} reload={reloadViews} notify={notify} />}
     />
   );
   const view = state.view === "profile" || state.view === "log" || state.view === "metadata" || (state.view === "users" && user.admin) ? state.view : "";
@@ -197,6 +217,16 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
                 onUndone={onUndone}
                 undone={undone}
                 ownTrash={ownTrash}
+                toolbar={
+                  <SaveViewButton
+                    state={state}
+                    saved={(v) => {
+                      reloadViews();
+                      update({ sv: v.id }, { replace: true });
+                      notify({ text: t.viewSaved(v.name) });
+                    }}
+                  />
+                }
               />
             </div>
           )}

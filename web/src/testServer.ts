@@ -2,7 +2,7 @@
 // request is recorded with its body, and the answers come from `server`,
 // which each test changes. Nothing reaches the network.
 import { vi } from "vitest";
-import type { DocumentSummary, NamedRow, Tag } from "./api";
+import type { DocumentSummary, NamedRow, SavedView, Tag } from "./api";
 import { stubXHR } from "./fakeXHR";
 
 export const doc = (id: string, title: string, more: Partial<DocumentSummary> = {}): DocumentSummary => ({
@@ -34,6 +34,17 @@ export const tag = (id: string, name: string, parentId: string | null = null, mo
   ...more,
 });
 
+export const savedView = (id: string, name: string, more: Partial<SavedView> = {}): SavedView => ({
+  id,
+  name,
+  symbol: "line.3.horizontal.decrease.circle",
+  sortIndex: 0,
+  filter: {},
+  createdAt: "2026-10-21T10:00:00Z",
+  modifiedAt: "2026-10-21T10:00:00Z",
+  ...more,
+});
+
 export const named = (id: string, name: string, documentCount = 1, ownerId = 1): NamedRow => ({ id, name, ownerId, documentCount });
 
 export type Reply = { status?: number; body?: unknown };
@@ -58,6 +69,10 @@ export interface Server {
    * without a body.
    */
   document: (method: string, path: string, body: Record<string, unknown> | undefined) => Reply | Promise<Reply>;
+  /** The answer to GET /api/saved-views. */
+  savedViews: SavedView[];
+  /** The answer to POST /api/saved-views and PATCH or DELETE of one view. */
+  savedView: (method: string, path: string, body: Record<string, unknown> | undefined) => Reply | Promise<Reply>;
 }
 
 export interface Request {
@@ -89,6 +104,11 @@ export function stubServer(): { server: Server; requests: Request[] } {
     bulk: () => ({ body: { updated: 0 } }),
     metadata: (method) => ({ status: method === "DELETE" ? 204 : 200, body: method === "DELETE" ? undefined : {} }),
     document: () => ({ status: 404, body: { error: "not found" } }),
+    savedViews: [],
+    savedView: (method, path, body) =>
+      method === "DELETE"
+        ? { status: 204 }
+        : { status: method === "POST" ? 201 : 200, body: savedView(method === "POST" ? "new" : path.split("/").pop()!, String(body?.name ?? ""), { ...(body as Partial<SavedView>) }) },
   };
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
@@ -106,6 +126,11 @@ export function stubServer(): { server: Server; requests: Request[] } {
     if (method === "GET" && path === "/api/document-types") return json(200, { documentTypes: server.types });
     if (/^\/api\/(tags|correspondents|document-types)\/[^/]+$/.test(path) && (method === "PATCH" || method === "DELETE")) return reply(server.metadata(method, path, body));
     if (path === "/api/documents" && method === "GET") return reply(await server.documents(p));
+    if (path === "/api/saved-views" && method === "GET") return json(200, { savedViews: server.savedViews });
+    if ((path === "/api/saved-views" && method === "POST") || (/^\/api\/saved-views\/[^/]+$/.test(path) && (method === "PATCH" || method === "DELETE"))) {
+      const r = await server.savedView(method, path, body);
+      return r.status === 204 ? new Response(null, { status: 204 }) : reply(r);
+    }
     if (/^\/api\/documents\/[^/]+(\/(restore|purge))?$/.test(path) && path !== "/api/documents/counts") {
       const r = await server.document(method, path, body);
       return r.status === 204 ? new Response(null, { status: 204 }) : reply(r);

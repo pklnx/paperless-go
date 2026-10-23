@@ -27,6 +27,27 @@ example `tag:Steuer correspondent:Finanzamt` (see [Search](./search)).
 Your log, your profile, the user management (admins) and logging out are
 at the foot of the sidebar.
 
+## Saved views
+
+A saved view keeps a search, a filter and a sort under a name, in the
+sidebar's "Saved views" section.
+
+- **Save view…** next to the sort menu saves what the list shows now: the
+  search, the sidebar's filter, the sort and its direction, and for an
+  admin "Everyone's documents". It is there while a search, a filter or a
+  sort is chosen, not in the trash.
+- A click on a view opens the list with its search, filter and sort; the
+  view is marked as long as the list shows them.
+- The **⋯** next to a view renames it, sets it to what the list shows now
+  ("Update to the current filter"), moves it up or down, or deletes it
+  (asked first; only the view is deleted, never documents). The views keep
+  the order you give them, not an alphabetical one.
+
+Saved views are your own: nobody else sees them, admins neither. Names may
+repeat. Views made in the Document Archive app use the app's own format
+and are not shown here yet; importing them comes with the archive
+import. A view saved here keeps the app's settings it already had.
+
 ## The list
 
 Each row shows the thumbnail of the first page, the title (the file name
