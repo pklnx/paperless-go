@@ -621,7 +621,9 @@ func TestHoldBlobsLookupError(t *testing.T) {
 }
 
 // NewestDocumentChange is the latest creation, edit or job end of any
-// document, none without documents and jobs; a trashed document counts.
+// document, none without documents and jobs; a trash changes nothing
+// (deleted_at is no change: it writes no file), and a trashed document
+// keeps counting.
 func TestNewestDocumentChange(t *testing.T) {
 	st := storetest.New(t)
 	ctx := context.Background()
@@ -656,7 +658,5 @@ func TestNewestDocumentChange(t *testing.T) {
 	if err := st.TrashDocument(ctx, alice, doc.ID); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok, err := st.NewestDocumentChange(ctx); err != nil || !ok || got.Before(end) {
-		t.Fatalf("trashed: %v, %v, %v", got, ok, err)
-	}
+	newest(end, "a trash")
 }

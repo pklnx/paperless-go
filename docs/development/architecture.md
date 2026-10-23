@@ -883,9 +883,17 @@ and thumbnail minutes before `CompleteJob`.
   last change is kept until a later change, and a file written before the
   first change after such a restore counts as older again, so it only
   helps right after the restore (at `serve`'s first walk, or `sweep
-  --dry-run` before it). The file times come from the data directory's
-  clock, the change times from the database's and the worker's; a skew
-  that makes files look newer only keeps them. `migrate` writes the marker into a data
+  --dry-run` before it). The reference is read before the files are
+  walked, so a document created or processed during the walk cannot make
+  the newer files count as older (`TestWalkReadsTheNewestChangeFirst`).
+  The file times come from the data directory's clock, the change times
+  from the database's (`created_at`, `modified_at`) and the worker's
+  (`finished_at`). A skew that makes files look newer only keeps them. In
+  the other direction, a database or worker clock ahead of the data
+  directory's by d moves the reference d into the future: files written
+  within d after the restored database's newest change count as older and
+  are queued. The protection shrinks by the skew and is never worse than
+  without the check. `migrate` writes the marker into a data
   directory without a marker and without a file below `documents/`; an
   existing installation binds once with `sweep --bind`, which needs
   documents in the database and `--force` over another installation's

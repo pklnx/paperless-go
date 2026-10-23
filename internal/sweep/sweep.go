@@ -324,6 +324,14 @@ func (s *Sweeper) walk(ctx context.Context, opts WalkOptions) (WalkStats, error)
 	}
 	now := s.now()
 	log := s.log()
+	// The reference for files newer than the database is read before the
+	// files are: a document that a writer creates or the worker finishes
+	// during the walk cannot make the files of the restored-over
+	// documents count as older.
+	newest, found, err := s.Store.NewestDocumentChange(ctx)
+	if err != nil {
+		return st, err
+	}
 	var candidates, temps, batch []string
 	// The last write of each file of the batch, for the candidates.
 	modTimes := make(map[string]time.Time, WalkBatch)
@@ -376,10 +384,6 @@ func (s *Sweeper) walk(ctx context.Context, opts WalkOptions) (WalkStats, error)
 	// others are counted in Newer (also for a refusal's report).
 	older := candidates
 	if len(candidates) > 0 {
-		newest, found, err := s.Store.NewestDocumentChange(ctx)
-		if err != nil {
-			return st, err
-		}
 		older = make([]string, 0, len(candidates))
 		for i, h := range candidates {
 			// Without any document or job every candidate counts as

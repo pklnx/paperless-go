@@ -96,7 +96,20 @@ walk: warning: kept 19 unreferenced files that are newer than the newest documen
 ```
 
 `./pgo sweep --dry-run` before starting the web server shows it, as in the
-steps above. Then put back the data directory of the same backup. If the
+steps above.
+
+The warning has harmless causes too, in which case `./pgo sweep --force`
+queues the files once:
+
+- A data directory that was copied without keeping the file times (`cp`
+  without `-p`, `rsync` without `-t` or `-a`): every file then looks as new
+  as the copy. Back the data directory up with a tool that keeps file
+  times (`rsync -a`, `cp -a`, Time Machine, restic).
+- Purging the newest documents: the newest change then goes back to an
+  older document, and files no document names that were written in
+  between (left by a failed upload) count as newer until the next change.
+- A file left by an upload or a processing job that failed after the last
+  document change. Then put back the data directory of the same backup. If the
 files are really not needed (you restored on purpose and want the newer
 documents gone), `./pgo sweep --force` queues them once. The check only
 keeps files, it never removes one, and it is not watertight: once the

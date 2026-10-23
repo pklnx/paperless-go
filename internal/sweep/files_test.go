@@ -726,6 +726,46 @@ func TestWalkKeepsFilesNewerThanTheDatabase(t *testing.T) {
 	}
 }
 
+// duringWalk runs during right before the files are walked, as a writer
+// that commits while the walk runs.
+type duringWalk struct {
+	*blobstore.Store
+	during func()
+}
+
+func (d *duringWalk) Walk(fn func(blobstore.Entry) error) error {
+	d.during()
+	return d.Store.Walk(fn)
+}
+
+// The newest document change is read before the files: a document created
+// while the walk runs, after the newer files were written, does not make
+// them count as older.
+func TestWalkReadsTheNewestChangeFirst(t *testing.T) {
+	e := newFileEnv(t)
+	e.bind()
+	e.doc(e.alice, "restored", "", "")
+	newer := e.put("a newer document's file")
+	written := e.newestChange().Add(time.Microsecond)
+	e.setModTime(newer, written)
+	e.sw.Blobs = &duringWalk{Store: e.blobs, during: func() {
+		e.doc(e.bob, "uploaded during the walk", "", "")
+		// Read after the walk, this change would make the file older.
+		if got := e.newestChange(); !got.After(written) {
+			t.Errorf("the change during the walk at %v is not after the file's %v", got, written)
+		}
+	}}
+	w, err := e.sw.Walk(e.ctx, sweep.WalkOptions{})
+	if err != nil || w.Candidates != 1 || w.Newer != 1 || w.Queued != 0 {
+		t.Fatalf("walk: %+v, %v; want the newer file kept", w, err)
+	}
+	// Without the concurrent writer, the next walk sees the later change.
+	e.sw.Blobs = e.blobs
+	if w, err := e.sw.Walk(e.ctx, sweep.WalkOptions{}); err != nil || w.Newer != 0 || w.Queued != 1 {
+		t.Fatalf("next walk: %+v, %v", w, err)
+	}
+}
+
 // A file newer than the newest document's creation but older than the end
 // of a later processing job (a reprocess replaced its thumbnail, without
 // touching modified_at) is queued: the job's end counts as a change.
