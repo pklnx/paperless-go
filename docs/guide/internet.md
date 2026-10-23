@@ -79,6 +79,9 @@ Whatever proxy you use needs the same things:
 
 The server sends `Strict-Transport-Security: max-age=31536000` itself over
 HTTPS. Do not set it a second time in the proxy, or give it the same value.
+Browsers then refuse plain HTTP for this host name, on every port, for a
+year: do not serve the same name over plain HTTP later (see
+[Headers](../reference/security#headers)).
 
 ### Caddy on the host
 
@@ -235,6 +238,11 @@ sees it.
 List only the proxy, and only if all access goes through it: whoever can
 connect from a listed address can claim any client address. The server
 takes the last address in `X-Forwarded-For` that is not a trusted proxy.
+
+Set it before users log in through the proxy: over HTTPS only the
+`__Host-` session cookie counts, over plain HTTP only the plain one, so
+setting or changing the variable later, in a way that changes whether
+requests count as HTTPS, makes every user log in once more.
 
 ### A remote proxy over a tunnel
 

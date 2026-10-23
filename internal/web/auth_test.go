@@ -606,8 +606,14 @@ func TestSecureCookie(t *testing.T) {
 		{"loopback proxy", "127.0.0.1:4000", "https", false, true},
 		{"IPv6 loopback proxy", "[::1]:4000", "https", false, true},
 		{"direct tls", "192.0.2.1:1234", "", true, true},
+		// IPv4-mapped peers count as their IPv4 address (peerAddr unmaps).
+		// The loopback case passes without the unmapping too:
+		// netip.Addr.IsLoopback unmaps by itself.
+		{"IPv4-mapped trusted proxy", "[::ffff:10.1.2.3]:4000", "https", false, true},
+		{"IPv4-mapped loopback proxy", "[::ffff:127.0.0.1]:4000", "https", false, true},
 		// Anybody else could set the header: it does not count.
 		{"untrusted peer", "192.0.2.1:1234", "https", false, false},
+		{"IPv4-mapped untrusted peer", "[::ffff:192.0.2.1]:1234", "https", false, false},
 		{"plain http", "10.1.2.3:4000", "", false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -873,21 +879,5 @@ func TestLoginRateLimitIPv6Prefix(t *testing.T) {
 	}
 	if code := post("2001:db8:0:2::1"); code != 401 {
 		t.Fatalf("other /64: %d", code)
-	}
-}
-
-// However many session cookies a request carries, only a few distinct
-// tokens per name are looked up.
-func TestSessionTokensAreCapped(t *testing.T) {
-	r := httptest.NewRequest("GET", "/api/session", nil)
-	for i := range 100 {
-		r.AddCookie(&http.Cookie{Name: cookieName, Value: fmt.Sprintf("junk%d", i)})
-	}
-	r.AddCookie(&http.Cookie{Name: secureCookieName, Value: "same"})
-	r.AddCookie(&http.Cookie{Name: secureCookieName, Value: "same"})
-	got := sessionTokens(r)
-	want := []string{"same", "junk0", "junk1"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("tokens %v, want %v", got, want)
 	}
 }

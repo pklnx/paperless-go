@@ -315,7 +315,7 @@ func (s *Server) handleDisableTwoFactor(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	err = s.store.DisableOwnTwoFactor(withAudit(r, s.auditEntry(r, "profile.2fa_disable")), sess.UserID, auth.NormalizeTOTPCode(in.Code),
-		s.now(), s.sealer, s.secretKey, s.twoFactorRequired, auth.HashSessionToken(sessionToken(r)))
+		s.now(), s.sealer, s.secretKey, s.twoFactorRequired, auth.HashSessionToken(s.sessionToken(r)))
 	if err != nil {
 		s.secondFactorFailed(w, r, "profile.2fa_disable", err)
 		return

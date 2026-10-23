@@ -48,9 +48,19 @@ In Docker Compose, requests do not come from loopback even when the proxy
 runs on the same computer: Docker's port publishing hands them to the
 container from its network's gateway. Until that address is a trusted
 proxy, the login works over HTTPS, but the cookie lacks `Secure` and the
-`__Host-` prefix, so set `PAPERLESS_GO_TRUSTED_PROXIES` as below. (A
-`__Host-` cookie from a time the header counted is dropped at the next
-login and does not stand in the way of the plain one.)
+`__Host-` prefix, so set `PAPERLESS_GO_TRUSTED_PROXIES` as below.
+
+Only the cookie of the request's scheme logs in: over HTTPS the `__Host-`
+one, over plain HTTP (which includes a proxy that does not count) the
+plain one. A plain cookie can be planted by anyone who reaches the browser
+over plain HTTP or from another host name of the domain; over HTTPS it
+must not log the browser into someone else's session. A `__Host-` cookie
+on a plain request is one from a time the header counted; the server does
+not set that name there, so it does not count either, and the next login
+expires it. A login and a logout end the sessions of both cookies the
+browser sends. So setting, removing or changing
+`PAPERLESS_GO_TRUSTED_PROXIES` later, in a way that changes whether
+requests count as HTTPS, means every user logs in once more.
 
 ### Trusted proxies
 
@@ -62,9 +72,11 @@ whose `X-Forwarded-Proto` is believed. The server takes the last address in
 `X-Forwarded-For` that is not a trusted proxy; a missing or malformed header
 means the peer.
 
-When a request carries `X-Forwarded-For` from a peer that is not a
-trusted proxy (loopback included), the server logs a warning with the
-peer's address, once per start; the header's own value is never logged.
+When a request with an allowed host name carries `X-Forwarded-For` from a
+peer that is not a trusted proxy (loopback included), the server logs a
+warning with the peer's address, once per start; the header's own value is
+never logged. A request with a host name that is not allowed is refused
+before that, so it cannot use up the warning.
 
 To find the address, log in through the proxy before setting it and look at
 the client address of that login on the **Log** page: that is the proxy as
@@ -148,7 +160,8 @@ only over HTTPS or on `localhost`, so they do not work this way.
 - **Sessions** end after 7 days without use and after 30 days at the latest.
   The cookie is `HttpOnly` and `SameSite=Strict`; over HTTPS (also behind a
   [trusted proxy](#https-behind-a-proxy) that sends `X-Forwarded-Proto:
-  https`) it is `__Host-` prefixed and `Secure`. The database stores only a hash of the token. A password reset
+  https`) it is `__Host-` prefixed and `Secure`, and only that cookie logs
+  in; over plain HTTP only the plain one does. The database stores only a hash of the token. A password reset
   by an admin, a lock or removing the user ends all their sessions;
   changing your own password ends all your other sessions.
 - **Generated passwords** (a new user or a reset in the web UI, `user
@@ -428,6 +441,9 @@ Over HTTPS (TLS, or `X-Forwarded-Proto: https` from loopback or a
 `Strict-Transport-Security: max-age=31536000`, so the browser uses HTTPS
 for the host for a year. It has no `includeSubDomains` or `preload`, since
 other services may share the domain. Over plain HTTP it is not sent.
+HSTS covers the host name on all its ports for that year, so do not serve
+the same name over plain HTTP later (for example for access in the LAN):
+browsers that saw HSTS refuse it until the year is over.
 
 Document files (`GET /api/documents/{id}/file`) are always sent as a
 download (`Content-Disposition: attachment`) with `nosniff` and

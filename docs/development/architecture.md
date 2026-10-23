@@ -1733,7 +1733,11 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   calls every route with a key of every scope combination.
 - **Sessions.** The cookie `paperless_go_session` (`__Host-` prefixed over
   HTTPS) holds a random token; `sessions` stores its SHA-256 with the user,
-  creation, last use and absolute expiry. Sessions end after 7 days unused
+  creation, last use and absolute expiry. Only the cookie name of the
+  request's scheme logs in (`sessionTokens`: `__Host-` when
+  `secureRequest`, else the plain one), so a plain cookie planted over
+  plain HTTP cannot log in over HTTPS; logins and logout end the sessions
+  of both names (`allSessionTokens`). Sessions end after 7 days unused
   and after 30 days; `serve` deletes ended ones hourly. Every time a
   session check uses comes from the server clock, so tests move a clock
   instead of waiting.
@@ -1754,9 +1758,10 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   address (IPv6 per `/64`; logs and the audit log keep the full address);
   `X-Forwarded-For` counts only from `PAPERLESS_GO_TRUSTED_PROXIES`, and
   `X-Forwarded-Proto` (`secureRequest`: the `__Host-` cookie with
-  `Secure`) only from those or loopback. `Handler` logs one warning per
+  `Secure`) only from those or loopback. `protect` logs one warning per
   `Server` (one per process) for an `X-Forwarded-For` from any other peer,
-  loopback included, with the peer's address only.
+  loopback included, with the peer's address only, after the host check,
+  so a request with a wrong `Host` cannot use it up.
 - **API keys** (`internal/auth/apikey.go`, `internal/store/api_keys.go`,
   `internal/web/api_keys.go`, migrations `00009_api_keys.sql` and
   `00017_api_key_upload_scope.sql`). A key is

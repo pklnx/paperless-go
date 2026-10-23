@@ -91,14 +91,34 @@ func (s *Server) secureRequest(r *http.Request) bool {
 	return peer.IsLoopback() || s.trustedProxy(peer)
 }
 
-// sessionTokens returns the tokens of all of the request's session
-// cookies, the __Host- one first. A browser can hold both: a __Host- cookie
-// from a time the server saw HTTPS and a plain one from after, for example
-// when X-Forwarded-Proto stopped counting because the proxy is not trusted.
+// sessionTokens returns the tokens that may log the request in: over HTTPS
+// (secureRequest) only those of the __Host- cookie, otherwise only those of
+// the plain one. A plain cookie can be planted by anyone who reaches the
+// browser over plain HTTP or from a sibling host name; on a secure request
+// it would otherwise log the user into the planter's session (login CSRF),
+// alone or whenever the __Host- cookie's session has ended. A __Host-
+// cookie on a plain request is one from a time the server saw HTTPS (the
+// proxy no longer counts); the server does not set that name there, so it
+// does not count either.
 //
 // Each token costs a database lookup, so at most maxSessionCookies distinct
-// tokens per name are returned, however many cookies a request carries.
-func sessionTokens(r *http.Request) []string {
+// tokens are returned, however many cookies a request carries.
+func (s *Server) sessionTokens(r *http.Request) []string {
+	name := cookieName
+	if s.secureRequest(r) {
+		name = secureCookieName
+	}
+	return cookieValues(r, []string{name}, maxSessionCookies)
+}
+
+// allSessionTokens returns the tokens of all of the request's session
+// cookies, the __Host- ones first: the sessions a login or logout ends. A
+// browser can hold both names: a __Host- cookie from a time the server saw
+// HTTPS and a plain one from a time it did not, or one planted over plain
+// HTTP. Ending a session whose token the browser itself sends never harms
+// anyone else, and leaves no valid session behind that this browser can no
+// longer reach. At most maxSessionCookies distinct tokens per name.
+func allSessionTokens(r *http.Request) []string {
 	return cookieValues(r, []string{secureCookieName, cookieName}, maxSessionCookies)
 }
 
@@ -132,12 +152,13 @@ func cookieValues(r *http.Request, names []string, perName int) []string {
 const maxSessionCookies = 2
 
 // sessionToken returns the token of the request's valid session, as found
-// by authenticate, and without one the first session cookie's token.
-func sessionToken(r *http.Request) string {
+// by authenticate, and without one the first token that may log the
+// request in (sessionTokens).
+func (s *Server) sessionToken(r *http.Request) string {
 	if token, ok := r.Context().Value(sessionTokenKey{}).(string); ok {
 		return token
 	}
-	if tokens := sessionTokens(r); len(tokens) > 0 {
+	if tokens := s.sessionTokens(r); len(tokens) > 0 {
 		return tokens[0]
 	}
 	return ""
@@ -145,9 +166,10 @@ func sessionToken(r *http.Request) string {
 
 // deleteOldSessions ends the sessions of all of the request's session
 // cookies before a login, so a token planted before the login is never
-// promoted to a valid session.
+// promoted to a valid session. It reads both cookie names
+// (allSessionTokens), not only the one of the request's scheme.
 func (s *Server) deleteOldSessions(r *http.Request) {
-	for _, token := range sessionTokens(r) {
+	for _, token := range allSessionTokens(r) {
 		_ = s.store.DeleteSession(r.Context(), auth.HashSessionToken(token))
 	}
 }
@@ -203,12 +225,13 @@ func (s *Server) session(r *http.Request) (*store.Session, error) {
 }
 
 // sessionWithToken looks up the request's session and returns it with its
-// token. Of several session cookies the first valid one counts, not the
-// first present one: a stale cookie next to a valid one does not log the
-// user out.
+// token. Only the cookie name of the request's scheme counts
+// (sessionTokens); of two cookies of that name the first valid one counts,
+// not the first present one: a stale cookie next to a valid one does not
+// log the user out.
 func (s *Server) sessionWithToken(r *http.Request) (*store.Session, string, error) {
 	now := s.now()
-	for _, token := range sessionTokens(r) {
+	for _, token := range s.sessionTokens(r) {
 		hash := auth.HashSessionToken(token)
 		sess, err := s.store.GetSession(r.Context(), hash, now, now.Add(-auth.IdleTimeout))
 		if errors.Is(err, store.ErrNotFound) {
@@ -445,12 +468,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // log: without its entry the session is deleted anyway.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	// Only a valid session writes a logout entry; every other session
-	// cookie's session is deleted too.
+	// cookie's session is deleted too, also one of the other name.
 	sess, valid, err := s.sessionWithToken(r)
 	if err != nil {
 		sess = nil
 	}
-	for _, token := range sessionTokens(r) {
+	for _, token := range allSessionTokens(r) {
 		hash := auth.HashSessionToken(token)
 		ctx := r.Context()
 		if sess != nil && token == valid {
