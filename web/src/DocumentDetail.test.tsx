@@ -756,7 +756,10 @@ describe("notes in Markdown (#12)", () => {
       ["mailto:m%C3%BCller@example.com", "müller@example.com", "_blank", "noopener noreferrer"],
     ]);
     expect(rendered().querySelector("code")?.textContent).toBe("https://code.example");
-    expect(rendered().textContent).toBe("Portal: https://portal.example/login, Fragen an müller@example.com\nhttps://code.example & Müller\njavascript:alert(1) javascript:alert(1)");
+    // The named entities load on demand (#134); then the note renders again.
+    await waitFor(() =>
+      expect(rendered().textContent).toBe("Portal: https://portal.example/login, Fragen an müller@example.com\nhttps://code.example & Müller\njavascript:alert(1) javascript:alert(1)"),
+    );
     // Edit shows the text as written.
     fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
     expect(notesArea()!.value).toBe(notes);

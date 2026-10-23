@@ -105,11 +105,16 @@ exist yet can be created right there ("Create …").
   not inside `` `code` ``, a code block or a link's text. A link ends
   before punctuation that ends the sentence (`.`, `,`, `!`, `?`, a quote)
   and before a closing bracket it did not open, so `(https://a.example).`
-  links `https://a.example`. Links open in a new tab and work only for
-  `http`, `https`, `mailto` and `tel` addresses; any other link shows its
-  text. Entities such as `&amp;` or `&#228;` show as their character
-  (`&`, `ä`) in the text, never in a link's address. Everything else, HTML
-  included, shows as you typed it.
+  links `https://a.example`. A link written right after an address
+  (`https://a.example/[text](https://b.example)`) stays a link of its own,
+  and `https://a.example's` links `https://a.example`. Links open in a new
+  tab and work only for `http`, `https`, `mailto` and `tel` addresses; any
+  other link shows its text. Entities such as `&amp;` or `&#228;` show as
+  their character (`&`, `ä`) in the text and in an `http`, `https` or
+  `www.` address written without Markdown, so an address copied from an
+  HTML e-mail (`?a=1&amp;b=2`) works. An entity never makes an address:
+  `&#104;ttps://…` and an encoded e-mail address (`name&#64;example.com`)
+  stay text. Everything else, HTML included, shows as you typed it.
 - Leaving a document with unsaved changes (another document, Back, logging
   out, closing the tab) asks first.
 

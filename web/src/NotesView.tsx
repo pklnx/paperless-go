@@ -1,5 +1,5 @@
-import { Component, useMemo, type ReactNode } from "react";
-import { renderNotes } from "./markdown";
+import { Component, useEffect, useMemo, useState, type ReactNode } from "react";
+import { entitiesLoaded, loadEntities, needsEntities, renderNotes } from "./markdown";
 
 interface BoundaryProps {
   /** The notes as written: shown when rendering them fails. */
@@ -29,8 +29,29 @@ export class NotesBoundary extends Component<BoundaryProps, { failed: boolean; t
   }
 }
 
+/**
+ * The rendered notes. A note with a `&name;` loads the entity table (a
+ * chunk of its own, #134): until it is there the entity shows as
+ * written, then the note renders again. Should loading fail, it stays as
+ * written; other text tries again.
+ */
 function Rendered({ text }: { text: string }) {
-  return useMemo(() => renderNotes(text), [text]);
+  const [loaded, setLoaded] = useState(entitiesLoaded);
+  const needed = useMemo(() => !loaded && needsEntities(text), [text, loaded]);
+  useEffect(() => {
+    if (!needed) return;
+    let live = true;
+    loadEntities().then(
+      () => {
+        if (live) setLoaded(true);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [needed, text]);
+  return useMemo(() => renderNotes(text), [text, loaded]);
 }
 
 /** The notes rendered from their Markdown (mounted only while they are not edited). */

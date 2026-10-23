@@ -7,19 +7,23 @@
 // code fences of ``` or ~~~ (verbatim, no formatting or links inside) and
 // rules. Inside a block: emphasis, strong, strikethrough, inline code and
 // links, as the app's inline parser does; an image shows its alt text.
-// Entities (`&amp;`, `&#228;`) show as their character in text, never in
-// a URL. Bare addresses become links as the app's link detector makes
+// Entities (`&amp;`, `&#228;`) show as their character in text; the
+// named ones once their table is loaded (`loadEntities`, a chunk of its
+// own). Bare addresses become links as the app's link detector makes
 // them (#131): `http://`, `https://`, `mailto:`, `tel:` and `www.`
 // addresses and e-mail addresses, never inside inline code or a link.
 // An address ends at white space or `<>"\``, at a ")", "]" or "}" it did
-// not open, and without trailing punctuation (`.,:;!?*_~'` and the like).
+// not open, before a written link (`[x](url)`), and without trailing
+// punctuation (`.,:;!?*_~'` and the like).
 //
 // Safety: the result is React elements built with createElement, never an
 // HTML string, so any text stays text. A link is made only from an
 // absolute URL that `new URL` parses and whose protocol is http:, https:,
 // mailto: or tel: (the app's schemes); anything else shows its link text.
 // A bare address goes through the same check, and it is found in the text
-// as written: an entity is never decoded into a URL.
+// as written: an entity never makes a URL or its scheme. Only after that
+// are the entities in a bare http(s) or www. URL decoded (#134), and the
+// decoded URL goes through the check again.
 // The browser's URL parser drops tabs and line breaks anywhere and control
 // characters at the ends, so the check runs on what it parses, not on the
 // text as written.
@@ -29,7 +33,54 @@
 // (the only ones test a single character). Every loop step counts one
 // `steps` tick, so a test can bound the work for any input.
 import { createElement, Fragment, type ReactNode } from "react";
-import { namedEntities } from "./htmlEntities";
+
+/**
+ * The HTML named character references, once loaded (#134): the table is
+ * about 14 kB gzip, so it is a chunk of its own, loaded only when a note
+ * has a `&name;`. Until then `&name;` shows as written; numeric entities
+ * need no table.
+ */
+let namedEntities: Readonly<Record<string, string>> | null = null;
+let entitiesLoading: Promise<void> | null = null;
+
+/** Whether the named entity table is loaded. */
+export const entitiesLoaded = () => namedEntities !== null;
+
+/**
+ * Loads the named entity table (once; a failed load can be tried again).
+ * Notes rendered before it resolves show `&name;` as written.
+ */
+export function loadEntities(): Promise<void> {
+  if (namedEntities) return Promise.resolve();
+  entitiesLoading ??= import("./htmlEntities").then(
+    (m) => {
+      namedEntities = m.namedEntities;
+    },
+    (err: unknown) => {
+      entitiesLoading = null;
+      throw err;
+    },
+  );
+  return entitiesLoading;
+}
+
+/**
+ * Whether the text has something that looks like a named entity
+ * (`&` and 1 to 32 letters or digits, then `;`), so the table is needed.
+ * Linear: each "&" reads at most 33 characters.
+ */
+export function needsEntities(text: string, steps: Steps = { n: 0 }): boolean {
+  for (let i = text.indexOf("&"); i >= 0; i = text.indexOf("&", i + 1)) {
+    steps.n++;
+    let j = i + 1;
+    while (j - i - 1 < 32 && isAsciiAlnum(text[j])) {
+      steps.n++;
+      j++;
+    }
+    if (j > i + 1 && text[j] === ";") return true;
+  }
+  return false;
+}
 
 /** The protocols a link may have (the app's `linkSchemes`). */
 const linkProtocols = new Set(["http:", "https:", "mailto:", "tel:"]);
@@ -82,12 +133,32 @@ const isPunct = (c: string | undefined) => c !== undefined && (asciiPunct.includ
 const isDigit = (c: string | undefined) => c !== undefined && c >= "0" && c <= "9";
 const isAsciiAlnum = (c: string | undefined) => c !== undefined && ((c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9"));
 const isHex = (c: string | undefined) => c !== undefined && ((c >= "a" && c <= "f") || (c >= "A" && c <= "F") || (c >= "0" && c <= "9"));
-/** A letter, digit or combining mark: what an address is made of. */
-const isWordChar = (c: string | undefined) => c !== undefined && (isAsciiAlnum(c) || (c > "\x7f" && /^[\p{L}\p{N}\p{M}]$/u.test(c)));
+const wordRe = /^[\p{L}\p{N}\p{M}]$/u;
+/**
+ * Whether s[i] is part of a letter, digit or combining mark: what an
+ * address is made of. Both halves of a surrogate pair count when the pair
+ * is one (`𝐚`, CJK Extension B, #134); a lone surrogate does not.
+ */
+function isWordAt(s: string, i: number): boolean {
+  const c = s[i];
+  if (c === undefined) return false;
+  if (isAsciiAlnum(c)) return true;
+  if (c <= "\x7f") return false;
+  const u = c.charCodeAt(0);
+  if (u >= 0xd800 && u <= 0xdbff) {
+    const lo = s.charCodeAt(i + 1);
+    return lo >= 0xdc00 && lo <= 0xdfff && wordRe.test(s.slice(i, i + 2));
+  }
+  if (u >= 0xdc00 && u <= 0xdfff) {
+    const hi = s.charCodeAt(i - 1);
+    return hi >= 0xd800 && hi <= 0xdbff && wordRe.test(s.slice(i - 1, i + 1));
+  }
+  return wordRe.test(c);
+}
 /** The local part of an e-mail address. */
-const isLocalChar = (c: string | undefined) => isWordChar(c) || c === "." || c === "-" || c === "_" || c === "+";
+const isLocalAt = (s: string, i: number) => isWordAt(s, i) || s[i] === "." || s[i] === "-" || s[i] === "_" || s[i] === "+";
 /** A domain's labels (between the dots). */
-const isDomainChar = (c: string | undefined) => isWordChar(c) || c === "-" || c === "_";
+const isDomainAt = (s: string, i: number) => isWordAt(s, i) || s[i] === "-" || s[i] === "_";
 
 // ---- Blocks
 
@@ -409,11 +480,16 @@ export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
     // What follows the prefix: a host, a phone number or an e-mail address.
     const k = i + (prefix?.length ?? 0);
     const starts =
-      prefix === "tel:" ? isDigit(s[k]) || (s[k] === "+" && isDigit(s[k + 1])) : prefix === "mailto:" ? isLocalChar(s[k]) : isWordChar(s[k]);
+      prefix === "tel:" ? isDigit(s[k]) || (s[k] === "+" && isDigit(s[k + 1])) : prefix === "mailto:" ? isLocalAt(s, k) : isWordAt(s, k);
     if (prefix && starts) {
-      const r = bareAddress(s, i, prefix.length, steps);
+      const r = bareAddress(s, i, prefix.length, pre, steps);
       urlFloor = r.stop;
-      const url = s.slice(i, r.end);
+      const raw = s.slice(i, r.end);
+      // Found and checked as written; then (http, https and www. only,
+      // #134) entities in it are decoded and the result is checked again,
+      // so a URL copied from an HTML e-mail (`&amp;`) works. The prefix
+      // was matched before, so an entity never makes a URL or a scheme.
+      const url = prefix === "mailto:" || prefix === "tel:" ? raw : decodeUrlEntities(raw, steps);
       const href = prefix !== "www." ? safeHref(url) : domainEnd(s, k, r.end, steps) >= 0 ? safeHref("http://" + url) : null;
       if (href) return { node: { t: "link", href, c: [{ t: "text", v: url }] }, end: r.end };
     }
@@ -680,7 +756,7 @@ export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
     }
     // An address starts at a word character that does not continue a word.
     const before = s[i - 1];
-    if (isWordChar(c) && !isWordChar(before) && before !== "." && before !== "-" && before !== "+" && before !== "@") {
+    if (isWordAt(s, i) && !isWordAt(s, i - 1) && before !== "." && before !== "-" && before !== "+" && before !== "@") {
       const link = bareLink(i);
       if (link) {
         bareNodes.add(link.node);
@@ -730,7 +806,30 @@ function entity(s: string, i: number, steps: Steps): { v: string; end: number } 
   }
   if (j === start || s[j] !== ";") return null;
   const name = s.slice(start, j);
-  return Object.hasOwn(namedEntities, name) ? { v: namedEntities[name]!, end: j + 1 } : null;
+  return namedEntities && Object.hasOwn(namedEntities, name) ? { v: namedEntities[name]!, end: j + 1 } : null;
+}
+
+/**
+ * A bare URL with its entities decoded (#134); the URL as written when
+ * there are none, or when one decodes to a character that ends a bare
+ * address (white space, a control or format character, `<>"`…): such a
+ * character never gets into a link, neither its href nor its text.
+ */
+function decodeUrlEntities(url: string, steps: Steps): string {
+  let out = "";
+  let k = 0;
+  for (let j = url.indexOf("&"); j >= 0; j = url.indexOf("&", j)) {
+    steps.n++;
+    const ent = entity(url, j, steps);
+    if (!ent) {
+      j++;
+      continue;
+    }
+    for (const c of ent.v) if (endsAddress(c)) return url;
+    out += url.slice(k, j) + ent.v;
+    k = j = ent.end;
+  }
+  return k === 0 ? url : out + url.slice(k);
 }
 
 /** What a bare address starts with (any case), the detector's schemes that may link. */
@@ -745,25 +844,46 @@ function barePrefix(s: string, i: number): string | null {
 const trailingPunct = "?!.,:;*_~'";
 const isTrailing = (c: string) => trailingPunct.includes(c) || (c > "\x7f" && /^[\p{Po}\p{Pi}\p{Pf}]$/u.test(c));
 
+/** Characters that end a bare address: white space, controls, format characters, `<>"`, a backtick and a backslash. */
+const endsAddress = (c: string) =>
+  isWhite(c) || c < " " || c === "\x7f" || c === "<" || c === ">" || c === '"' || c === "`" || c === "\\" || (c > "\x7f" && /^[\p{Cc}\p{Cf}]$/u.test(c));
+
 /**
  * The bare address that starts at i with a prefix of `from` characters:
  * where it ends (`end`) and where its scan stopped (`stop`). It ends at
  * white space, a control or format character, `<`, `>`, `"`, a backtick
  * or a backslash, or at a ")", "]" or "}" that closes nothing inside it;
- * then trailing punctuation and a trailing entity (`&gt;`) come off.
+ * at a "[" that starts a written link (`[x](url)`: the written link is
+ * parsed first, as in the app); and, in a URL's host, at a `'` or `’`
+ * (`https://s.example's`). Then trailing punctuation and a trailing
+ * entity (`&gt;`) come off.
  */
-function bareAddress(s: string, i: number, from: number, steps: Steps): { end: number; stop: number } {
+function bareAddress(s: string, i: number, from: number, pre: Prepass, steps: Steps): { end: number; stop: number } {
   const n = s.length;
   const start = i + from;
   let j = start;
   let paren = 0;
   let square = 0;
   let curly = 0;
+  // http(s):// and www. (the prefixes ending in "/" or ".") start with a
+  // host; mailto: and tel: do not.
+  let host = s[start - 1] === "/" || s[start - 1] === ".";
   while (j < n) {
     steps.n++;
     const c = s[j]!;
-    if (isWhite(c) || c < " " || c === "\x7f" || c === "<" || c === ">" || c === '"' || c === "`" || c === "\\") break;
-    if (c > "\x7f" && /^[\p{Cc}\p{Cf}]$/u.test(c)) break;
+    if (endsAddress(c)) break;
+    if (host) {
+      if (c === "/" || c === "?" || c === "#") host = false;
+      else if (c === "'" || c === "\u2019") break;
+    }
+    if (c === "[") {
+      // A written link right here: its "]" (the pre-pass pairs brackets)
+      // is followed by a destination. Each "[" is asked once, as the bare
+      // scans do not overlap, and destination reads only the pre-pass
+      // until it has found one, which ends this scan.
+      const close = pre.closeBracket[j]!;
+      if (close >= 0 && destination(s, close + 1, pre, steps)) break;
+    }
     if (c === "(") paren++;
     else if (c === "[") square++;
     else if (c === "{") curly++;
@@ -810,8 +930,8 @@ function domainEnd(s: string, j: number, limit: number, steps: Steps): number {
   while (k < limit) {
     steps.n++;
     const c = s[k];
-    if (isDomainChar(c)) k++;
-    else if (c === "." && k > j && k + 1 < limit && isDomainChar(s[k + 1])) {
+    if (isDomainAt(s, k)) k++;
+    else if (c === "." && k > j && k + 1 < limit && isDomainAt(s, k + 1)) {
       dots++;
       k++;
     } else break;
@@ -863,6 +983,8 @@ interface Prepass {
   nextQuote: { '"': Int32Array; "'": Int32Array };
   /** The end of the run of e-mail local-part characters starting at i. */
   localEnd: Int32Array;
+  /** For an unescaped "[" at i: the unescaped "]" that pairs with it (brackets nest), or -1. */
+  closeBracket: Int32Array;
 }
 
 function prepass(s: string, steps: Steps): Prepass {
@@ -872,6 +994,8 @@ function prepass(s: string, steps: Steps): Prepass {
   const runs = new Map<number, number[]>();
   const stray = new Uint8Array(n + 1);
   const stack: number[] = [];
+  const closeBracket = new Int32Array(n + 1).fill(-1);
+  const squares: number[] = [];
   for (let i = 0; i < n; i++) {
     steps.n++;
     const c = s[i]!;
@@ -886,6 +1010,8 @@ function prepass(s: string, steps: Steps): Prepass {
       if (at) at.push(i);
       else runs.set(e - i, [i]);
     }
+    if (!escaped[i] && c === "[") squares.push(i);
+    else if (!escaped[i] && c === "]" && squares.length > 0) closeBracket[squares.pop()!] = i;
     if (isWhite(c)) stack.length = 0;
     else if (!escaped[i] && c === "(") stack.push(i);
     else if (!escaped[i] && c === ")") {
@@ -916,7 +1042,7 @@ function prepass(s: string, steps: Steps): Prepass {
     strayAt[i] = white ? -1 : stray[i] ? i : strayAt[i + 1]!;
     dq[i] = c === '"' && !escaped[i] ? i : dq[i + 1]!;
     sq[i] = c === "'" && !escaped[i] ? i : sq[i + 1]!;
-    localEnd[i] = isLocalChar(c) ? localEnd[i + 1]! : i;
+    localEnd[i] = isLocalAt(s, i) ? localEnd[i + 1]! : i;
   }
   // The scan asks with growing positions, so each list is read once.
   const cursor = new Map<number, number>();
@@ -931,7 +1057,7 @@ function prepass(s: string, steps: Steps): Prepass {
     cursor.set(len, k);
     return k < at.length ? at[k]! : -1;
   };
-  return { nextTickRun, closeAt, nextWhite, nextNonWhite, openAfter, strayAt, nextQuote: { '"': dq, "'": sq }, localEnd };
+  return { nextTickRun, closeAt, nextWhite, nextNonWhite, openAfter, strayAt, nextQuote: { '"': dq, "'": sq }, localEnd, closeBracket };
 }
 
 /**
