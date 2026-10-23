@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -23,6 +24,11 @@ import (
 // owner, owner_id is never updated, and every link between them stays
 // within one owner (composite foreign keys), so the writes of one owner
 // serialise and no wait between store writers can form a cycle.
+//
+// Writers reach the lock only through ownerTx (ownergate.go), which takes
+// the process's owner gate first, so a writer waiting for an owner holds
+// no pool connection while another writer of that owner in this process
+// is in its transaction.
 //
 // The lock is taken inside the transaction and released at its commit or
 // rollback, also on an error or a cancelled context. A transaction that
@@ -62,14 +68,18 @@ var (
 // ownerTables are the tables only a holder of the owner lock may write.
 const ownerTables = `(?:documents|document_tags|tags|correspondents|document_types)`
 
+// ownerTable matches one of them as a table name: optionally in schema
+// public, each part optionally quoted ("documents", public."tags").
+const ownerTable = `(?:(?:public|"public")\.)?(?:` + ownerTables + `\b|"` + ownerTables + `")`
+
 var (
 	// writeRE matches a statement that writes one of the owner tables.
-	writeRE = regexp.MustCompile(`(?is)\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE(?:\s+TABLE)?)\s+(?:ONLY\s+)?(?:public\.)?` +
-		ownerTables + `\b`)
+	writeRE = regexp.MustCompile(`(?is)\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE(?:\s+TABLE)?)\s+(?:ONLY\s+)?` +
+		ownerTable)
 	// rowLockRE and fromRE together match a statement that row-locks one
 	// of them: a locking clause and the table in its FROM or a JOIN.
 	rowLockRE = regexp.MustCompile(`(?is)\bFOR\s+(?:NO\s+KEY\s+UPDATE|UPDATE|KEY\s+SHARE|SHARE)\b`)
-	fromRE    = regexp.MustCompile(`(?is)\b(?:FROM|JOIN)\s+(?:ONLY\s+)?(?:public\.)?` + ownerTables + `\b`)
+	fromRE    = regexp.MustCompile(`(?is)\b(?:FROM|JOIN)\s+(?:ONLY\s+)?` + ownerTable)
 )
 
 // writesOwnerTables reports whether the SQL text sql writes or row-locks
@@ -207,6 +217,10 @@ func (r errRow) Scan(...any) error { return r.err }
 type writeTx struct {
 	q *db.Queries
 	g guardedDB
+	// gated are the owners whose gate ownerTx holds (ascending), and
+	// deadline the end of the wait bound (zero: none, see WithOwnerWait).
+	gated    []int64
+	deadline time.Time
 }
 
 // ownerLockDisabled makes lockOwners record the owners without taking the
@@ -216,9 +230,16 @@ var ownerLockDisabled atomic.Bool
 
 // lockOwners takes the owner lock of each owner, deduplicated, in
 // ascending id, one statement each (SQL does not promise the order in
-// which a function runs over rows). Every writer calls it once, as its
-// first statement after reading owners it does not know; a second call
-// and an empty list are bugs (errLockedTwice, errNoOwners).
+// which a function runs over rows). Only ownerTx calls it, once, as the
+// first statement of its transaction, with the owners it gated; other
+// owners (errNotGated), a second call (errLockedTwice) and an empty list
+// (errNoOwners) are bugs.
+//
+// With a wait bound (t.deadline) each LockOwner runs under a
+// lock_timeout of the time left then (at least 1 ms; none left: ErrBusy
+// without the statement), and lock_timeout is reset to its default right
+// after the last one, so row locks and triggers never run under it. A
+// lock_timeout at LockOwner (55P03) is ErrBusy.
 func (t *writeTx) lockOwners(ctx context.Context, owners ...int64) error {
 	if t.g.tx.locked {
 		return errLockedTwice
@@ -229,12 +250,34 @@ func (t *writeTx) lockOwners(ctx context.Context, owners ...int64) error {
 	sorted := slices.Clone(owners)
 	slices.Sort(sorted)
 	sorted = slices.Compact(sorted)
+	if !slices.Equal(sorted, t.gated) {
+		return fmt.Errorf("%w: locking %v, gated %v", errNotGated, sorted, t.gated)
+	}
 	if r, ok := ctx.Value(lockRecorderKey{}).(func(lockEvent)); ok {
 		r(lockEvent{Owners: slices.Clone(sorted)})
 	}
 	if !ownerLockDisabled.Load() {
+		bounded := !t.deadline.IsZero()
 		for _, o := range sorted {
+			if bounded {
+				left := time.Until(t.deadline)
+				if left <= 0 {
+					return ErrBusy
+				}
+				if _, err := t.g.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = %d", max(left.Milliseconds(), 1))); err != nil {
+					return err
+				}
+			}
 			if err := t.q.LockOwner(ctx, db.LockOwnerParams{Prefix: ownerLockPrefix, OwnerID: o}); err != nil {
+				var pgErr *pgconn.PgError
+				if errors.As(err, &pgErr) && pgErr.Code == "55P03" { // lock_not_available
+					return ErrBusy
+				}
+				return err
+			}
+		}
+		if bounded {
+			if _, err := t.g.Exec(ctx, "SET LOCAL lock_timeout TO DEFAULT"); err != nil {
 				return err
 			}
 		}
@@ -259,10 +302,12 @@ func (t *writeTx) holds(owners ...int64) error {
 // lockOwners call and every guarded statement of a transaction.
 type lockRecorderKey struct{}
 
-// lockEvent is one call to the recorder: a lockOwners call (Owners set)
+// lockEvent is one call to the recorder: an ownerTx past its gate (Gated
+// set), a lockOwners call (Owners set)
 // or a statement (Query its sqlc name, Writes whether it needs the lock,
 // Locked whether the lock was held).
 type lockEvent struct {
+	Gated  []int64 // an ownerTx took the gate of these owners
 	Owners []int64
 	Query  string
 	Writes bool

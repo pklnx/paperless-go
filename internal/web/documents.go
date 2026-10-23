@@ -686,7 +686,8 @@ func (s *Server) refuseUpload(w http.ResponseWriter, reason ingest.Reason) {
 // the name is in X-File-Name. Answers: 201 with the document, 200 with
 // duplicate (and the existing document, if it can be named and the caller
 // may read: a session or a key with read), 413, 415 or
-// 422 with the reason of a refusal.
+// 422 with the reason of a refusal, 503 with Retry-After: 5 when another
+// change of the caller's documents ran longer than ownerWait.
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if !s.documentsAvailable(w, r) {
 		return

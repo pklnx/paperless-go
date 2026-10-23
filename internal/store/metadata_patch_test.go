@@ -119,15 +119,15 @@ func TestPatchErrors(t *testing.T) {
 }
 
 // Two patches of different fields of one tag both survive: the second one
-// waits for the first one's owner lock and then reads its result. Without
-// the locks it would read the old row and write the old name back.
+// waits for the first one (at the owner gate of their store) and then
+// reads its result. Without the locks it would read the old row and write
+// the old name back.
 func TestConcurrentPatchesBothSurvive(t *testing.T) {
-	st, url := storetest.NewWithURL(t)
+	st := storetest.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
 	tag := mustTag(t, st, alice, "Old", nil)
-	watch := connect(t, url)
 
 	locked, release := make(chan struct{}), make(chan struct{})
 	first := make(chan error, 1)
@@ -151,26 +151,20 @@ func TestConcurrentPatchesBothSurvive(t *testing.T) {
 	}
 
 	second := make(chan error, 1)
+	gated := make(chan struct{})
 	go func() {
-		_, err := st.PatchTag(ctx, alice, tag.ID, store.TagPatch{ColorHex: ptr("#00FF00")})
+		// In one store the second patch waits at the owner gate, before
+		// it takes a connection.
+		wait := store.WithGateWait(ctx, func() { close(gated) })
+		_, err := st.PatchTag(wait, alice, tag.ID, store.TagPatch{ColorHex: ptr("#00FF00")})
 		second <- err
 	}()
-	// Wait until the second patch waits for the owner lock.
-	for {
-		var waiting bool
-		err := watch.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'
-			AND query LIKE '%-- name: LockOwner%')`).Scan(&waiting)
-		if err == nil && waiting {
-			break
-		}
-		select {
-		case err := <-second:
-			t.Fatalf("second patch finished without waiting for the lock: %v", err)
-		case <-ctx.Done():
-			t.Fatal("second patch never waited for the lock")
-		default:
-		}
+	select {
+	case <-gated:
+	case err := <-second:
+		t.Fatalf("second patch finished without waiting for the first: %v", err)
+	case <-ctx.Done():
+		t.Fatal("second patch never waited for the first")
 	}
 	close(release)
 	if err := <-first; err != nil {

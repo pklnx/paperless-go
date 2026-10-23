@@ -35,6 +35,9 @@ type Store struct {
 	searchDB func(guardedDB) db.DBTX
 	// userAgents caches the IDs of audit log user agents.
 	userAgents userAgentCache
+	// gate keeps writers of one owner that wait for each other off the
+	// pool (ownergate.go). The worker and the handlers share it.
+	gate *ownerGate
 }
 
 // Open connects to the database.
@@ -48,7 +51,7 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		return nil, fmt.Errorf("connect to database: %w", err)
 	}
 	g := guardedDB{d: pool}
-	s := &Store{pool: pool, g: g, q: db.New(g), searchDB: func(d guardedDB) db.DBTX { return unnamedStatements{d} }}
+	s := &Store{pool: pool, g: g, q: db.New(g), gate: newOwnerGate(), searchDB: func(d guardedDB) db.DBTX { return unnamedStatements{d} }}
 	s.sq = db.New(s.searchDB(g))
 	return s, nil
 }
