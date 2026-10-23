@@ -41,6 +41,9 @@ cleanup() {
 		docker compose logs postgres >&2 || true
 		docker compose logs web >&2 || true
 	fi
+	if [ -n "${oneoff:-}" ]; then
+		docker rm -f "$oneoff" >/dev/null 2>&1 || true
+	fi
 	in_data 'rm -rf /data/* /data/.[!.]* /consume/* /consume/.[!.]*' >/dev/null 2>&1 || true
 	docker compose --progress quiet down -v >/dev/null 2>&1 || true
 	rm -f .env
@@ -316,11 +319,189 @@ fi
 json "$work/out" 'd["processing"]["state"]' > "$work/state"
 expect "$work/state" '^(queued|running|done)$'
 
+# The counts and the backup come from one window with the web server
+# stopped, so no background write (audit log, jobs) falls in between.
 echo "== backup"
+docker compose --progress quiet stop web
+sql() { # sql <database> <query>
+	docker compose --progress quiet exec -T postgres psql -X -qAt -v ON_ERROR_STOP=1 -U paperless -d "$1" -c "$2"
+}
+audit_before=$(sql paperless 'SELECT count(*) FROM audit_log')
+docs_before=$(sql paperless 'SELECT count(*) FROM documents')
 ./pgo backup "$work/backups" | tee "$work/out"
 expect "$work/out" "wrote .*paperless-[0-9TZ]+\.dump"
 dump=$(ls "$work/backups"/paperless-*.dump)
 docker compose --progress quiet exec -T postgres pg_restore --list < "$dump" > "$work/out"
 expect "$work/out" 'TABLE public installation'
+
+# ./pgo restore replaces the database with the dump. The database has audit
+# log partitions (every one from migration 00005 on), on which the
+# pg_restore --clean the guide used to prescribe fails (#121).
+echo "== restore: refusals"
+# A change after the backup, which only a restore undoes.
+echo "marker password" | ./pgo user add marker --password-stdin | tee "$work/out"
+expect "$work/out" 'user "marker" created'
+marker() { sql paperless "SELECT count(*) FROM users WHERE name = 'marker'"; }
+# refuses <status> <regex> [arguments]: ./pgo restore with the arguments
+# exits with status and a message matching regex, and changes nothing.
+# It runs with $restore_path as PATH, so a test can put stand-ins first.
+restore_path=$PATH
+refuses() {
+	want=$1
+	msg=$2
+	shift 2
+	got=0
+	PATH=$restore_path ./pgo restore "$@" > "$work/out" 2>&1 || got=$?
+	cat "$work/out"
+	if [ "$got" != "$want" ]; then
+		echo "expected exit status $want from ./pgo restore $*, got $got" >&2
+		exit 1
+	fi
+	expect "$work/out" "$msg"
+	if [ "$(marker)" != 1 ]; then
+		echo "a refused restore changed the database" >&2
+		exit 1
+	fi
+	sql postgres 'SELECT datname FROM pg_database' > "$work/dbs"
+	if grep -Eq '^paperless_(restore|replaced_)' "$work/dbs"; then
+		echo "a refused restore left a database behind" >&2
+		cat "$work/dbs" >&2
+		exit 1
+	fi
+	if [ "$(sql postgres "SELECT datallowconn FROM pg_database WHERE datname = 'paperless'")" != t ]; then
+		echo "a refused restore left the database closed to connections" >&2
+		exit 1
+	fi
+}
+refuses 2 'usage: \./pgo restore'
+refuses 2 'cannot read' --yes "$work/missing.dump"
+refuses 2 'restore --yes FILE' "$dump"
+docker compose --progress quiet up -d --wait web
+refuses 1 'still running: web$' --yes "$dump"
+docker compose --progress quiet stop web
+# A running ./pgo command (a shell in the CLI container stands in for an
+# import) blocks it too.
+oneoff=$(docker compose --progress quiet run -d --rm --no-deps --entrypoint sh paperless-go -c 'exec sleep infinity')
+refuses 1 'still running: paperless-go$' --yes "$dump"
+docker rm -f "$oneoff" > /dev/null
+oneoff=
+# When Docker Compose cannot list the containers, that counts as busy: a
+# stand-in for docker fails `compose ps` and runs everything else.
+mkdir "$work/failps"
+cat > "$work/failps/docker" <<EOF
+#!/bin/sh
+case " \$* " in *" ps "*) echo "compose ps failed" >&2; exit 1 ;; esac
+exec $(command -v docker) "\$@"
+EOF
+chmod +x "$work/failps/docker"
+restore_path=$work/failps:$PATH
+refuses 1 'could not list the containers' --yes "$dump"
+restore_path=$PATH
+
+echo "== restore: the name for the replaced database is taken"
+# A stand-in for date fixes the name ./pgo restore picks.
+mkdir "$work/fixeddate"
+printf '#!/bin/sh\necho 20000101_000000\n' > "$work/fixeddate/date"
+chmod +x "$work/fixeddate/date"
+sql postgres 'CREATE DATABASE paperless_replaced_20000101_000000'
+got=0
+PATH=$work/fixeddate:$PATH ./pgo restore --yes "$dump" > "$work/out" 2>&1 || got=$?
+cat "$work/out"
+if [ "$got" != 1 ]; then
+	echo "expected exit status 1 for a taken name, got $got" >&2
+	exit 1
+fi
+expect "$work/out" 'the database paperless_replaced_20000101_000000 exists already; nothing was changed'
+sql postgres 'DROP DATABASE paperless_replaced_20000101_000000'
+refuses 2 'restore --yes FILE' "$dump" # the checks of refuses: nothing changed
+
+echo "== restore: a broken dump"
+# The last bytes cut off: they belong to the table data after the table of
+# contents, so the archive passes the check before the restore and
+# pg_restore itself fails.
+size=$(wc -c < "$dump")
+head -c $((size - 32)) "$dump" > "$work/broken.dump"
+docker compose --progress quiet exec -T postgres pg_restore --list < "$work/broken.dump" > /dev/null
+refuses 1 'pg_restore failed' --yes "$work/broken.dump"
+
+echo "== restore: the swap fails"
+# Another session holds a lock on the database (an open COMMENT ON DATABASE,
+# from the maintenance database, so the restore does not end it): the rename
+# fails at its lock timeout and the restored copy is dropped again.
+mkfifo "$work/lock.in" "$work/lock.out"
+docker compose --progress quiet exec -T postgres psql -X -Atq -U paperless -d postgres \
+	< "$work/lock.in" > "$work/lock.out" &
+exec 3> "$work/lock.in" 4< "$work/lock.out"
+echo "BEGIN; COMMENT ON DATABASE paperless IS 'smoke'; SELECT 'locked';" >&3
+read -r locked <&4
+if [ "$locked" != locked ]; then
+	echo "could not lock the database: $locked" >&2
+	exit 1
+fi
+refuses 1 'could not swap in the restored database' --yes "$dump"
+echo "ROLLBACK;" >&3
+exec 3>&- 4<&-
+wait
+
+echo "== restore"
+# A leftover of an aborted restore is dropped first, and a database left
+# closed to connections by an interrupted swap is opened again.
+sql postgres 'CREATE DATABASE paperless_restore'
+sql postgres 'ALTER DATABASE paperless ALLOW_CONNECTIONS false'
+./pgo restore --yes "$dump" | tee "$work/restore.out"
+expect "$work/restore.out" 'did not accept connections .*; opening it again'
+expect "$work/restore.out" '^restored '
+expect "$work/restore.out" 'kept as paperless_replaced_[0-9]{8}_[0-9]{6};'
+if [ "$(marker)" != 0 ]; then
+	echo "the restore kept the user added after the backup" >&2
+	exit 1
+fi
+rows_are() { # rows_are <table> <count>
+	got=$(sql paperless "SELECT count(*) FROM $1")
+	if [ "$got" != "$2" ]; then
+		echo "expected $2 rows in $1 after the restore, got $got" >&2
+		exit 1
+	fi
+}
+rows_are audit_log "$audit_before"
+rows_are documents "$docs_before"
+sql postgres 'SELECT datname FROM pg_database' > "$work/dbs"
+if grep -q '^paperless_restore$' "$work/dbs" || [ "$(grep -c '^paperless_replaced_' "$work/dbs")" != 1 ]; then
+	echo "expected one replaced database and no paperless_restore" >&2
+	cat "$work/dbs" >&2
+	exit 1
+fi
+# The replaced database is kept as it was and opens again (to undo).
+replaced=$(grep '^paperless_replaced_' "$work/dbs")
+if [ "$(sql "$replaced" "SELECT count(*) FROM users WHERE name = 'marker'")" != 1 ]; then
+	echo "the replaced database lost the user added after the backup" >&2
+	exit 1
+fi
+./pgo migrate status | tee "$work/out"
+if grep -q pending "$work/out"; then
+	echo "expected no pending migration after the restore" >&2
+	exit 1
+fi
+expect "$work/out" '00001_initial\.sql +applied'
+docker compose --progress quiet up -d --wait web
+WEB_PORT=$(docker compose port web 8080 | sed 's/.*://')
+base="http://localhost:$WEB_PORT"
+# The login from before the backup is in the dump.
+curl -fsS --retry 10 --retry-delay 1 --retry-all-errors -b "$work/cookies" "$base/api/users" > "$work/out"
+expect "$work/out" '"name":"smoke"'
+if grep -q '"name":"marker"' "$work/out"; then
+	echo "the API still lists the user added after the backup" >&2
+	exit 1
+fi
+
+echo "== restore: drop the replaced database"
+# The command ./pgo restore printed, as it is.
+drop=$(sed -n 's/^  \(docker compose exec postgres dropdb .*\)$/\1/p' "$work/restore.out")
+echo "$drop"
+sh -c "$drop" < /dev/null
+if [ "$(sql postgres "SELECT count(*) FROM pg_database WHERE datname = '$replaced'")" != 0 ]; then
+	echo "the printed dropdb command did not drop $replaced" >&2
+	exit 1
+fi
 
 echo "smoke test passed"

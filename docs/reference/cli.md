@@ -54,6 +54,7 @@ Only in the wrapper:
 | Command | Does |
 |---|---|
 | `./pgo backup DIR` | Writes a `pg_dump` of the database to `DIR`. Copy the data directory afterwards; see [Backups](../guide/operations#backups). |
+| `./pgo restore --yes FILE` | Replaces the database with a dump of `./pgo backup`: restores it into a new database and swaps that in only when the restore succeeded. The replaced database is kept under a new name. Refuses while the web server or another `./pgo` command runs; see [Restore](../guide/operations#restore). |
 
 ## Import
 
