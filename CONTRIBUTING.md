@@ -34,7 +34,8 @@ See [SECURITY.md](SECURITY.md).
   - `pnpm test` and `pnpm typecheck` in `web/` for UI changes;
   - `pnpm build` in `docs/` for documentation changes.
 - CI must be green: `test`, `lint`, `vulncheck`, `docker`, `toolstest`,
-  `compose` and `web`, plus the docs build for documentation changes.
+  `compose`, `web` and `secret-scan`, plus the docs build for documentation
+  changes.
 - The maintainer merges with squash after an approving review.
 
 ### Pull requests from forks

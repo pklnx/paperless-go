@@ -62,6 +62,14 @@ changes `internal/store/migrations`; the label is a marker and triggers
 nothing. Pull requests without app code (docs, CI, test-only) need one
 session review and green required checks.
 
+Pull requests that can weaken the secret scan are merged only after the
+maintainer's explicit OK, noted on the pull request. This covers
+`.gitleaksignore`, `.gitleaks.toml` and files it extends, a new
+`gitleaks:allow` comment, `.github/workflows/secrets.yml`,
+`scripts/secret-scan-*` and the gitleaks variables and targets in the
+`Makefile`. The reviewer flags any such change as blocking until the OK is
+there. The OK names the changed entries, never secret values.
+
 Pull requests from forks get the same reviews. GitHub asks the maintainer to
 approve workflow runs of outside contributors.
 

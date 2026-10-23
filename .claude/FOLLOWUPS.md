@@ -4,7 +4,6 @@ Non-blocking findings from reviews that are not fixed in their PR. Read at sessi
 
 | Source | Follow-up | Status |
 |---|---|---|
-| foundation PR | Open follow-ups of pklnx/mail-archive that apply to the copied workflow too: #129 (tool-neutral CLAUDE.md/briefs), #131 (`check-go-toolchain.sh` message). Port their fixes here when they land there. | open |
 | PR #1 Action review, 5 | `scripts/compose-smoke-test.sh` waits for the web server with `curl --retry`: `web` has no healthcheck, so `up --wait` only waits for "running". Add a `paperless-go healthcheck` subcommand (or, since #37 the image has a shell, a curl-free check) as the Compose healthcheck and rely on `up --wait`. | open |
 | PR #24 Action review | `DeleteTag`: if a root tag is renamed concurrently so that the follow-up `TagRootNameConflict` lookup finds nothing, `TagNameConflictError` has an empty child; the refusal is still right. Handle the empty case in the UI or retry the lookup once. | open |
 | PR #24 Action review | `TestConcurrentTagCycle` polls `pg_stat_activity` in a tight loop; add a short backoff or filter on the store connection's PID. | open |
