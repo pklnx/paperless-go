@@ -35,15 +35,27 @@ docker compose up -d web
 when the whole dump is in. If it fails (a damaged dump, a full disk),
 nothing was changed: it says so, and the old database is still in use.
 It refuses while the web server runs or restarts, or while another `./pgo`
-command (an import, `process`, a cron job) uses the database. Without
-`--yes` it only says what it would do.
+command (an import, `process`, a cron job) uses the database, and checks
+that again before the swap. Without `--yes` it only says what it would do.
+
+If a restore is interrupted (Ctrl-C) while it loads the dump, the old
+database is unchanged and a partial copy, `paperless_restore`, is left; the
+next `./pgo restore` drops it. Interrupted during the swap, PostgreSQL
+finishes the swap on its own; the command says how to check. If the web
+server or `./pgo migrate` ever fails with `database "paperless" is not
+currently accepting connections`, a swap was cut short: run the restore
+again (it opens the database first), or open it by hand:
+
+```sh
+docker compose exec postgres psql -U paperless -d postgres -c 'ALTER DATABASE paperless ALLOW_CONNECTIONS true'
+```
 
 The database it replaces stays, renamed to
-`paperless_replaced_YYYYMMDDTHHMMSSZ`, and the command prints its name and
+`paperless_replaced_YYYYMMDD_HHMMSS` (the time in UTC), and the command prints its name and
 the command that drops it:
 
 ```sh
-docker compose exec postgres dropdb -U paperless paperless_replaced_YYYYMMDDTHHMMSSZ
+docker compose exec postgres dropdb -U paperless paperless_replaced_YYYYMMDD_HHMMSS
 ```
 
 Until then it takes disk space, and the restore needs free space for one
@@ -58,9 +70,9 @@ swap the names again:
 
 ```sh
 docker compose stop web
-docker compose exec postgres psql -U paperless -d postgres \
+docker compose exec postgres psql -U paperless -d postgres -v ON_ERROR_STOP=1 -1 \
   -c 'ALTER DATABASE paperless RENAME TO paperless_unwanted' \
-  -c 'ALTER DATABASE paperless_replaced_YYYYMMDDTHHMMSSZ RENAME TO paperless'
+  -c 'ALTER DATABASE paperless_replaced_YYYYMMDD_HHMMSS RENAME TO paperless'
 ```
 
 Then move the old data directory back and start the web server.

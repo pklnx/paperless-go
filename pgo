@@ -102,16 +102,6 @@ if [ "${1:-}" = restore ]; then
 		exit 2
 	fi
 
-	# Nothing may use the database meanwhile: not the web server, also not
-	# while it restarts, and no other ./pgo command (import, process, cron).
-	busy=$(compose ps -a --format '{{.Service}} {{.State}}' |
-		awk '$1 != "postgres" && $2 != "exited" && $2 != "created" && $2 != "dead" { print $1 }' | sort -u | tr '\n' ' ')
-	if [ -n "$busy" ]; then
-		echo "error: still running: ${busy% }; nothing was changed" >&2
-		echo "stop the web server (docker compose stop web) and let running ./pgo commands finish first" >&2
-		exit 1
-	fi
-
 	admin() { # admin [psql arguments]: psql in the maintenance database
 		compose exec -T postgres psql -X -q -At -v ON_ERROR_STOP=1 -U paperless -d postgres "$@"
 	}
@@ -120,18 +110,78 @@ if [ "${1:-}" = restore ]; then
 			echo "warning: could not drop the database paperless_restore; drop it with: docker compose exec postgres dropdb -U paperless --force paperless_restore" >&2
 		fi
 	}
-
-	old=paperless_replaced_$(date -u +%Y%m%dT%H%M%SZ)
-	if [ "$(admin -c "SELECT count(*) FROM pg_database WHERE datname = '$old'")" != 0 ]; then
-		echo "error: the database $old exists already; nothing was changed" >&2
+	db_exists() { # db_exists NAME: prints yes, no, or unknown when PostgreSQL does not answer
+		n=$(admin -c "SELECT count(*) FROM pg_database WHERE datname = '$1'") || n=
+		case $n in
+		0) echo no ;;
+		1) echo yes ;;
+		*) echo unknown ;;
+		esac
+	}
+	# Nothing may use the database meanwhile: not the web server, also not
+	# while it restarts, and no other ./pgo command (import, process, cron).
+	# If Docker Compose cannot list the containers, that counts as busy.
+	idle() {
+		if ! states=$(compose ps -a --format '{{.Service}} {{.State}}'); then
+			echo "error: could not list the containers (docker compose ps)" >&2
+			return 1
+		fi
+		busy=$(printf '%s\n' "$states" |
+			awk '$1 != "" && $1 != "postgres" && $2 != "exited" && $2 != "created" && $2 != "dead" { print $1 }' |
+			sort -u | tr '\n' ' ')
+		if [ -n "$busy" ]; then
+			echo "error: still running: ${busy% }" >&2
+			echo "stop the web server (docker compose stop web) and let running ./pgo commands finish first" >&2
+			return 1
+		fi
+	}
+	if ! idle; then
+		echo "nothing was changed" >&2
 		exit 1
 	fi
+
+	# The swap below closes the database to connections and opens it again
+	# in the same psql input; should that have been cut short (PostgreSQL
+	# stopped in between), open it again here.
+	if [ "$(admin -c "SELECT datallowconn FROM pg_database WHERE datname = 'paperless'")" = f ]; then
+		echo "the database paperless did not accept connections (an interrupted ./pgo restore); opening it again"
+		admin -c 'ALTER DATABASE paperless ALLOW_CONNECTIONS true'
+	fi
+
+	# The name needs no quoting in SQL: lowercase, digits and underscores.
+	old=paperless_replaced_$(date -u +%Y%m%d_%H%M%S)
+	case $(db_exists "$old") in
+	no) ;;
+	yes)
+		echo "error: the database $old exists already; nothing was changed" >&2
+		exit 1
+		;;
+	*)
+		echo "error: could not ask PostgreSQL for its databases; nothing was changed" >&2
+		exit 1
+		;;
+	esac
 	if ! compose exec -T postgres pg_restore --list <"$file" >/dev/null; then
 		echo "error: $file is not a backup pg_restore can read; nothing was changed" >&2
 		exit 1
 	fi
 	size=$(admin -c "SELECT pg_size_pretty(pg_database_size('paperless'))")
 	echo "restoring into a new database; the current one ($size) stays until you drop it, so both need room"
+
+	stage=restore
+	# shellcheck disable=SC2329 # called by the trap below
+	interrupted() {
+		echo >&2
+		if [ "$stage" = restore ]; then
+			echo "interrupted: the database is unchanged. The next ./pgo restore drops the partial copy paperless_restore;" >&2
+			echo "to drop it now: docker compose exec postgres dropdb -U paperless --force paperless_restore" >&2
+		else
+			echo "interrupted during the swap, which PostgreSQL finishes on its own. If a database $old exists," >&2
+			echo "the restore is done; otherwise nothing was changed. List them with: docker compose exec postgres psql -U paperless -l" >&2
+		fi
+		exit 130
+	}
+	trap interrupted INT TERM HUP
 
 	# A leftover of an aborted run goes first, even if its pg_restore still
 	# holds a session. The new database gets the cluster's locale.
@@ -144,34 +194,54 @@ if [ "${1:-}" = restore ]; then
 		exit 1
 	fi
 
+	# Something may have started during a long restore.
+	if ! idle; then
+		drop_restore
+		echo "nothing was changed" >&2
+		exit 1
+	fi
+
 	# The swap: nobody may connect to the old database any more (no
 	# superuser either), the sessions left are ended, and both renames are
-	# one transaction. A lock held elsewhere makes it fail instead of hang.
-	if ! admin <<SQL; then
+	# one statement, so both happen or none. A lock held elsewhere makes it
+	# fail instead of hang. No ON_ERROR_STOP: the last line always runs, also
+	# when this client is interrupted (psql in the container goes on), and
+	# opens the database named paperless again, whichever it is then. Which
+	# databases exist afterwards decides the outcome, not psql's status.
+	stage=swap
+	compose exec -T postgres psql -X -q -At -U paperless -d postgres <<SQL || true
 SET lock_timeout = '5s';
 ALTER DATABASE paperless ALLOW_CONNECTIONS false;
 DO \$\$ BEGIN PERFORM pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'paperless'; END \$\$;
-BEGIN;
-ALTER DATABASE paperless RENAME TO $old;
-ALTER DATABASE paperless_restore RENAME TO paperless;
-ALTER DATABASE $old ALLOW_CONNECTIONS true;
-COMMIT;
+DO \$\$ BEGIN
+	ALTER DATABASE paperless RENAME TO $old;
+	ALTER DATABASE paperless_restore RENAME TO paperless;
+	ALTER DATABASE $old ALLOW_CONNECTIONS true;
+END \$\$;
+ALTER DATABASE paperless ALLOW_CONNECTIONS true;
 SQL
-		# psql can also fail after the commit (a lost connection): then the
-		# swap is done.
-		if [ "$(admin -c "SELECT count(*) FROM pg_database WHERE datname = '$old'")" != 1 ]; then
-			admin -c 'ALTER DATABASE paperless ALLOW_CONNECTIONS true' ||
-				echo "warning: run: docker compose exec postgres psql -U paperless -d postgres -c 'ALTER DATABASE paperless ALLOW_CONNECTIONS true'" >&2
-			drop_restore
-			echo "error: could not swap in the restored database (see above); nothing was changed" >&2
-			exit 1
+	trap - INT TERM HUP
+	case $(db_exists "$old") in
+	yes) ;;
+	no)
+		drop_restore
+		if [ "$(admin -c "SELECT datallowconn FROM pg_database WHERE datname = 'paperless'")" != t ]; then
+			echo "warning: the database paperless does not accept connections; open it with: docker compose exec postgres psql -U paperless -d postgres -c 'ALTER DATABASE paperless ALLOW_CONNECTIONS true'" >&2
 		fi
-	fi
+		echo "error: could not swap in the restored database (see above); nothing was changed" >&2
+		exit 1
+		;;
+	*)
+		echo "error: could not ask PostgreSQL whether the swap happened. If a database $old exists, the restore is done;" >&2
+		echo "otherwise nothing was changed. List them with: docker compose exec postgres psql -U paperless -l" >&2
+		exit 1
+		;;
+	esac
 	echo "restored $file"
 	echo "the database before the restore is kept as $old; drop it when you no longer need it:"
 	echo "  docker compose exec postgres dropdb -U paperless $old"
-	echo "next: restore the data directory (DATA_DIR in .env, default ./data; move the current one aside),"
-	echo "then run ./pgo migrate and docker compose up -d web"
+	echo "next: unless the data directory (DATA_DIR in .env, default ./data) already matches this backup, move it"
+	echo "aside and put back the one from the same backup; then run ./pgo migrate and docker compose up -d web"
 	exit 0
 fi
 

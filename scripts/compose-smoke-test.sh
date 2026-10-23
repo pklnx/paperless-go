@@ -344,12 +344,14 @@ expect "$work/out" 'user "marker" created'
 marker() { sql paperless "SELECT count(*) FROM users WHERE name = 'marker'"; }
 # refuses <status> <regex> [arguments]: ./pgo restore with the arguments
 # exits with status and a message matching regex, and changes nothing.
+# It runs with $restore_path as PATH, so a test can put stand-ins first.
+restore_path=$PATH
 refuses() {
 	want=$1
 	msg=$2
 	shift 2
 	got=0
-	./pgo restore "$@" > "$work/out" 2>&1 || got=$?
+	PATH=$restore_path ./pgo restore "$@" > "$work/out" 2>&1 || got=$?
 	cat "$work/out"
 	if [ "$got" != "$want" ]; then
 		echo "expected exit status $want from ./pgo restore $*, got $got" >&2
@@ -375,14 +377,43 @@ refuses 2 'usage: \./pgo restore'
 refuses 2 'cannot read' --yes "$work/missing.dump"
 refuses 2 'restore --yes FILE' "$dump"
 docker compose --progress quiet up -d --wait web
-refuses 1 'still running: web;' --yes "$dump"
+refuses 1 'still running: web$' --yes "$dump"
 docker compose --progress quiet stop web
 # A running ./pgo command (a shell in the CLI container stands in for an
 # import) blocks it too.
 oneoff=$(docker compose --progress quiet run -d --rm --no-deps --entrypoint sh paperless-go -c 'exec sleep infinity')
-refuses 1 'still running: paperless-go;' --yes "$dump"
+refuses 1 'still running: paperless-go$' --yes "$dump"
 docker rm -f "$oneoff" > /dev/null
 oneoff=
+# When Docker Compose cannot list the containers, that counts as busy: a
+# stand-in for docker fails `compose ps` and runs everything else.
+mkdir "$work/failps"
+cat > "$work/failps/docker" <<EOF
+#!/bin/sh
+case " \$* " in *" ps "*) echo "compose ps failed" >&2; exit 1 ;; esac
+exec $(command -v docker) "\$@"
+EOF
+chmod +x "$work/failps/docker"
+restore_path=$work/failps:$PATH
+refuses 1 'could not list the containers' --yes "$dump"
+restore_path=$PATH
+
+echo "== restore: the name for the replaced database is taken"
+# A stand-in for date fixes the name ./pgo restore picks.
+mkdir "$work/fixeddate"
+printf '#!/bin/sh\necho 20000101_000000\n' > "$work/fixeddate/date"
+chmod +x "$work/fixeddate/date"
+sql postgres 'CREATE DATABASE paperless_replaced_20000101_000000'
+got=0
+PATH=$work/fixeddate:$PATH ./pgo restore --yes "$dump" > "$work/out" 2>&1 || got=$?
+cat "$work/out"
+if [ "$got" != 1 ]; then
+	echo "expected exit status 1 for a taken name, got $got" >&2
+	exit 1
+fi
+expect "$work/out" 'the database paperless_replaced_20000101_000000 exists already; nothing was changed'
+sql postgres 'DROP DATABASE paperless_replaced_20000101_000000'
+refuses 2 'restore --yes FILE' "$dump" # the checks of refuses: nothing changed
 
 echo "== restore: a broken dump"
 # The last bytes cut off: they belong to the table data after the table of
@@ -413,11 +444,14 @@ exec 3>&- 4<&-
 wait
 
 echo "== restore"
-# A leftover of an aborted restore is dropped first.
+# A leftover of an aborted restore is dropped first, and a database left
+# closed to connections by an interrupted swap is opened again.
 sql postgres 'CREATE DATABASE paperless_restore'
-./pgo restore --yes "$dump" | tee "$work/out"
-expect "$work/out" '^restored '
-expect "$work/out" 'kept as paperless_replaced_[0-9]{8}T[0-9]{6}Z;'
+sql postgres 'ALTER DATABASE paperless ALLOW_CONNECTIONS false'
+./pgo restore --yes "$dump" | tee "$work/restore.out"
+expect "$work/restore.out" 'did not accept connections .*; opening it again'
+expect "$work/restore.out" '^restored '
+expect "$work/restore.out" 'kept as paperless_replaced_[0-9]{8}_[0-9]{6};'
 if [ "$(marker)" != 0 ]; then
 	echo "the restore kept the user added after the backup" >&2
 	exit 1
@@ -457,6 +491,16 @@ curl -fsS --retry 10 --retry-delay 1 --retry-all-errors -b "$work/cookies" "$bas
 expect "$work/out" '"name":"smoke"'
 if grep -q '"name":"marker"' "$work/out"; then
 	echo "the API still lists the user added after the backup" >&2
+	exit 1
+fi
+
+echo "== restore: drop the replaced database"
+# The command ./pgo restore printed, as it is.
+drop=$(sed -n 's/^  \(docker compose exec postgres dropdb .*\)$/\1/p' "$work/restore.out")
+echo "$drop"
+sh -c "$drop" < /dev/null
+if [ "$(sql postgres "SELECT count(*) FROM pg_database WHERE datname = '$replaced'")" != 0 ]; then
+	echo "the printed dropdb command did not drop $replaced" >&2
 	exit 1
 fi
 
