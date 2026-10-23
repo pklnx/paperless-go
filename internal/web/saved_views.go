@@ -180,6 +180,16 @@ func ownScope(r *http.Request) store.Scope {
 	return store.Scope{UserID: requestScope(r).UserID}
 }
 
+// checkSortIndex refuses a sort index outside ±store.MaxSavedViewSortIndex
+// with 400; ok is false after answering.
+func (s *Server) checkSortIndex(w http.ResponseWriter, r *http.Request, i int64) bool {
+	if i > store.MaxSavedViewSortIndex || i < -store.MaxSavedViewSortIndex {
+		s.fail(w, r, http.StatusBadRequest, "sortIndex must be between -(2^53-1) and 2^53-1", nil)
+		return false
+	}
+	return true
+}
+
 // refuseFilter answers 400 invalid_filter with reason.
 func (s *Server) refuseFilter(w http.ResponseWriter, reason string) {
 	s.refuseMetadata(w, http.StatusBadRequest, codeInvalidFilter, "invalid filter: "+reason)
@@ -227,6 +237,9 @@ func (s *Server) handleCreateSavedView(w http.ResponseWriter, r *http.Request) {
 		s.refuseFilter(w, reason)
 		return
 	}
+	if in.SortIndex != nil && !s.checkSortIndex(w, r, *in.SortIndex) {
+		return
+	}
 	vi := store.SavedViewInput{Name: name, Filter: in.Filter, SortLast: in.SortIndex == nil}
 	if in.SortIndex != nil {
 		vi.SortIndex = *in.SortIndex
@@ -271,6 +284,9 @@ func (s *Server) handlePatchSavedView(w http.ResponseWriter, r *http.Request) {
 	if in.SortIndex.Set {
 		if in.SortIndex.Null {
 			s.fail(w, r, http.StatusBadRequest, "sortIndex must be a number", nil)
+			return
+		}
+		if !s.checkSortIndex(w, r, in.SortIndex.Value) {
 			return
 		}
 		p.SortIndex, fields = &in.SortIndex.Value, append(fields, "sortIndex")

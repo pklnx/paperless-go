@@ -107,8 +107,9 @@ export function canSave(s: ViewState): boolean {
 
 /**
  * The URL change that opens a view: its parameters replace the list's, and
- * it is marked (sv). The URL holds one ID per kind, so a view with several
- * opens with the first. An admin's "Everyone's documents" is applied only
+ * it is marked (sv). viewParams has already hidden views the URL cannot
+ * hold (several IDs of a kind, inbox or favorite false), so the result is
+ * exactly the view. An admin's "Everyone's documents" is applied only
  * where the switch is (admin).
  */
 export function applyView(id: string, p: ViewParams, admin: boolean): Partial<ViewState> {

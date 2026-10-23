@@ -35,6 +35,11 @@ WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc
 FOR UPDATE;
 
 -- NextSavedViewSortIndex is the sort index after an owner's last view: 0
--- for the first.
+-- for the first. It stays within ±(2^53 − 1), the API's range (a value
+-- JavaScript holds exactly): a larger stored index (written before the API
+-- checked it, or by SQL) gives the largest one, never an overflow.
 -- name: NextSavedViewSortIndex :one
-SELECT COALESCE(max(sort_index) + 1, 0)::bigint FROM saved_views WHERE owner_id = $1;
+-- (LEAST ignores NULL, so the empty case is spelled out.)
+SELECT (CASE WHEN max(sort_index) IS NULL THEN 0
+             ELSE LEAST(max(sort_index), 9007199254740990) + 1 END)::bigint
+FROM saved_views WHERE owner_id = $1;

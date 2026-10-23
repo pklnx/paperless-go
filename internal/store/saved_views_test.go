@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"testing"
 	"time"
@@ -328,5 +329,47 @@ func TestSavedViewConcurrentPatches(t *testing.T) {
 	got, err := st.GetSavedView(ctx, alice, v.ID)
 	if err != nil || got.Name != "New" || got.SortIndex != 7 {
 		t.Fatalf("after both patches: %+v, %v; want name New and sort index 7", got, err)
+	}
+}
+
+// The next sort index stays within the API's range: a stored maximum (here
+// the largest bigint, which the API refuses but SQL or an older server
+// could write) gives MaxSavedViewSortIndex, not an overflow (#139 review).
+func TestSavedViewSortLastAfterHugeIndex(t *testing.T) {
+	st := storetest.New(t)
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	mustView(t, st, alice, store.SavedViewInput{Name: "Huge", SortIndex: math.MaxInt64})
+	for range 2 {
+		v := mustView(t, st, alice, store.SavedViewInput{Name: "Next", SortLast: true})
+		if v.SortIndex != store.MaxSavedViewSortIndex {
+			t.Errorf("next sort index = %d, want %d", v.SortIndex, int64(store.MaxSavedViewSortIndex))
+		}
+	}
+	bob := store.Scope{UserID: storetest.User(t, st, "bob", false).ID}
+	mustView(t, st, bob, store.SavedViewInput{Name: "Edge", SortIndex: store.MaxSavedViewSortIndex - 1})
+	if v := mustView(t, st, bob, store.SavedViewInput{Name: "Next", SortLast: true}); v.SortIndex != store.MaxSavedViewSortIndex {
+		t.Errorf("after 2^53-2: %d", v.SortIndex)
+	}
+}
+
+// Text jsonb cannot hold is ErrInvalidFilter, not an internal error: bytes
+// that are not UTF-8 (refused before the write) and a lone surrogate
+// escape (refused by PostgreSQL, SQLSTATE 22P02).
+func TestSavedViewFilterTextJSONBRefuses(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	v := mustView(t, st, alice, store.SavedViewInput{Name: "v"})
+	for _, bad := range []string{"{\"a\":\"\xff\"}", "{\"a\xc3\":1}", `{"a":"\ud800"}`, `{"a":["x","\udfff"]}`, `{"\ud800":1}`} {
+		if _, err := st.CreateSavedView(ctx, alice, store.SavedViewInput{Name: "bad", Filter: json.RawMessage(bad)}); !errors.Is(err, store.ErrInvalidFilter) {
+			t.Errorf("create with %q: %v, want ErrInvalidFilter", bad, err)
+		}
+		if _, err := st.PatchSavedView(ctx, alice, v.ID, store.SavedViewPatch{Filter: json.RawMessage(bad)}); !errors.Is(err, store.ErrInvalidFilter) {
+			t.Errorf("patch with %q: %v, want ErrInvalidFilter", bad, err)
+		}
+	}
+	// A surrogate pair is a valid character.
+	if _, err := st.PatchSavedView(ctx, alice, v.ID, store.SavedViewPatch{Filter: json.RawMessage(`{"a":"😀"}`)}); err != nil {
+		t.Errorf("surrogate pair: %v", err)
 	}
 }

@@ -168,11 +168,16 @@ func (q *Queries) LockSavedView(ctx context.Context, arg LockSavedViewParams) (S
 }
 
 const nextSavedViewSortIndex = `-- name: NextSavedViewSortIndex :one
-SELECT COALESCE(max(sort_index) + 1, 0)::bigint FROM saved_views WHERE owner_id = $1
+SELECT (CASE WHEN max(sort_index) IS NULL THEN 0
+             ELSE LEAST(max(sort_index), 9007199254740990) + 1 END)::bigint
+FROM saved_views WHERE owner_id = $1
 `
 
 // NextSavedViewSortIndex is the sort index after an owner's last view: 0
-// for the first.
+// for the first. It stays within ±(2^53 − 1), the API's range (a value
+// JavaScript holds exactly): a larger stored index (written before the API
+// checked it, or by SQL) gives the largest one, never an overflow.
+// (LEAST ignores NULL, so the empty case is spelled out.)
 func (q *Queries) NextSavedViewSortIndex(ctx context.Context, ownerID int64) (int64, error) {
 	row := q.db.QueryRow(ctx, nextSavedViewSortIndex, ownerID)
 	var column_1 int64

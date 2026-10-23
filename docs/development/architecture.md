@@ -1386,7 +1386,10 @@ so another user's view answers `404` to everybody.
   trimming, no control characters, `invalid_name`; names may repeat),
   `filter` (default `{}`) and `sortIndex` (default: after the caller's last
   view, `NextSavedViewSortIndex` in the insert's transaction). `symbol`
-  stays the app's default.
+  stays the app's default. A `sortIndex` sent to `POST` or `PATCH` must lie
+  within ±(2^53 − 1), the integers a JavaScript number holds exactly
+  (`400`); the next index is capped at 2^53 − 1, so a larger stored one
+  cannot make it overflow.
 - **`PATCH`** changes only the fields sent (`name`, `filter`, `sortIndex`);
   `filter` replaces the whole object, so the web sends the view's filter
   back with only its own key replaced. `store.PatchSavedView` locks the row
@@ -1403,7 +1406,9 @@ so another user's view answers `404` to everybody.
   must pass `listQuery`, the parser of `GET /api/documents`. Only what the
   web can open exactly is accepted: at most one tag, correspondent and
   type, and `inbox`/`favorite` `true` or `null`; the sidebar hides any
-  other view as well. Every other key is kept unchecked.
+  other view as well. Every other key is kept unchecked. Text jsonb cannot
+  hold (bytes that are not UTF-8, a lone surrogate escape such as
+  `"\ud800"`) is `invalid_filter` too.
 - **Audit.** `saved_view.create`, `saved_view.update`, `saved_view.delete`
   in the transaction of the change (`503` and no change without the log):
   the view's UUID and name as target, `name`, `oldName` on a rename and

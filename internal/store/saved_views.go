@@ -7,6 +7,9 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/pklnx/paperless-go/internal/store/db"
 )
@@ -15,8 +18,14 @@ import (
 // saved view.
 const DefaultSavedViewSymbol = "line.3.horizontal.decrease.circle"
 
-// ErrInvalidFilter means a saved view's filter is not a JSON object.
+// ErrInvalidFilter means a saved view's filter is not a JSON object that
+// PostgreSQL's jsonb accepts.
 var ErrInvalidFilter = errors.New("store: saved view filter is not a JSON object")
+
+// MaxSavedViewSortIndex is the largest sort index the API takes, and the
+// negative of the smallest: 2^53 − 1, the largest integer a JavaScript
+// number holds exactly, so the web never rounds one.
+const MaxSavedViewSortIndex = 1<<53 - 1
 
 // SavedView is a named document filter shown in the sidebar, per owner.
 // Names need not be unique, as in the app.
@@ -60,7 +69,7 @@ func filterJSON(f json.RawMessage) ([]byte, error) {
 	if len(t) == 0 {
 		return []byte("{}"), nil
 	}
-	if t[0] != '{' || !json.Valid(t) {
+	if t[0] != '{' || !utf8.Valid(t) || !json.Valid(t) {
 		return nil, ErrInvalidFilter
 	}
 	// jsonb refuses U+0000 in strings and keys (SQLSTATE 22P05).
@@ -126,7 +135,7 @@ func (s *Store) CreateSavedView(ctx context.Context, sc Scope, in SavedViewInput
 		return nil
 	})
 	if err != nil {
-		return nil, mapErr(err)
+		return nil, mapFilterErr(err)
 	}
 	return out, nil
 }
@@ -234,7 +243,7 @@ func (s *Store) PatchSavedView(ctx context.Context, sc Scope, id string, p Saved
 		return nil
 	})
 	if err != nil {
-		return nil, mapErr(err)
+		return nil, mapFilterErr(err)
 	}
 	return out, nil
 }
@@ -254,5 +263,19 @@ func (s *Store) DeleteSavedView(ctx context.Context, sc Scope, id string) error 
 		auditRow(ctx, sc, TargetSavedView, idString(r.ID), r.Name, r.OwnerID)
 		return nil
 	})
+	return mapErr(err)
+}
+
+// mapFilterErr is mapErr for a write of a filter: jsonb's refusal of text
+// it cannot hold (a lone surrogate escape such as "\ud800", SQLSTATE
+// 22P02; bytes that are not UTF-8, 22021) is ErrInvalidFilter, not an
+// internal error. The names are checked before (no control characters,
+// valid UTF-8 from the JSON decoder), so the filter is the only text these
+// writes can fail on.
+func mapFilterErr(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && (pgErr.Code == "22P02" || pgErr.Code == "22021") {
+		return ErrInvalidFilter
+	}
 	return mapErr(err)
 }

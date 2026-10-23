@@ -339,3 +339,61 @@ func TestSavedViewsAudit(t *testing.T) {
 		t.Errorf("views without entries: %v", names)
 	}
 }
+
+// sortIndex stays within ±(2^53 − 1), which the web holds exactly; the
+// reviewer's repro: a create at the largest bigint used to make every
+// later create without an index fail with 500.
+func TestSavedViewsSortIndexRange(t *testing.T) {
+	f := newAuthFixture(t)
+	f.addUser("alice", viewPassword, false)
+	f.loginOK("alice", viewPassword)
+	view := f.expect("POST", "/api/saved-views", map[string]any{"name": "View"}, 201)
+	path := "/api/saved-views/" + view["id"].(string)
+
+	for _, n := range []string{"9223372036854775807", "9007199254740992", "-9007199254740992", "-9223372036854775808", "9223372036854775808", "1.5"} {
+		if status, out := rawJSON(t, f, "POST", "/api/saved-views", `{"name": "x", "sortIndex": `+n+`}`); status != 400 {
+			t.Errorf("POST sortIndex %s: %d %v", n, status, out)
+		}
+		if status, out := rawJSON(t, f, "PATCH", path, `{"sortIndex": `+n+`}`); status != 400 {
+			t.Errorf("PATCH sortIndex %s: %d %v", n, status, out)
+		}
+	}
+	for _, n := range []string{"9007199254740991", "-9007199254740991"} {
+		if status, out := rawJSON(t, f, "PATCH", path, `{"sortIndex": `+n+`}`); status != 200 || fmt.Sprint(int64(out["sortIndex"].(float64))) != n {
+			t.Errorf("PATCH sortIndex %s: %d %v", n, status, out)
+		}
+	}
+	if status, out := rawJSON(t, f, "POST", "/api/saved-views", `{"name": "Top", "sortIndex": 9007199254740991}`); status != 201 {
+		t.Fatalf("POST at the maximum: %d %v", status, out)
+	}
+	// After the maximum, new views still go last.
+	for range 2 {
+		next := f.expect("POST", "/api/saved-views", map[string]any{"name": "Next"}, 201)
+		if next["sortIndex"] != float64(store.MaxSavedViewSortIndex) {
+			t.Errorf("next sortIndex = %v", next["sortIndex"])
+		}
+	}
+}
+
+// Filter text that jsonb cannot hold answers 400 invalid_filter, not 500:
+// a lone surrogate escape and bytes that are not UTF-8.
+func TestSavedViewsFilterBadText(t *testing.T) {
+	f := newAuthFixture(t)
+	f.addUser("alice", viewPassword, false)
+	f.loginOK("alice", viewPassword)
+	view := f.expect("POST", "/api/saved-views", map[string]any{"name": "View"}, 201)
+	path := "/api/saved-views/" + view["id"].(string)
+	for _, bad := range []string{`{"appKey": "\ud800"}`, `{"\udc00": 1}`, "{\"appKey\": \"\xff\xfe\"}", `{"paperless-go": {"v": 1, "q": "\ud800"}}`} {
+		for _, c := range []struct{ method, path, body string }{
+			{"POST", "/api/saved-views", `{"name": "Bad", "filter": ` + bad + `}`},
+			{"PATCH", path, `{"filter": ` + bad + `}`},
+		} {
+			if status, out := rawJSON(t, f, c.method, c.path, c.body); status != 400 || out["code"] != codeInvalidFilter {
+				t.Errorf("%s %q: %d %v, want 400 invalid_filter", c.method, bad, status, out)
+			}
+		}
+	}
+	if names := viewNames(t, f); len(names) != 1 {
+		t.Errorf("views after refusals: %v", names)
+	}
+}
