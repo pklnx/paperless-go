@@ -166,6 +166,12 @@ type SavedView struct {
 	ModifiedAt time.Time
 }
 
+type SearchVocabulary struct {
+	OwnerID int64
+	Lexeme  string
+	N       int32
+}
+
 type Session struct {
 	ID         []byte
 	UserID     int64

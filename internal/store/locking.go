@@ -66,7 +66,11 @@ var (
 )
 
 // ownerTables are the tables only a holder of the owner lock may write.
-const ownerTables = `(?:documents|document_tags|tags|correspondents|document_types)`
+// search_vocabulary (00018) is written only by its trigger on documents,
+// which runs inside the writer's locked transaction; it is listed so that
+// a statement of the store that ever wrote it directly would need the lock
+// too.
+const ownerTables = `(?:documents|document_tags|tags|correspondents|document_types|search_vocabulary)`
 
 // ownerTable matches one of them as a table name: optionally in schema
 // public, each part optionally quoted ("documents", public."tags").

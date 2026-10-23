@@ -86,6 +86,8 @@ func TestWritesOwnerTables(t *testing.T) {
 		"DELETE FROM correspondents WHERE id = $1":                                        true,
 		"delete from ONLY document_types":                                                 true,
 		"TRUNCATE documents":                                                              true,
+		"INSERT INTO search_vocabulary (owner_id, lexeme, n) VALUES (1, 'x', 1)":          true,
+		"SELECT lexeme FROM search_vocabulary WHERE lexeme LIKE $1":                       false,
 		"WITH x AS (UPDATE documents SET title = '' RETURNING id) SELECT 1":               true,
 		"SELECT id FROM documents WHERE id = $1 FOR NO KEY UPDATE":                        true,
 		"SELECT 1 FROM jobs JOIN documents d ON d.id = jobs.document_id FOR UPDATE":       true,

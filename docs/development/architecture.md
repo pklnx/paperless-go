@@ -60,6 +60,7 @@ app and the server through the app's archive folder format:
 | `SavedView`: name, symbol, sortIndex, createdAt, filterJSON | `saved_views`, with the filter as a `JSONB` object |
 | — | `jobs` (`00007_jobs.sql`; see [Processing](#processing)); `documents.thumbnail_sha256`, `documents.processing_note` |
 | — | `documents.search_text`, `documents.search_links` (`00011_search.sql`; see [Search index](#search-index)) |
+| — | `search_vocabulary` (`00018_search_vocabulary.sql`): per owner, the lexemes of `search_text` and how many documents hold each (see [Search index](#search-index), Vocabulary) |
 
 UUIDs as keys (not serials) keep imported and exported records stable across
 the app and the server.
@@ -236,6 +237,92 @@ rows are never updated, so there is no `UPDATE` trigger. Down drops
 `unaccent` only when the current user owns it and nothing outside the
 extension uses it.
 
+**Vocabulary** (#56, part 1; `00018_search_vocabulary.sql`). `search_vocabulary
+(owner_id, lexeme, n)` holds, per owner, every lexeme of 5 to 64
+characters in the owner's `search_text` vectors and the number of the
+owner's documents that hold it (`CHECK (n > 0)`, primary key `(owner_id,
+lexeme)`). A GIN trigram index (`public.gin_trgm_ops`, extension
+`pg_trgm`) on `lexeme` lets part 2 find the lexemes that contain a typed
+word; part 1 changes nothing visible. The vocabulary is never returned by
+any API.
+- **One rule.** `search_vocabulary_lexemes(tsvector)` (immutable SQL) is the
+  only definition of what the vocabulary holds: the distinct lexemes of
+  `tsvector_to_array`, `char_length` 5 to 64 (characters, not bytes), in
+  primary key order. Every configuration's lexemes go in, stems too; link
+  lexemes live in `search_links` and never do.
+- **Upkeep.** A row-level trigger function, `search_vocabulary_trigger`,
+  on `AFTER INSERT OR DELETE` and on `AFTER UPDATE OF title,
+  archive_serial_number, notes, original_file_name, extracted_text,
+  search_text, owner_id` with `WHEN (OLD.search_text IS DISTINCT FROM
+  NEW.search_text OR OLD.owner_id <> NEW.owner_id)`. The column list
+  names the source columns because the `00011` BEFORE trigger sets
+  `search_text`, and `UPDATE OF` looks only at the statement's SET list.
+  The `WHEN` makes an update that leaves the vector alone (a patch that
+  repeats the title, an OCR run with the same text) nearly free, and the
+  bulk change (flags, links, tags) does not fire it at all. A new document
+  adds 1 for each of its lexemes (`INSERT … ON CONFLICT DO UPDATE`), a
+  deleted one subtracts 1, an update only the set difference. The
+  decrement deletes rows with `n <= 1` and decreases the others (`n > 1`),
+  so no path can violate the `CHECK`, also after a count drifted (raw
+  SQL); a count that drifted is not repaired. Statement-level triggers
+  with transition tables are not possible: PostgreSQL refuses them on a
+  trigger with a column list.
+- **Locking.** The trigger runs inside the writer's transaction, which
+  holds the owner's write lock (Write locking, below), and writes only
+  that owner's rows. So writers of one owner never touch the vocabulary at
+  the same time, and writers of different owners touch disjoint rows.
+  Safety comes from the owner lock alone: the add, subtract and delete
+  statements each go in primary key order, but together their row locks
+  are not taken in one monotone order. SQL outside the store that writes
+  one owner's documents concurrently can therefore deadlock on vocabulary
+  rows (`40P01`; a store writer it met gets `ErrRetry`).
+  `TestSearchVocabularyConcurrentWriters` holds one writer after its lock
+  (`WithAfterLock`), sees the same owner's second writer wait at the
+  advisory lock and the other owner's finish without a lock wait, and
+  checks the counts. `search_vocabulary` is in the guard's table list, so
+  a store statement that ever wrote it directly would need the lock too.
+- **Long transactions.** Each document's upsert rewrites the rows of its
+  common lexemes. Within one transaction their old versions cannot be
+  pruned, so a transaction that writes thousands of documents walks ever
+  longer version chains (one statement adding 2 000 generated documents
+  took 140 s instead of 6 s). The store writes one document per
+  transaction. A future migration that rewrites `search_text` table-wide
+  should disable the trigger and rebuild the vocabulary set-based, as the
+  backfill does.
+- **Backfill.** The migration takes `SHARE ROW EXCLUSIVE` on `documents`
+  as its first statement (before `CREATE TABLE … REFERENCES users` locks
+  `users`), so no writer can commit between the backfill's snapshot and the
+  triggers (`TestSearchVocabularyMigrationWaitsForWriters`); readers go
+  on. Then one `INSERT … SELECT … GROUP BY owner_id, lexeme` over
+  `search_vocabulary_lexemes(search_text)`, then the primary key and the
+  trigram index, then the triggers.
+- **Collation.** `lexeme` keeps the database's default collation, so both
+  indexes have a non-`C` `indcollation` and the rebuild after a locale
+  change (Locale and text indexes, above) covers them: `pg_trgm` splits
+  words by the database's ctype. `TestMigrateRebuildsIndexesAfterLocaleChange`
+  lists both.
+- **Cost** (`TestSearchBench`, 100 000 documents of one owner and 50 000
+  of another, 2.1 and 2.0 million vocabulary rows, 4 CPUs, #114; before =
+  the same generator on 00017). Per-document p95: a text update 5.2 →
+  17.8 ms, `CompleteJob` with new text 6.7 → 18.3 ms, `CreateDocument`
+  with text 6.0 → 13.9 ms, `DeleteDocument` 1.5 → 12.5 ms; an upload
+  without text is unchanged. The generation (100 documents per
+  transaction) took 35 instead of 10 minutes, a retitle of 1 000
+  documents 4.5 instead of 3.1 s. The vocabulary with its indexes is 415
+  MB (17 % of `documents`) when the backfill builds it and 623 MB (26 %)
+  when the trigger builds it document by document; a `fillfactor` of 70
+  made the generation 20 % faster and the table 15 % larger. The backfill
+  took 1 min 40 s. Searches are unchanged.
+- **`pg_trgm`** is a trusted extension like `unaccent` and must be in
+  `public`; the migration checks `pg_extension.extnamespace` and fails
+  with the fix in its message: the extension's owner or a superuser runs
+  `ALTER EXTENSION pg_trgm SET SCHEMA public` (the app's role cannot), or
+  drops it when nothing else uses it.
+  Down drops the triggers, the function, the table and, under the
+  conditions of `unaccent` in `00011`, `pg_trgm` (owned by the current user,
+  nothing outside the extension depends on it; the `pg_amproc` entries of
+  `pg_trgm`'s own operator families count as part of it).
+
 **Reads.** No query reads the vectors back: `GetDocument` and
 `ListDocuments` list their columns instead of `d.*`.
 
@@ -405,7 +492,7 @@ first) and its retry loop.
   `Create/Update/Patch/Delete` of tags, correspondents and document
   types, and `CompleteJob` (OCR results; it reads the document's owner
   without a scope). The triggers (`tags_no_cycle`, the `00011` search
-  triggers), the cascades to `document_tags` and `jobs` and the `SET
+  triggers, the `00018` vocabulary trigger), the cascades to `document_tags` and `jobs` and the `SET
   NULL` of `documents.correspondent_id`/`document_type_id` and
   `tags.parent_id` run inside the writer's transaction, under its lock.
 - **Not writers of the five tables** take no owner lock: the jobs writers
