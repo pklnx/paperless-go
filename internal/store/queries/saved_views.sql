@@ -22,6 +22,19 @@ SET name = sqlc.arg(name), symbol = sqlc.arg(symbol), sort_index = sqlc.arg(sort
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
 RETURNING *;
 
--- name: DeleteSavedView :execrows
+-- name: DeleteSavedView :one
 DELETE FROM saved_views
-WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner));
+WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
+RETURNING *;
+
+-- LockSavedView reads a view for a patch and holds its row until the
+-- commit, so two patches of one view merge one after the other.
+-- name: LockSavedView :one
+SELECT * FROM saved_views
+WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
+FOR UPDATE;
+
+-- NextSavedViewSortIndex is the sort index after an owner's last view: 0
+-- for the first.
+-- name: NextSavedViewSortIndex :one
+SELECT COALESCE(max(sort_index) + 1, 0)::bigint FROM saved_views WHERE owner_id = $1;

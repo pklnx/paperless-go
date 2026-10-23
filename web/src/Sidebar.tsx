@@ -31,6 +31,8 @@ interface Props {
   everyone: boolean;
   setEveryone: (on: boolean) => void;
   health: Health;
+  /** The "Saved views" section (SavedViews.tsx), below the lists. */
+  savedViews?: ReactNode;
 }
 
 const item = "flex w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-sm pointer-coarse:min-h-11";
@@ -53,7 +55,7 @@ function Count({ n, on }: { n: number | undefined; on: boolean }) {
 }
 
 /** The navigation: the document lists with counts, tags, correspondents, types, and the pages. */
-export function Sidebar({ state, select, show, user, logout, counts, metadata, collapsed, everyone, setEveryone, health }: Props) {
+export function Sidebar({ state, select, show, user, logout, counts, metadata, collapsed, everyone, setEveryone, health, savedViews }: Props) {
   const docs = state.view === "";
   const current = docs ? activeFilter(state) : null;
   const on = (f: Filter | null) => docs && sameFilter(current, f);
@@ -124,6 +126,7 @@ export function Sidebar({ state, select, show, user, logout, counts, metadata, c
           {t.everyonesDocuments}
         </label>
       )}
+      {savedViews}
       {error && !data && (
         <p role="alert" className="px-2 text-sm text-danger">
           {t.loadMetadataFailed(error)}

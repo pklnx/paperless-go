@@ -2,7 +2,7 @@ import { useCallback, useSyncExternalStore } from "react";
 import type { DocumentQuery, DocumentSort } from "./api";
 
 // The UI state lives in the URL query
-// (?q=&inbox=&fav=&trash=&tag=&corr=&type=&sort=&order=&all=&doc=&view=), so the
+// (?q=&inbox=&fav=&trash=&tag=&corr=&type=&sort=&order=&all=&doc=&view=&sv=), so the
 // back button, reloads and bookmarks work without a router library, and the
 // server serves every view from "/".
 
@@ -29,9 +29,11 @@ export interface ViewState {
   doc: string;
   /** "" for the documents, or a page: "metadata", "profile", "log", "users". */
   view: string;
+  /** The saved view last opened (#12, part 4); the sidebar marks it while the list still shows its filter. */
+  sv: string;
 }
 
-const keys: (keyof ViewState)[] = ["q", "inbox", "fav", "trash", "tag", "corr", "type", "sort", "order", "all", "doc", "view"];
+const keys: (keyof ViewState)[] = ["q", "inbox", "fav", "trash", "tag", "corr", "type", "sort", "order", "all", "doc", "view", "sv"];
 
 const flag = (v: string | null) => (v === "1" ? "1" : "");
 const sorts: readonly string[] = ["relevance", "added", "date", "deleted"];
@@ -52,6 +54,7 @@ export function parseState(search: string): ViewState {
     all: flag(p.get("all")),
     doc: p.get("doc") ?? "",
     view: p.get("view") ?? "",
+    sv: p.get("sv") ?? "",
   };
 }
 

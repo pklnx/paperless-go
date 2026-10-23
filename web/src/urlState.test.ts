@@ -6,7 +6,7 @@ const empty = parseState("");
 
 describe("parseState and formatState", () => {
   it("round-trip every field", () => {
-    const s: ViewState = { q: "Rechnung tag:Steuer & mehr", inbox: "1", fav: "1", trash: "1", tag: "t1", corr: "c1", type: "d1", sort: "date", order: "asc", all: "1", doc: "x", view: "log" };
+    const s: ViewState = { q: "Rechnung tag:Steuer & mehr", inbox: "1", fav: "1", trash: "1", tag: "t1", corr: "c1", type: "d1", sort: "date", order: "asc", all: "1", doc: "x", view: "log", sv: "v1" };
     expect(parseState(formatState(s))).toEqual(s);
   });
   it("leave defaults out of the URL", () => {

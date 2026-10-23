@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ApiError, bulkApi, bulkMatch, documentsApi, processingPending, type DocumentPage, type DocumentQuery, type DocumentSummary, type Metadata, type User } from "./api";
 import { BulkBar, bulkErrorText, type BulkTarget } from "./BulkBar";
 import { DocumentDetail } from "./DocumentDetail";
@@ -64,6 +64,8 @@ interface Props {
   undone?: number;
   /** The caller's own trash count (Empty trash empties only that); null when unknown. */
   ownTrash?: number | null;
+  /** More controls next to the sort ("Save view…"). */
+  toolbar?: ReactNode;
 }
 
 /**
@@ -73,7 +75,7 @@ interface Props {
  * documents, with Restore and Delete permanently instead of Delete, and
  * "Empty trash".
  */
-export function DocumentList({ state, update, query, user, metadata, everyone, reload, onMaxUploadSize, onChanged, notify, onUndone, undone = 0, ownTrash = null }: Props) {
+export function DocumentList({ state, update, query, user, metadata, everyone, reload, onMaxUploadSize, onChanged, notify, onUndone, undone = 0, ownTrash = null, toolbar }: Props) {
   const key = JSON.stringify(query);
   const [list, setList] = useState<ListState>({ key, docs: null, first: new Set(), cursor: "", loading: true, error: "" });
   const ctl = useRef<AbortController | null>(null);
@@ -450,7 +452,10 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
         <h2 id="list-title" tabIndex={-1} className="min-w-0 font-semibold wrap-anywhere outline-none">
           {title}
         </h2>
-        <SortControls state={state} query={query} update={update} />
+        <div className="flex flex-wrap items-center gap-2">
+          {toolbar}
+          <SortControls state={state} query={query} update={update} />
+        </div>
       </div>
       {/* Empty trash acts on the own trash, whatever the list shows: by its count, else by the rows. */}
       {trash && (ownTrash !== null ? ownTrash > 0 : (docs?.length ?? 0) > 0) && (
