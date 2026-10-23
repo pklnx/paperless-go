@@ -27,7 +27,8 @@ the tools or `process` runs. The tests with the real tools run in the image:
 `docker build --target toolstest -t paperless-go:toolstest . && docker run --rm paperless-go:toolstest`.
 
 Database tests need PostgreSQL 17 or newer: `docker compose up -d postgres`
-gives the same `postgres:18` as Compose and CI, and on an older server every
+gives the same `postgres:18` as Compose and CI (CI pulls it through
+mirror.gcr.io, which may lag Docker Hub briefly after a patch release), and on an older server every
 database test fails in migrate (`PostgreSQL 17 or newer is required`). Any
 `postgres:18` container works too, with the locale of new installations:
 `docker run -d -p 127.0.0.1:5433:5432 -e POSTGRES_USER=paperless -e POSTGRES_PASSWORD=paperless -e POSTGRES_INITDB_ARGS='--locale-provider=builtin --locale=C.UTF-8' postgres:18`;
@@ -50,6 +51,10 @@ review.
   timeout is only the safety net for a signal that never comes.
 - Test documents are generated or small files in `testdata/`, never real
   scans.
+- Tests run in random order (`go test -shuffle=on`, in CI and `make test`)
+  and must not depend on each other's state. A failure that shows only in
+  some orders prints the seed in the failing package's log as
+  `-test.shuffle N`; rerun it with `go test -shuffle=N -run … ./internal/<pkg>`.
 
 ## Web UI
 
@@ -122,7 +127,8 @@ Changes start as an issue with an approved plan; see
 [Issues, plans and releases](./process).
 
 `main` is protected: changes go through pull requests, which can only be
-squash-merged when all CI checks pass. A pull request is merged (squash) after
+squash-merged when the required CI checks pass (all checks except `audit` and
+`docs-audit`, see [Dependencies](#dependencies)). A pull request is merged (squash) after
 an approving review and green checks; auto-merge is not used. Agent rules are
 in `CLAUDE.md` at the repository root.
 
@@ -138,6 +144,21 @@ in `CLAUDE.md` at the repository root.
 Labels are defined in `.github/labels.json` and synced to GitHub when that
 file changes on `main`.
 
+## CI
+
+- A pull request's CI run cancels the older run of the same pull request; runs
+  on `main` are never cancelled, so every merge gets a complete result. The
+  docs workflow queues its `main` runs instead, so deploys stay in order.
+- Every job has a timeout (`timeout-minutes`), about two to three times its
+  longest run so far.
+- CI pulls Docker Hub images through mirror.gcr.io (Google's public Docker Hub
+  cache), with Docker Hub as the fallback, so a Docker Hub error or rate limit
+  does not fail a job. These pulls are anonymous: dockerd would send the
+  runner's Docker Hub login to the mirror, which refuses it. The `test` job's
+  PostgreSQL service is named on the mirror directly. Users' builds (the Dockerfile, `docker-compose.yml`,
+  `./pgo`) do not use the mirror; see the comments in
+  `.github/workflows/ci.yml`.
+
 ## Flaky tests
 
 A rerun caused by a flaky test is logged in [Flaky tests](./flaky-tests).
@@ -147,7 +168,14 @@ A rerun caused by a flaky test is logged in [Flaky tests](./flaky-tests).
 ### Dependencies
 
 - CI runs `govulncheck`, `go mod verify`, `go vet`, golangci-lint (with
-  `gosec`), tests with the race detector, and `pnpm audit` for the UI.
+  `gosec`) and tests with the race detector.
+- `pnpm audit` runs in the `audit` (UI, production dependencies) and
+  `docs-audit` (docs site) checks, which are not required: they call the npm
+  registry, which can time out (see [Flaky tests](./flaky-tests)), and
+  Dependabot covers the same advisories. A red audit does not block a merge.
+  The coordinator reads its log: a registry error needs nothing (no flaky-test
+  row, since it is not a test); a real advisory gets a Dependabot pull request
+  or a follow-up issue.
 - Dependabot opens weekly update pull requests for Go modules, npm packages
   (UI and docs), GitHub Actions and Docker images. PostgreSQL major versions
   are excluded because they need a data migration.

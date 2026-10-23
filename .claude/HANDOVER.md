@@ -71,7 +71,7 @@ State of the work for the next session. Update before a session ends.
 - #1 foundation; #22–#25 document model (#2); #29 users and sessions (#16); #37 Debian image with OCR tools (#33); #38 audit log (#17); #40 TOTP and secret key (#18, `breaking`); #41 store hardening (#27); #42 processing queue (#34); #43 ingest (#28); #44 CLI import (#30); #45 passkeys (#19); #46 upload API and UI (#32); #47 consume folder (#31).
 
 ## Manual checks for the maintainer
-- Ruleset for `main` with the required checks (test, lint, vulncheck, docker, compose, web; `toolstest` recommended): part of the public-switch steps; confirm it is active.
+- Ruleset for `main` with the required checks (test, lint, vulncheck, docker, compose, web; `toolstest` recommended): part of the public-switch steps; confirm it is active. `audit` and `docs-audit` (`pnpm audit`, #151) stay off the required list.
 - Trusted proxies behind Tailscale or Caddy (`PAPERLESS_GO_TRUSTED_PROXIES`) so the `__Host-` cookie is kept (#51).
 - After updating: `./pgo keygen` into `.env`, then `./pgo migrate`. Try TOTP with a real authenticator app, and a passkey at an HTTPS `PAPERLESS_GO_PUBLIC_URL`.
 - Drag and drop in Safari and Firefox; a ~100 MB upload through a reverse proxy.
@@ -82,4 +82,4 @@ State of the work for the next session. Update before a session ends.
 - Cloud sessions have no `gh`: use the GitHub MCP tools from the GitHub operations table in `CLAUDE.md`; the coordinator subscribes to PR activity and arms one safety check-in.
 - Web: use `pnpm` in `web/`; never `npx prettier` or `tsc -b` (they rewrite or emit files).
 - The container can restart: docker stops (start `dockerd` again), /var/tmp worktrees survive.
-- Docker Hub can answer 500 on image pulls in CI (seen 2026-10-23 on main, compose job); rerun only per the flaky-test rule.
+- Docker Hub can answer 500 on image pulls (seen 2026-10-23 on main, compose job). Since #151 CI pulls through mirror.gcr.io with Docker Hub as the fallback (`scripts/ci-docker-mirror.sh`, `scripts/ci-pull-images.sh`, buildx `buildkitd-config-inline`); the `test` service has no fallback. A pull failure that still happens: rerun only per the flaky-test rule.

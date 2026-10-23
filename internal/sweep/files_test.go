@@ -961,9 +961,12 @@ func TestQueuePassWithALostLockRemovesNothing(t *testing.T) {
 	a := &sweep.Sweeper{Store: stA, Blobs: e.blobs, Now: e.now, Log: slog.New(slog.NewTextHandler(e.logs, nil))}
 	sweep.SetQueueSeams(a, func(string) {
 		// A's lock backend goes away (pg_terminate_backend, as a timeout
-		// or an operator would).
+		// or an operator would). The call waits (up to 10 s) for the
+		// backend to exit, so its session lock is released before B tries
+		// the sweep lock; without the timeout it only signals the backend
+		// and returns at once. n counts the backends that ended in time.
 		var n int
-		if err := e.conn.QueryRow(e.ctx, `SELECT count(pg_terminate_backend(a.pid)) FROM pg_stat_activity a
+		if err := e.conn.QueryRow(e.ctx, `SELECT count(*) FILTER (WHERE pg_terminate_backend(a.pid, 10000)) FROM pg_stat_activity a
 			WHERE a.application_name = 'sweeper-a' AND a.datname = current_database()`).Scan(&n); err != nil || n == 0 {
 			t.Errorf("terminate A: %d, %v", n, err)
 		}
