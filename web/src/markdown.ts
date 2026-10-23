@@ -36,7 +36,7 @@ import { createElement, Fragment, type ReactNode } from "react";
 
 /**
  * The HTML named character references, once loaded (#134): the table is
- * about 14 kB gzip, so it is a chunk of its own, loaded only when a note
+ * about 12 kB gzip, so it is a chunk of its own, loaded only when a note
  * has a `&name;`. Until then `&name;` shows as written; numeric entities
  * need no table.
  */
@@ -854,9 +854,12 @@ const endsAddress = (c: string) =>
  * white space, a control or format character, `<`, `>`, `"`, a backtick
  * or a backslash, or at a ")", "]" or "}" that closes nothing inside it;
  * at a "[" that starts a written link (`[x](url)`: the written link is
- * parsed first, as in the app); and, in a URL's host, at a `'` or `’`
- * (`https://s.example's`). Then trailing punctuation and a trailing
- * entity (`&gt;`) come off.
+ * parsed first, as in the app); and at a `'` or `’` (typed or as an
+ * entity) in a URL's host, after any user info (`https://s.example's`,
+ * but `https://o'brien@a.example/` as a whole). Then trailing punctuation
+ * comes off; a complete entity at the end stays, unless it stands for
+ * such punctuation, a closing bracket or a character that ends an
+ * address (`&gt;`), or is no entity (`&foo;`).
  */
 function bareAddress(s: string, i: number, from: number, pre: Prepass, steps: Steps): { end: number; stop: number } {
   const n = s.length;
@@ -868,13 +871,31 @@ function bareAddress(s: string, i: number, from: number, pre: Prepass, steps: St
   // http(s):// and www. (the prefixes ending in "/" or ".") start with a
   // host; mailto: and tel: do not.
   let host = s[start - 1] === "/" || s[start - 1] === ".";
+  // The first quote in the host after the last "@" so far: the URL ends
+  // there once the host ends, unless an "@" follows (then it was user info).
+  let quote = -1;
   while (j < n) {
     steps.n++;
     const c = s[j]!;
     if (endsAddress(c)) break;
     if (host) {
-      if (c === "/" || c === "?" || c === "#") host = false;
-      else if (c === "'" || c === "\u2019") break;
+      if (c === "/" || c === "?" || c === "#") {
+        if (quote >= 0) break;
+        host = false;
+      } else if (c === "'" || c === "\u2019") {
+        if (quote < 0) quote = j;
+      } else if (c === "@") quote = -1;
+      else if (c === "&") {
+        // `&#39;`, `&rsquo;`, `&#64;`… count as typed (#134). The entity is
+        // read once: the scan goes on after it.
+        const ent = entity(s, j, steps);
+        if (ent && (ent.v === "'" || ent.v === "\u2019" || ent.v === "@")) {
+          if (ent.v === "@") quote = -1;
+          else if (quote < 0) quote = j;
+          j = ent.end;
+          continue;
+        }
+      }
     }
     if (c === "[") {
       // A written link right here: its "]" (the pre-pass pairs brackets)
@@ -899,16 +920,28 @@ function bareAddress(s: string, i: number, from: number, pre: Prepass, steps: St
     }
     j++;
   }
-  let end = j;
+  let end = host && quote >= 0 ? quote : j;
   while (end > start) {
     steps.n++;
     const c = s[end - 1]!;
     if (c === ";") {
-      // `&name;` at the end, as GFM's autolinks drop it.
+      // An entity at the end (`&#49;`, `&uuml;`) is part of the URL and is
+      // decoded with it, unless it stands for what would come off or end
+      // the address (`&gt;`, `&#41;`); `&foo;` comes off as GFM drops it.
       let k = end - 1;
       while (k > start && isAsciiAlnum(s[k - 1])) {
         steps.n++;
         k--;
+      }
+      const amp = k > start && s[k - 1] === "#" ? k - 2 : k - 1;
+      if (amp >= start && s[amp] === "&") {
+        const ent = entity(s, amp, steps);
+        if (ent && ent.end === end) {
+          const v = ent.v;
+          if (!(v.length === 1 && (isTrailing(v) || v === ")" || v === "]" || v === "}")) && ![...v].some(endsAddress)) break;
+          end = amp;
+          continue;
+        }
       }
       end = k < end - 1 && k > start && s[k - 1] === "&" ? k - 1 : end - 1;
       continue;
