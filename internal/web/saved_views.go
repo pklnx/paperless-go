@@ -256,9 +256,14 @@ func (s *Server) handlePatchSavedView(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name      optional[string]          `json:"name"`
 		Filter    optional[json.RawMessage] `json:"filter"`
+		Params    optional[json.RawMessage] `json:"paperlessGo"`
 		SortIndex optional[int64]           `json:"sortIndex"`
 	}
 	if !s.decode(w, r, &in) {
+		return
+	}
+	if in.Filter.Set && in.Params.Set {
+		s.refuseFilter(w, "filter and paperlessGo cannot be sent together")
 		return
 	}
 	var p store.SavedViewPatch
@@ -280,6 +285,25 @@ func (s *Server) handlePatchSavedView(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.Filter, fields = in.Filter.Value, append(fields, "filter")
+	}
+	if in.Params.Set {
+		// Only the web's part: it replaces the savedViewKey key under the
+		// row lock and keeps every other key as stored at that time.
+		t := bytes.TrimSpace(in.Params.Value)
+		if in.Params.Null || len(t) == 0 || t[0] != '{' {
+			s.refuseFilter(w, "paperlessGo must be a JSON object")
+			return
+		}
+		wrapped, err := json.Marshal(map[string]json.RawMessage{savedViewKey: in.Params.Value})
+		if err != nil {
+			s.refuseFilter(w, "paperlessGo must be a JSON object")
+			return
+		}
+		if reason := checkSavedViewFilter(wrapped); reason != "" {
+			s.refuseFilter(w, reason)
+			return
+		}
+		p.FilterKeys, fields = map[string]json.RawMessage{savedViewKey: in.Params.Value}, append(fields, "paperlessGo")
 	}
 	if in.SortIndex.Set {
 		if in.SortIndex.Null {

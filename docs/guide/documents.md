@@ -37,7 +37,10 @@ sidebar's "Saved views" section.
   admin "Everyone's documents". It is there while a search, a filter or a
   sort is chosen, not in the trash.
 - A click on a view opens the list with its search, filter and sort; the
-  view is marked as long as the list shows them.
+  view is marked as long as the list shows them. A view that combines
+  several filters shows one chip for each. If a view's tag, correspondent
+  or document type was deleted, the list says so; "Update to the current
+  filter" repairs the view.
 - The **⋯** next to a view renames it, sets it to what the list shows now
   ("Update to the current filter"), moves it up or down, or deletes it
   (asked first; only the view is deleted, never documents). The views keep

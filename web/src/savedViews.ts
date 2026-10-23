@@ -51,7 +51,8 @@ export function viewParams(filter: Record<string, unknown>): ViewParams | null {
   const sort = r.sort ?? "";
   const order = r.order ?? "";
   if (tag === null || correspondent === null || type === null || inbox === undefined || favorite === undefined) return null;
-  if (r.q !== undefined && typeof r.q !== "string") return null;
+  // null is no search, as the server reads it (#143).
+  if (r.q !== undefined && r.q !== null && typeof r.q !== "string") return null;
   if (!(sorts as readonly unknown[]).includes(sort) || (order !== "" && order !== "asc" && order !== "desc")) return null;
   return {
     v: 1,
@@ -89,11 +90,6 @@ export function paramsOf(s: ViewState): ViewParams {
     order: s.order === "asc" ? "asc" : "",
     everyone: s.all === "1",
   };
-}
-
-/** A view's filter with the web's part replaced by params; the app's keys stay. */
-export function withParams(filter: Record<string, unknown>, params: ViewParams): Record<string, unknown> {
-  return { ...filter, [viewKey]: params };
 }
 
 /**

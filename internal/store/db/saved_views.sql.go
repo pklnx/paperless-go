@@ -167,6 +167,21 @@ func (q *Queries) LockSavedView(ctx context.Context, arg LockSavedViewParams) (S
 	return i, err
 }
 
+const lockSavedViewOrder = `-- name: LockSavedViewOrder :exec
+SELECT pg_advisory_xact_lock(hashtextextended('paperless-go:saved-views:' || $1::bigint::text, 0))
+`
+
+// LockSavedViewOrder serialises the creates of one owner that append a
+// view (SortLast), so each reads the maximum the one before it wrote and
+// two parallel ones never get the same sort index. It is a
+// transaction-level advisory lock with its own key prefix, released at
+// the commit; the transaction holding it writes only saved_views and the
+// audit log and waits for no other lock.
+func (q *Queries) LockSavedViewOrder(ctx context.Context, ownerID int64) error {
+	_, err := q.db.Exec(ctx, lockSavedViewOrder, ownerID)
+	return err
+}
+
 const nextSavedViewSortIndex = `-- name: NextSavedViewSortIndex :one
 SELECT (CASE WHEN max(sort_index) IS NULL THEN 0
              ELSE LEAST(max(sort_index), 9007199254740990) + 1 END)::bigint

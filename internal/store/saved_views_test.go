@@ -373,3 +373,149 @@ func TestSavedViewFilterTextJSONBRefuses(t *testing.T) {
 		t.Errorf("surrogate pair: %v", err)
 	}
 }
+
+// FilterKeys replaces only the named top-level keys and keeps the others
+// as stored (#143).
+func TestSavedViewPatchFilterKeys(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	v := mustView(t, st, alice, store.SavedViewInput{Name: "v", Filter: json.RawMessage(`{"tags": [{"id": "x"}], "paperless-go": {"v": 1, "q": "old"}}`)})
+	got, err := st.PatchSavedView(ctx, alice, v.ID, store.SavedViewPatch{
+		FilterKeys: map[string]json.RawMessage{"paperless-go": json.RawMessage(`{"v": 1, "q": "new <&>"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"tags": [{"id": "x"}], "paperless-go": {"v": 1, "q": "new <&>"}}`; !sameJSON(t, got.Filter, []byte(want)) {
+		t.Errorf("filter = %s, want %s", got.Filter, want)
+	}
+	// A new key is added; with Filter the keys go onto the new filter.
+	got, err = st.PatchSavedView(ctx, alice, v.ID, store.SavedViewPatch{
+		Filter:     json.RawMessage(`{"inbox": true}`),
+		FilterKeys: map[string]json.RawMessage{"paperless-go": json.RawMessage(`{"v": 1}`)},
+	})
+	if want := `{"inbox": true, "paperless-go": {"v": 1}}`; err != nil || !sameJSON(t, got.Filter, []byte(want)) {
+		t.Errorf("filter and keys: %s, %v; want %s", got.Filter, err, want)
+	}
+	for _, bad := range []string{`{`, "\"\xff\"", `"a\u0000"`, `"\ud800"`} {
+		_, err := st.PatchSavedView(ctx, alice, v.ID, store.SavedViewPatch{FilterKeys: map[string]json.RawMessage{"paperless-go": json.RawMessage(bad)}})
+		if !errors.Is(err, store.ErrInvalidFilter) {
+			t.Errorf("key value %q: %v, want ErrInvalidFilter", bad, err)
+		}
+	}
+	if got, _ := st.GetSavedView(ctx, alice, v.ID); !sameJSON(t, got.Filter, []byte(`{"inbox": true, "paperless-go": {"v": 1}}`)) {
+		t.Errorf("refused patches changed the filter: %s", got.Filter)
+	}
+}
+
+// A FilterKeys patch that waits for a concurrent change of the app's keys
+// merges into the filter that change wrote: no key is lost (#143).
+func TestSavedViewFilterKeysKeepConcurrentChange(t *testing.T) {
+	st, dbURL := storetest.NewWithURL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	v := mustView(t, st, alice, store.SavedViewInput{Name: "v", Filter: json.RawMessage(`{"app": 1, "paperless-go": {"v": 1, "q": "old"}}`)})
+	second := openWith(t, dbURL, map[string]string{"application_name": "keys-patch"})
+	watch := connect(t, dbURL)
+
+	locked, release := make(chan struct{}), make(chan struct{})
+	first := make(chan error, 1)
+	go func() {
+		held := store.WithAfterLock(ctx, func() {
+			close(locked)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+		// Another client changes the app's key (and sends the web's as it was).
+		_, err := st.PatchSavedView(held, alice, v.ID, store.SavedViewPatch{Filter: json.RawMessage(`{"app": 2, "paperless-go": {"v": 1, "q": "old"}}`)})
+		first <- err
+	}()
+	select {
+	case <-locked:
+	case err := <-first:
+		t.Fatalf("app change finished before it locked: %v", err)
+	case <-ctx.Done():
+		t.Fatal("app change never locked the row")
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := second.PatchSavedView(ctx, alice, v.ID, store.SavedViewPatch{
+			FilterKeys: map[string]json.RawMessage{"paperless-go": json.RawMessage(`{"v": 1, "q": "new"}`)},
+		})
+		done <- err
+	}()
+	waitForLock(ctx, t, watch, "keys-patch", done)
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatalf("app change: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("keys patch: %v", err)
+	}
+	got, err := st.GetSavedView(ctx, alice, v.ID)
+	if want := `{"app": 2, "paperless-go": {"v": 1, "q": "new"}}`; err != nil || !sameJSON(t, got.Filter, []byte(want)) {
+		t.Fatalf("after both: %s, %v; want %s", got.Filter, err, want)
+	}
+}
+
+// Two appending creates of one owner run one after the other, so they get
+// distinct sort indexes (#143): the second waits for the first's lock.
+func TestSavedViewConcurrentCreatesSortLast(t *testing.T) {
+	st, dbURL := storetest.NewWithURL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	bob := store.Scope{UserID: storetest.User(t, st, "bob", false).ID}
+	second := openWith(t, dbURL, map[string]string{"application_name": "second-create"})
+	watch := connect(t, dbURL)
+
+	locked, release := make(chan struct{}), make(chan struct{})
+	first := make(chan *store.SavedView, 1)
+	firstErr := make(chan error, 1)
+	go func() {
+		held := store.WithAfterLock(ctx, func() {
+			close(locked)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+		v, err := st.CreateSavedView(held, alice, store.SavedViewInput{Name: "First", SortLast: true})
+		first <- v
+		firstErr <- err
+	}()
+	select {
+	case <-locked:
+	case err := <-firstErr:
+		t.Fatalf("first create finished before it locked: %v", err)
+	case <-ctx.Done():
+		t.Fatal("first create never took the lock")
+	}
+	// Another owner's create does not wait.
+	if v, err := second.CreateSavedView(ctx, bob, store.SavedViewInput{Name: "Bob's", SortLast: true}); err != nil || v.SortIndex != 0 {
+		t.Fatalf("bob's create: %+v, %v", v, err)
+	}
+	done := make(chan error, 1)
+	secondView := make(chan *store.SavedView, 1)
+	go func() {
+		v, err := second.CreateSavedView(ctx, alice, store.SavedViewInput{Name: "Second", SortLast: true})
+		secondView <- v
+		done <- err
+	}()
+	waitForLock(ctx, t, watch, "second-create", done)
+	close(release)
+	a, b := <-first, <-secondView
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("second create: %v", err)
+	}
+	if a.SortIndex != 0 || b.SortIndex != 1 {
+		t.Errorf("sort indexes %d and %d, want 0 and 1", a.SortIndex, b.SortIndex)
+	}
+}

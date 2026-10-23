@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyView, canSave, moveView, paramsOf, showsView, shownViews, viewKey, viewParams, withParams, type ViewParams } from "./savedViews";
+import { applyView, canSave, moveView, paramsOf, showsView, shownViews, viewKey, viewParams, type ViewParams } from "./savedViews";
 import { savedView } from "./testServer";
 import { parseState } from "./urlState";
 
@@ -23,6 +23,11 @@ describe("viewParams", () => {
     expect(viewParams({ [viewKey]: { v: 1 } })).toEqual(params());
     expect(viewParams({ tags: [{ id: "x" }], [viewKey]: { v: 1, q: "Rechnung", tag: ["t1"], inbox: true, favorite: null, sort: "date", order: "asc", everyone: true } })).toEqual(
       params({ q: "Rechnung", tag: ["t1"], inbox: true, sort: "date", order: "asc", everyone: true }),
+    );
+  });
+  it("reads null as absent, as the server does (#143)", () => {
+    expect(viewParams({ [viewKey]: { v: 1, q: null, tag: null, correspondent: null, type: null, inbox: null, favorite: null, sort: null, order: null, everyone: null } })).toEqual(
+      params(),
     );
   });
   it("hides views without the key, of another version or of another shape", () => {
@@ -56,11 +61,10 @@ describe("viewParams", () => {
 });
 
 describe("saving and opening", () => {
-  it("saves what the list shows, and keeps the app's keys on an update", () => {
+  it("saves what the list shows", () => {
     const s = parseState("?q=%20Rechnung%20&tag=t1&fav=1&sort=date&order=asc&all=1");
     const p = paramsOf(s);
     expect(p).toEqual(params({ q: "Rechnung", tag: ["t1"], favorite: true, sort: "date", order: "asc", everyone: true }));
-    expect(withParams({ tags: [{ id: "x" }], [viewKey]: { v: 1, q: "old" } }, p)).toEqual({ tags: [{ id: "x" }], [viewKey]: p });
   });
   it("offers saving for a search, a filter or a sort, not for the plain list, the trash or a page", () => {
     expect(canSave(empty)).toBe(false);

@@ -137,7 +137,13 @@ export function Toast({ notice, close, pause, resume }: Pick<Notices, "notice" |
     if (now !== kind.current) hovered.current = false;
     kind.current = now;
     if (!box.current?.contains(document.activeElement)) {
-      focused.current = false;
+      // A focused notice replaced without a blur (its Undo gone with it)
+      // ends the focus reason of the pause here, or the time would stay
+      // stopped for good (#143).
+      if (focused.current) {
+        focused.current = false;
+        update();
+      }
       returnTo.current = null;
     }
     if (!notice?.focus || !keyboard.current) return;

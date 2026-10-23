@@ -43,3 +43,12 @@ FOR UPDATE;
 SELECT (CASE WHEN max(sort_index) IS NULL THEN 0
              ELSE LEAST(max(sort_index), 9007199254740990) + 1 END)::bigint
 FROM saved_views WHERE owner_id = $1;
+
+-- LockSavedViewOrder serialises the creates of one owner that append a
+-- view (SortLast), so each reads the maximum the one before it wrote and
+-- two parallel ones never get the same sort index. It is a
+-- transaction-level advisory lock with its own key prefix, released at
+-- the commit; the transaction holding it writes only saved_views and the
+-- audit log and waits for no other lock.
+-- name: LockSavedViewOrder :exec
+SELECT pg_advisory_xact_lock(hashtextextended('paperless-go:saved-views:' || sqlc.arg(owner_id)::bigint::text, 0));

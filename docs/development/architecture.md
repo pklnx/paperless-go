@@ -1583,15 +1583,23 @@ so another user's view answers `404` to everybody.
 - **`POST`** takes `name` (as metadata names: 1 to 128 characters after
   trimming, no control characters, `invalid_name`; names may repeat),
   `filter` (default `{}`) and `sortIndex` (default: after the caller's last
-  view, `NextSavedViewSortIndex` in the insert's transaction). `symbol`
+  view, `NextSavedViewSortIndex` in the insert's transaction, under a
+  per-owner advisory lock (`LockSavedViewOrder`, key prefix
+  `paperless-go:saved-views:`), so parallel creates get distinct indexes). `symbol`
   stays the app's default. A `sortIndex` sent to `POST` or `PATCH` must lie
   within ±(2^53 − 1), the integers a JavaScript number holds exactly
   (`400`); the next index is capped at 2^53 − 1, so a larger stored one
   cannot make it overflow.
-- **`PATCH`** changes only the fields sent (`name`, `filter`, `sortIndex`);
-  `filter` replaces the whole object, so the web sends the view's filter
-  back with only its own key replaced. `store.PatchSavedView` locks the row
-  (`LockSavedView`, `FOR UPDATE`), merges and writes in one transaction.
+- **`PATCH`** changes only the fields sent (`name`, `filter`,
+  `paperlessGo`, `sortIndex`). `filter` replaces the whole object.
+  `paperlessGo` is the web's part alone (the object under `paperless-go`,
+  checked as below): it replaces only that key and keeps every other key as
+  stored at the time of the write (`SavedViewPatch.FilterKeys`), so app keys
+  another client changed after the web loaded the view are not lost. The
+  web's "Update to the current filter" sends it; `filter` and `paperlessGo`
+  together are refused (`invalid_filter`). The merged filter is not held to
+  the 16 KiB limit again (each part was). `store.PatchSavedView` locks the
+  row (`LockSavedView`, `FOR UPDATE`), merges and writes in one transaction.
   `saved_views` is not an owner table (nothing links to it), so no owner
   lock. Reordering is two `PATCH`es swapping `sortIndex`, or, while any two
   of the web's views share an index (views from the app may), new indexes
@@ -1604,13 +1612,16 @@ so another user's view answers `404` to everybody.
   must pass `listQuery`, the parser of `GET /api/documents`. Only what the
   web can open exactly is accepted: at most one tag, correspondent and
   type, and `inbox`/`favorite` `true` or `null`; the sidebar hides any
-  other view as well. Every other key is kept unchecked. Text jsonb cannot
+  other view as well. `null` for `q`, `sort`, `order`, `tag`,
+  `correspondent`, `type` or `everyone` means the field is absent, on the
+  server and in the web. Several kinds together (a tag and the inbox, say)
+  are accepted: the list applies all of them and shows a chip for each. Every other key is kept unchecked. Text jsonb cannot
   hold (bytes that are not UTF-8, a lone surrogate escape such as
   `"\ud800"`) is `invalid_filter` too.
 - **Audit.** `saved_view.create`, `saved_view.update`, `saved_view.delete`
   in the transaction of the change (`503` and no change without the log):
   the view's UUID and name as target, `name`, `oldName` on a rename and
-  `fields` for an update. The filter is never recorded.
+  `fields` for an update (`name`, `filter`, `paperlessGo`, `sortIndex`). The filter is never recorded.
 
 ## Login
 

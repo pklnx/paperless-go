@@ -181,13 +181,13 @@ describe("a view's menu", () => {
     expect(screen.queryByRole("dialog", { name: t.renameView })).toBeNull();
   });
 
-  it("updates a view to the current filter and keeps the app's keys", async () => {
+  it("updates a view to the current filter, sending only the web's part so the server keeps the app's keys (#143)", async () => {
     await start("/?q=neu&fav=1");
     const menu = await menuOf("First");
     fireEvent.click(menu.getByRole("button", { name: t.updateView }));
     await waitFor(() => expect(sent("PATCH")).toHaveLength(1));
     expect(sent("PATCH")[0]!.body).toEqual({
-      filter: { ...appKeys, [viewKey]: { v: 1, q: "neu", tag: [], correspondent: [], type: [], inbox: null, favorite: true, sort: "", order: "", everyone: false } },
+      paperlessGo: { v: 1, q: "neu", tag: [], correspondent: [], type: [], inbox: null, favorite: true, sort: "", order: "", everyone: false },
     });
     expect(await screen.findByText(t.viewUpdated("First"))).toBeTruthy();
   });

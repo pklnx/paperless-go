@@ -698,10 +698,16 @@ export interface SavedView {
   modifiedAt: string;
 }
 
-/** A change of a saved view: only the fields sent change; filter replaces the whole object. */
+/**
+ * A change of a saved view: only the fields sent change. filter replaces
+ * the whole object; paperlessGo replaces only the web's part of it (the
+ * paperless-go key) on the server, under the row lock, so keys another
+ * client changed meanwhile are kept (#143). Not both at once.
+ */
 export interface SavedViewPatch {
   name?: string;
   filter?: Record<string, unknown>;
+  paperlessGo?: Record<string, unknown>;
   sortIndex?: number;
 }
 
