@@ -450,8 +450,8 @@ scripts, styles and requests, no framing), `X-Content-Type-Options: nosniff`,
 `Cross-Origin-Resource-Policy: same-origin` and `Permissions-Policy:
 camera=(), microphone=(), geolocation=()`.
 
-Over HTTPS (TLS, or `X-Forwarded-Proto: https` from loopback or a
-[trusted proxy](#trusted-proxies)) every answer carries
+When a request counts as HTTPS (`X-Forwarded-Proto: https` from loopback or a
+[trusted proxy](#trusted-proxies)), every answer carries
 `Strict-Transport-Security: max-age=31536000`, so the browser uses HTTPS
 for the host for a year. It has no `includeSubDomains` or `preload`, since
 other services may share the domain. Over plain HTTP it is not sent.
