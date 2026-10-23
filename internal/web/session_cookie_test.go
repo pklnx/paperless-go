@@ -136,6 +136,66 @@ func TestSessionCookieOfTheScheme(t *testing.T) {
 			check(t, "192.0.2.1:1234", "https", c)
 		}
 	})
+	// Completes the matrix: a request with r.TLS set counts as HTTPS without
+	// any header (secureRequest checks it first). The server has no TLS
+	// listener today, so no deployment reaches this; the test pins the
+	// function, not a setup.
+	t.Run("direct TLS", func(t *testing.T) {
+		for _, c := range []struct {
+			name    string
+			cookies []*http.Cookie
+			want    int
+		}{
+			{"own session in __Host- next to a planted plain", []*http.Cookie{planted, ownSecure}, 200},
+			{"planted plain alone", []*http.Cookie{planted}, 401},
+			{"own session in a plain cookie", []*http.Cookie{ownPlain}, 401},
+		} {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, cookieRequest("GET", "/api/session", "192.0.2.1:1234", "", true, c.cookies...))
+			if rec.Code != c.want {
+				t.Errorf("%s: %d, want %d: %s", c.name, rec.Code, c.want, rec.Body)
+			}
+			if strings.Contains(rec.Body.String(), "mallory") {
+				t.Errorf("%s: logged in as the planter: %s", c.name, rec.Body)
+			}
+		}
+	})
+	// A logout over an HTTPS request ends the session of the planted plain
+	// cookie too, not only the one of the scheme's __Host- cookie, and
+	// expires both cookie names. Fresh sessions: own and planted above are
+	// shared with the other cases.
+	t.Run("logout over a secure request", func(t *testing.T) {
+		ownToken := newSession(t, st, alice.ID)
+		plantedToken := newSession(t, st, mallory.ID)
+		ownC := &http.Cookie{Name: secureCookieName, Value: ownToken}
+		plantedC := &http.Cookie{Name: cookieName, Value: plantedToken}
+		req := cookieRequest("DELETE", "/api/session", "10.1.2.3:4000", "https", false, plantedC, ownC)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("logout: %d, want 204: %s", rec.Code, rec.Body)
+		}
+		for name, token := range map[string]string{"own __Host- session": ownToken, "planted plain session": plantedToken} {
+			if sessionExists(t, st, token) {
+				t.Errorf("%s outlived the logout", name)
+			}
+		}
+		expired := map[string]bool{}
+		for _, c := range rec.Result().Cookies() {
+			if c.MaxAge < 0 {
+				expired[c.Name] = true
+			}
+		}
+		if !expired[secureCookieName] || !expired[cookieName] {
+			t.Errorf("expired cookies %v, want both %s and %s", expired, secureCookieName, cookieName)
+		}
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, cookieRequest("GET", "/api/session", "10.1.2.3:4000", "https", false, plantedC))
+		if rec.Code != http.StatusUnauthorized || strings.Contains(rec.Body.String(), "mallory") {
+			t.Errorf("planted cookie after the logout over HTTPS: %d: %s", rec.Code, rec.Body)
+		}
+	})
 }
 
 // A login and logout end the sessions of both session cookie names, the

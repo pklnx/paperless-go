@@ -5,6 +5,9 @@
 # Usage: scripts/next-version-test.sh
 #   NEXT_VERSION=path   test another copy of the script (for counter-proofs)
 #   RELEASE_NOTES=path  the same for scripts/release-notes.sh
+#   RELEASE_BUNDLE=path the same for scripts/release-bundle.sh (the copy finds
+#                       docker-compose.yml, .env.example and pgo in the parent
+#                       folder of its own folder)
 set -eu
 
 command -v jq > /dev/null || {
@@ -21,6 +24,8 @@ script=${NEXT_VERSION:-$here/next-version.sh}
 script=$(cd "$(dirname "$script")" && pwd)/$(basename "$script")
 notes_script=${RELEASE_NOTES:-$here/release-notes.sh}
 notes_script=$(cd "$(dirname "$notes_script")" && pwd)/$(basename "$notes_script")
+bundle_script=${RELEASE_BUNDLE:-$here/release-bundle.sh}
+bundle_script=$(cd "$(dirname "$bundle_script")" && pwd)/$(basename "$bundle_script")
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 tab=$(printf '\t')
@@ -314,13 +319,24 @@ contains "summary: header" "| PR | Title | Labels | Effect |" "$s"
 # --- release-bundle.sh ----------------------------------------------------
 
 for v in 26.10-11 1.0 v1.0.0 01.0.0; do
-	if out=$(sh "$here/release-bundle.sh" "$v" "$tmp/dist" 2>&1); then
+	if out=$(sh "$bundle_script" "$v" "$tmp/dist" 2>&1); then
 		fail "release-bundle: rejects $v" "accepted: $out"
 	else
 		contains "release-bundle: rejects $v" "not a release version" "$out"
 	fi
 done
-if out=$(sh "$here/release-bundle.sh" 99.0.0 "$tmp/dist" 2>&1); then
+# A newline in the version is a separate case: the list above splits on
+# whitespace. Exit 2 and the message, not just any failure: without the
+# script's `case`, sed fails with exit 1 on the newline.
+nl=$(printf '1.0.0\nx')
+rc=0
+out=$(sh "$bundle_script" "$nl" "$tmp/dist" 2>&1) || rc=$?
+if [ "$rc" -eq 2 ]; then
+	contains "release-bundle: rejects a newline in the version" "not a release version" "$out"
+else
+	fail "release-bundle: rejects a newline in the version" "exit $rc, want 2: $out"
+fi
+if out=$(sh "$bundle_script" 99.0.0 "$tmp/dist" 2>&1); then
 	passed=$((passed + 1))
 	contains "release-bundle: README names the version" "paperless-go 99.0.0" \
 		"$(tar -xzOf "$tmp/dist/paperless-go.tar.gz" paperless-go/README.txt)"
@@ -334,6 +350,9 @@ if out=$(sh "$notes_script" 1.0.0 ghcr.io/pklnx/paperless-go "" 2>&1); then
 	contains "release-notes: first, image line" \
 		"\`ghcr.io/pklnx/paperless-go:1.0.0\` (linux/amd64, linux/arm64), also tagged \`1.0\`, \`1\` and \`latest\`." "$out"
 	contains "release-notes: first, updater paragraph" "\`26.10\` stays on \`26.10-1\`" "$out"
+	contains "release-notes: first, earlier release wording" "The earlier release was named \`YY.MM-N\` (\`26.10-1\`); its tag and images stay." "$out"
+	lacks "release-notes: first, no plural earlier releases" "Earlier releases" "$out"
+	contains "release-notes: first, prefers the minor tag" "exact version or \`1.0\` (\`1\` also brings minor releases" "$out"
 	lacks "release-notes: first, no breaking-change sentence" "This release has a breaking change" "$out"
 	lacks "release-notes: first, no trusted proxies" "TRUSTED_PROXIES" "$out"
 else

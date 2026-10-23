@@ -92,6 +92,7 @@ only one of them.
 | `db-migration` | automatically | Schema change; makes at least a minor release (see Releases). |
 | `breaking` | by hand | Manual upgrade steps; makes a major release (see Releases). |
 | `feature`, `bug`, `docs`, `chore` | template or by hand | Kind of change; `feature` makes at least a minor release. |
+| `security` | by hand | Security hardening (never an undisclosed vulnerability). Kind label; does not change the version (a patch release unless other labels raise it). |
 
 Label changes do not notify anyone by themselves: after setting `plan` or
 `ready`, say so in the chat with the implementer (for example "plan #18" or
@@ -111,7 +112,7 @@ the labels of their issues:
 |---|---|---|
 | Any `breaking` | Major | `2.0.0` |
 | Else any `feature` or `db-migration` | Minor | `1.5.0` |
-| Else (bug fixes, docs, maintenance, dependencies, no label) | Patch | `1.4.3` |
+| Else (bug fixes, security hardening, docs, maintenance, dependencies, no label) | Patch | `1.4.3` |
 
 The first semver release is `1.0.0`, whatever the labels; its range starts at
 the last `vYY.MM-N` tag (`v26.10-1`). The old `vYY.MM-N` tags and images stay
@@ -142,7 +143,7 @@ to `ghcr.io/pklnx/paperless-go` with the tags `X.Y.Z`, `X.Y`, `X` and `latest`,
 creates the tag `vX.Y.Z` and a GitHub release with `paperless-go.tar.gz` (the
 Docker Compose bundle, `scripts/release-bundle.sh`) and `SHA256SUMS`. The notes
 start at the same tag as the range and are grouped by label (breaking changes,
-database migrations, features, fixes, documentation, dependencies,
+database migrations, security, features, fixes, documentation, dependencies,
 maintenance; see `.github/release.yml`). A pull request without a kind label
 lands under "Maintenance", so a risky pull request needs a kind label in
 addition to `second-review`.
@@ -187,9 +188,24 @@ the `breaking` and `db-migration` pull requests first. Add manual upgrade notes
 only when a change needs more than these generic steps. The first semver
 release (no `vX.Y.Z` tag before it) also gets a paragraph for automatic image
 updaters: the tag `26.10` stays on `26.10-1`, and tools should switch to an
-exact version, `1.0` or `1`.
+exact version or `1.0` (`1` also brings minor releases, whose migrations stop
+the web server until `./pgo migrate` runs).
 
 `./pgo --version` and `paperless-go --version` show the version. The release
 image shows `X.Y.Z` (for example `1.0.0`). A build from a clone shows
 `git describe`: the tag `v1.0.0`, or `v1.0.0-3-gabc1234` for commits after
 it.
+
+To run a release, follow [Upgrades](../guide/operations#upgrades), which uses
+the release bundle. From a clone instead of the latest `main`:
+
+```sh
+git fetch --tags
+git checkout v1.0.0
+./pgo migrate
+docker compose up -d web
+```
+
+In a clone `./pgo migrate` builds the image `paperless-go:local` from the
+checked-out sources before it migrates, and `docker compose up -d web` then
+starts that image.
