@@ -523,6 +523,34 @@ stays until `00018` is rolled back too. Words of trashed documents stay in
 the list until the document is purged, so the trash's own search finds
 them inside compounds too; live searches never show trashed documents.
 
+**Session cookie of the request's scheme (#156).** Nothing to run. Over
+HTTPS (TLS, or `X-Forwarded-Proto: https` from loopback or a [trusted
+proxy](../reference/security#trusted-proxies)) only the
+`__Host-paperless_go_session` cookie logs in; over plain HTTP, which
+includes a proxy that does not count, only `paperless_go_session`. Before,
+either name counted, so a plain cookie planted over plain HTTP or from
+another host name of the domain could log a browser into someone else's
+session. Most users notice nothing. A user logs in once more after the
+update in these cases:
+
+- `PAPERLESS_GO_TRUSTED_PROXIES` was set (or the proxy moved to loopback)
+  after the user logged in while the proxy did not count yet: the plain
+  cookie no longer counts over HTTPS. The next login sets the `__Host-`
+  one.
+- The variable was removed, or the proxy's address changed so that it no
+  longer counts, after the user logged in with the `__Host-` cookie: that
+  cookie no longer counts. The next login sets the plain one and expires
+  the `__Host-` one.
+- A browser logged in over plain HTTP under the host name it now uses over
+  HTTPS.
+
+From now on, any later change of `PAPERLESS_GO_TRUSTED_PROXIES` that
+changes whether requests count as HTTPS means one more login for everyone.
+A login and a logout still end the sessions of both cookies the browser
+sends. The warning about an ignored `X-Forwarded-For` is now logged only
+for requests with an allowed host name, so a client that sends a wrong
+`Host` can no longer use it up.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build
