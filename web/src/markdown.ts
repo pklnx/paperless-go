@@ -7,11 +7,19 @@
 // code fences of ``` or ~~~ (verbatim, no formatting or links inside) and
 // rules. Inside a block: emphasis, strong, strikethrough, inline code and
 // links, as the app's inline parser does; an image shows its alt text.
+// Entities (`&amp;`, `&#228;`) show as their character in text, never in
+// a URL. Bare addresses become links as the app's link detector makes
+// them (#131): `http://`, `https://`, `mailto:`, `tel:` and `www.`
+// addresses and e-mail addresses, never inside inline code or a link.
+// An address ends at white space or `<>"\``, at a ")", "]" or "}" it did
+// not open, and without trailing punctuation (`.,:;!?*_~'` and the like).
 //
 // Safety: the result is React elements built with createElement, never an
 // HTML string, so any text stays text. A link is made only from an
 // absolute URL that `new URL` parses and whose protocol is http:, https:,
 // mailto: or tel: (the app's schemes); anything else shows its link text.
+// A bare address goes through the same check, and it is found in the text
+// as written: an entity is never decoded into a URL.
 // The browser's URL parser drops tabs and line breaks anywhere and control
 // characters at the ends, so the check runs on what it parses, not on the
 // text as written.
@@ -21,6 +29,7 @@
 // (the only ones test a single character). Every loop step counts one
 // `steps` tick, so a test can bound the work for any input.
 import { createElement, Fragment, type ReactNode } from "react";
+import { namedEntities } from "./htmlEntities";
 
 /** The protocols a link may have (the app's `linkSchemes`). */
 const linkProtocols = new Set(["http:", "https:", "mailto:", "tel:"]);
@@ -71,6 +80,14 @@ const isWhite = (c: string | undefined) => c !== undefined && (c === " " || c ==
 const asciiPunct = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 const isPunct = (c: string | undefined) => c !== undefined && (asciiPunct.includes(c) || (c > "\x7f" && /^[\p{P}\p{S}]$/u.test(c)));
 const isDigit = (c: string | undefined) => c !== undefined && c >= "0" && c <= "9";
+const isAsciiAlnum = (c: string | undefined) => c !== undefined && ((c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9"));
+const isHex = (c: string | undefined) => c !== undefined && ((c >= "a" && c <= "f") || (c >= "A" && c <= "F") || (c >= "0" && c <= "9"));
+/** A letter, digit or combining mark: what an address is made of. */
+const isWordChar = (c: string | undefined) => c !== undefined && (isAsciiAlnum(c) || (c > "\x7f" && /^[\p{L}\p{N}\p{M}]$/u.test(c)));
+/** The local part of an e-mail address. */
+const isLocalChar = (c: string | undefined) => isWordChar(c) || c === "." || c === "-" || c === "_" || c === "+";
+/** A domain's labels (between the dots). */
+const isDomainChar = (c: string | undefined) => isWordChar(c) || c === "-" || c === "_";
 
 // ---- Blocks
 
@@ -325,13 +342,16 @@ interface Bracket {
   seq: number;
   /** The last delimiter before the bracket: emphasis inside the link is processed above it. */
   delimBefore: Delim | null;
+  /** The number of bare links made before the bracket. */
+  bareAt: number;
   prev: Bracket | null;
 }
 
 /**
  * The inline Markdown of one block: CommonMark's inline rules for code
- * spans, links, images, emphasis and (GFM) "~~" strikethrough, without
- * HTML, entities and reference links (they stay text as typed).
+ * spans, links, images, emphasis, entities and (GFM) "~~" strikethrough,
+ * without HTML and reference links (they stay text as typed), and bare
+ * addresses linked as the app's link detector does.
  */
 export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
   const n = s.length;
@@ -371,6 +391,65 @@ export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
 
   let brackets: Bracket | null = null;
   let seq = 0;
+  /** The links made from bare addresses: a [text](url) link shows them as text. */
+  const bareNodes = new Set<Inline>();
+  /** No bare address starts before this index: the text up to it was read as one already. */
+  let urlFloor = 0;
+  /** The end of the e-mail domain after each "@" (-1: none), read once per "@". */
+  const domains = new Map<number, number>();
+
+  /**
+   * The bare address starting at i, as a link: the app's detector finds
+   * them in the text outside code and links. Every scan here starts at a
+   * new index past the last one (urlFloor) or reads a pre-pass entry, so
+   * the work stays linear.
+   */
+  const bareLink = (i: number): { node: Inline; end: number } | null => {
+    const prefix = i >= urlFloor ? barePrefix(s, i) : null;
+    // What follows the prefix: a host, a phone number or an e-mail address.
+    const k = i + (prefix?.length ?? 0);
+    const starts =
+      prefix === "tel:" ? isDigit(s[k]) || (s[k] === "+" && isDigit(s[k + 1])) : prefix === "mailto:" ? isLocalChar(s[k]) : isWordChar(s[k]);
+    if (prefix && starts) {
+      const r = bareAddress(s, i, prefix.length, steps);
+      urlFloor = r.stop;
+      const url = s.slice(i, r.end);
+      const href = prefix !== "www." ? safeHref(url) : domainEnd(s, k, r.end, steps) >= 0 ? safeHref("http://" + url) : null;
+      if (href) return { node: { t: "link", href, c: [{ t: "text", v: url }] }, end: r.end };
+    }
+    // An e-mail address: the local part, "@" and a domain with a dot.
+    const at = pre.localEnd[i]!;
+    if (s[at] !== "@") return null;
+    let end = domains.get(at);
+    if (end === undefined) {
+      end = domainEnd(s, at + 1, s.length, steps);
+      domains.set(at, end);
+    }
+    if (end < 0) return null;
+    const address = s.slice(i, end);
+    const href = safeHref("mailto:" + address);
+    return href ? { node: { t: "link", href, c: [{ t: "text", v: address }] }, end } : null;
+  };
+
+  /** Nodes with their bare links turned back into text (inside a written link). */
+  const unlinkBare = (nodes: Inline[]): Inline[] => {
+    const out: Inline[] = [];
+    const push = (node: Inline) => {
+      const last = out[out.length - 1];
+      if (node.t === "text" && last?.t === "text") out[out.length - 1] = { t: "text", v: last.v + node.v };
+      else out.push(node);
+    };
+    for (const node of nodes) {
+      steps.n++;
+      if (bareNodes.has(node) && node.t === "link") push({ t: "text", v: plainText(node.c, steps) });
+      else if (node.t === "text" || node.t === "code") push(node);
+      else {
+        node.c = unlinkBare(node.c);
+        push(node);
+      }
+    }
+    return out;
+  };
   /** "[" openers with a smaller seq are inactive: links cannot hold links. */
   let linkFloor = 0;
 
@@ -528,7 +607,7 @@ export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
       const image = c === "!";
       const tok: Tok = { text: image ? "![" : "[", node: null, prev: null, next: null };
       append(tok);
-      brackets = { tok, image, seq: ++seq, delimBefore: delimTail, prev: brackets };
+      brackets = { tok, image, seq: ++seq, delimBefore: delimTail, bareAt: bareNodes.size, prev: brackets };
       i += image ? 2 : 1;
       continue;
     }
@@ -552,6 +631,10 @@ export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
       const inner = nest(collect(opener.tok, null));
       unlink(opener.tok);
       const href = opener.image ? null : safeHref(dest.url);
+      // Links do not hold links: an address in the text stays text (the
+      // app keeps a written link's destination). Links do not nest, so
+      // every node is walked here at most once.
+      if (href && bareNodes.size > opener.bareAt) inner.c = unlinkBare(inner.c);
       addNode(href ? { t: "link", href, c: inner.c } : { t: "plain", c: inner.c }, inner.depth);
       if (!opener.image) linkFloor = seq;
       i = dest.end + 1;
@@ -587,6 +670,25 @@ export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
       i = end;
       continue;
     }
+    if (c === "&") {
+      const ent = entity(s, i, steps);
+      if (ent) {
+        buf += ent.v;
+        i = ent.end;
+        continue;
+      }
+    }
+    // An address starts at a word character that does not continue a word.
+    const before = s[i - 1];
+    if (isWordChar(c) && !isWordChar(before) && before !== "." && before !== "-" && before !== "+" && before !== "@") {
+      const link = bareLink(i);
+      if (link) {
+        bareNodes.add(link.node);
+        addNode(link.node);
+        i = link.end;
+        continue;
+      }
+    }
     buf += c;
     i++;
   }
@@ -599,6 +701,124 @@ export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
 function oddMatch(opener: Delim, closer: Delim): boolean {
   if (closer.ch === "~") return false;
   return (opener.close || closer.open) && (opener.orig + closer.orig) % 3 === 0 && !(opener.orig % 3 === 0 && closer.orig % 3 === 0);
+}
+
+/**
+ * A character reference at the "&" at i: `&name;` (the HTML names),
+ * `&#123;` or `&#x1F;`, as CommonMark reads it; null when it is none.
+ */
+function entity(s: string, i: number, steps: Steps): { v: string; end: number } | null {
+  let j = i + 1;
+  if (s[j] === "#") {
+    j++;
+    const hex = s[j] === "x" || s[j] === "X";
+    if (hex) j++;
+    const start = j;
+    while (j - start < (hex ? 6 : 7) && (hex ? isHex(s[j]) : isDigit(s[j]))) {
+      steps.n++;
+      j++;
+    }
+    if (j === start || s[j] !== ";") return null;
+    const cp = parseInt(s.slice(start, j), hex ? 16 : 10);
+    const v = cp === 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff) ? "\ufffd" : String.fromCodePoint(cp);
+    return { v, end: j + 1 };
+  }
+  const start = j;
+  while (j - start < 32 && isAsciiAlnum(s[j])) {
+    steps.n++;
+    j++;
+  }
+  if (j === start || s[j] !== ";") return null;
+  const name = s.slice(start, j);
+  return Object.hasOwn(namedEntities, name) ? { v: namedEntities[name]!, end: j + 1 } : null;
+}
+
+/** What a bare address starts with (any case), the detector's schemes that may link. */
+const barePrefixes = ["https://", "http://", "mailto:", "tel:", "www."];
+
+function barePrefix(s: string, i: number): string | null {
+  for (const p of barePrefixes) if (s.slice(i, i + p.length).toLowerCase() === p) return p;
+  return null;
+}
+
+/** Punctuation that ends a sentence, not an address. */
+const trailingPunct = "?!.,:;*_~'";
+const isTrailing = (c: string) => trailingPunct.includes(c) || (c > "\x7f" && /^[\p{Po}\p{Pi}\p{Pf}]$/u.test(c));
+
+/**
+ * The bare address that starts at i with a prefix of `from` characters:
+ * where it ends (`end`) and where its scan stopped (`stop`). It ends at
+ * white space, a control or format character, `<`, `>`, `"`, a backtick
+ * or a backslash, or at a ")", "]" or "}" that closes nothing inside it;
+ * then trailing punctuation and a trailing entity (`&gt;`) come off.
+ */
+function bareAddress(s: string, i: number, from: number, steps: Steps): { end: number; stop: number } {
+  const n = s.length;
+  const start = i + from;
+  let j = start;
+  let paren = 0;
+  let square = 0;
+  let curly = 0;
+  while (j < n) {
+    steps.n++;
+    const c = s[j]!;
+    if (isWhite(c) || c < " " || c === "\x7f" || c === "<" || c === ">" || c === '"' || c === "`" || c === "\\") break;
+    if (c > "\x7f" && /^[\p{Cc}\p{Cf}]$/u.test(c)) break;
+    if (c === "(") paren++;
+    else if (c === "[") square++;
+    else if (c === "{") curly++;
+    else if (c === ")") {
+      if (paren === 0) break;
+      paren--;
+    } else if (c === "]") {
+      if (square === 0) break;
+      square--;
+    } else if (c === "}") {
+      if (curly === 0) break;
+      curly--;
+    }
+    j++;
+  }
+  let end = j;
+  while (end > start) {
+    steps.n++;
+    const c = s[end - 1]!;
+    if (c === ";") {
+      // `&name;` at the end, as GFM's autolinks drop it.
+      let k = end - 1;
+      while (k > start && isAsciiAlnum(s[k - 1])) {
+        steps.n++;
+        k--;
+      }
+      end = k < end - 1 && k > start && s[k - 1] === "&" ? k - 1 : end - 1;
+      continue;
+    }
+    if (!isTrailing(c)) break;
+    end--;
+  }
+  return { end, stop: j };
+}
+
+/**
+ * The end of the domain at j, before `limit`: labels of letters, digits, "-" and "_"
+ * separated by single dots, at least one dot, not ending in "-" or "_";
+ * -1 when there is none. A dot at the end is not part of it.
+ */
+function domainEnd(s: string, j: number, limit: number, steps: Steps): number {
+  let k = j;
+  let dots = 0;
+  while (k < limit) {
+    steps.n++;
+    const c = s[k];
+    if (isDomainChar(c)) k++;
+    else if (c === "." && k > j && k + 1 < limit && isDomainChar(s[k + 1])) {
+      dots++;
+      k++;
+    } else break;
+  }
+  if (dots === 0) return -1;
+  const last = s[k - 1];
+  return last === "-" || last === "_" ? -1 : k;
 }
 
 /** `<scheme:…>`: the URL and the index after ">", or null. */
@@ -641,6 +861,8 @@ interface Prepass {
   strayAt: Int32Array;
   /** The next unescaped '"' / "'" at or after i, or -1. */
   nextQuote: { '"': Int32Array; "'": Int32Array };
+  /** The end of the run of e-mail local-part characters starting at i. */
+  localEnd: Int32Array;
 }
 
 function prepass(s: string, steps: Steps): Prepass {
@@ -677,6 +899,8 @@ function prepass(s: string, steps: Steps): Prepass {
   const strayAt = new Int32Array(n + 1);
   const dq = new Int32Array(n + 1);
   const sq = new Int32Array(n + 1);
+  const localEnd = new Int32Array(n + 1);
+  localEnd[n] = n;
   nextWhite[n] = n;
   nextNonWhite[n] = n;
   strayAt[n] = -1;
@@ -692,6 +916,7 @@ function prepass(s: string, steps: Steps): Prepass {
     strayAt[i] = white ? -1 : stray[i] ? i : strayAt[i + 1]!;
     dq[i] = c === '"' && !escaped[i] ? i : dq[i + 1]!;
     sq[i] = c === "'" && !escaped[i] ? i : sq[i + 1]!;
+    localEnd[i] = isLocalChar(c) ? localEnd[i + 1]! : i;
   }
   // The scan asks with growing positions, so each list is read once.
   const cursor = new Map<number, number>();
@@ -706,7 +931,7 @@ function prepass(s: string, steps: Steps): Prepass {
     cursor.set(len, k);
     return k < at.length ? at[k]! : -1;
   };
-  return { nextTickRun, closeAt, nextWhite, nextNonWhite, openAfter, strayAt, nextQuote: { '"': dq, "'": sq } };
+  return { nextTickRun, closeAt, nextWhite, nextNonWhite, openAfter, strayAt, nextQuote: { '"': dq, "'": sq }, localEnd };
 }
 
 /**

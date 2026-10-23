@@ -55,6 +55,12 @@ export const DocumentIcon = () => (
   </svg>
 );
 
+export const TrashIcon = () => (
+  <svg {...props}>
+    <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6" />
+  </svg>
+);
+
 export const ArrowIcon = ({ up }: { up: boolean }) => (
   <svg {...props} className={up ? "" : "rotate-180"}>
     <path d="M12 19V5M6 11l6-6 6 6" />

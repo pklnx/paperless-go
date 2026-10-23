@@ -6,6 +6,8 @@ export class ApiError extends Error {
     message: string,
     /** The parsed JSON error body, for errors that carry more than a message. */
     readonly body: Record<string, unknown> = {},
+    /** The seconds of a Retry-After header (a 503 or 429), if the answer had one. */
+    readonly retryAfter?: number,
   ) {
     super(message);
   }
@@ -28,7 +30,13 @@ async function errorFrom(res: Response): Promise<ApiError> {
   } catch {
     // not JSON
   }
-  return new ApiError(res.status, typeof body.error === "string" ? body.error : res.statusText, body);
+  return new ApiError(res.status, typeof body.error === "string" ? body.error : res.statusText, body, retryAfterHeader(res.headers.get("Retry-After")));
+}
+
+/** The seconds of a Retry-After header; a date or anything else unreadable counts as none. */
+export function retryAfterHeader(v: string | null): number | undefined {
+  if (v === null || !/^\d+$/.test(v.trim())) return undefined;
+  return Number(v.trim());
 }
 
 async function errorFor(path: string, res: Response): Promise<ApiError> {
@@ -329,6 +337,10 @@ export interface DocumentSummary {
   processing?: Processing;
   /** The thumbnail's URL (with its version), or null until processing made one. */
   thumbnailUrl?: string | null;
+  /** When the document went to the trash; null (or missing) for a live document. */
+  deletedAt?: string | null;
+  /** When the trash removes it for good; null (or missing) for a live document. */
+  purgeAt?: string | null;
   /**
    * Only in a search with words: up to two fragments of the text, each
    * match between SNIPPET_START and SNIPPET_STOP. Plain text, never HTML.
@@ -403,8 +415,12 @@ export interface DocumentPage {
   maxUploadSize: number;
 }
 
-/** The list's order: "" is the server's default (relevance with free text, else newest added). */
-export type DocumentSort = "" | "relevance" | "added" | "date";
+/**
+ * The list's order: "" is the server's default (relevance with free text,
+ * else newest added; in the trash newest deleted). deleted is for the
+ * trash only, newest first.
+ */
+export type DocumentSort = "" | "relevance" | "added" | "date" | "deleted";
 
 /**
  * What the document list shows. q is only what the user typed into the
@@ -423,6 +439,8 @@ export interface DocumentQuery {
   ascending: boolean;
   /** Only the caller's own documents: an admin without "Everyone's documents". */
   ownOnly: boolean;
+  /** The trash instead of the live documents. */
+  trashed: boolean;
 }
 
 export const emptyDocumentQuery: DocumentQuery = {
@@ -435,6 +453,7 @@ export const emptyDocumentQuery: DocumentQuery = {
   sort: "",
   ascending: false,
   ownOnly: false,
+  trashed: false,
 };
 
 /**
@@ -453,9 +472,10 @@ export function documentListQuery(dq: DocumentQuery, limit: number, cursor = "",
   // the server must know them before this UI is deployed.
   if (dq.favorite) p.set("favorite", "true");
   if (dq.ownOnly) p.set("owner", "me");
+  if (dq.trashed) p.set("trashed", "true");
   if (dq.sort) p.set("sort", dq.sort);
-  // Relevance has one direction only.
-  if (dq.ascending && dq.sort !== "relevance") p.set("order", "asc");
+  // Relevance and deleted have one direction only.
+  if (dq.ascending && dq.sort !== "relevance" && dq.sort !== "deleted") p.set("order", "asc");
   if (timeZone) p.set("tz", timeZone);
   if (cursor) p.set("cursor", cursor);
   return p.toString();
@@ -475,6 +495,8 @@ export interface DocumentCounts {
   inbox: number;
   favorites: number;
   total: number;
+  /** The documents in the trash (the others count live documents only). */
+  trash?: number;
 }
 
 /** owner=me for an admin's own rows; nothing for everything in the caller's scope. */
@@ -493,6 +515,12 @@ export const documentsApi = {
     (await send<DocumentDetail>("PATCH", `/api/documents/${encodeURIComponent(id)}`, patch))!,
   /** The download URL of a document's original file or archive PDF. */
   fileURL: (id: string, kind: "original" | "archive" = "original") => `/api/documents/${encodeURIComponent(id)}/file?kind=${kind}`,
+  /** Moves a document to the trash. */
+  trash: (id: string) => send("DELETE", `/api/documents/${encodeURIComponent(id)}`),
+  /** Brings a document back from the trash; answers it as it is now. */
+  restore: async (id: string): Promise<DocumentDetail> => (await send<DocumentDetail>("POST", `/api/documents/${encodeURIComponent(id)}/restore`, {}))!,
+  /** Deletes a trashed document permanently (its files go with it). */
+  purge: (id: string) => send("POST", `/api/documents/${encodeURIComponent(id)}/purge`, {}),
   /** Queues a document for processing again (Retry); answers the document with its new status. */
   reprocess: async (id: string): Promise<DocumentSummary> =>
     (await send<DocumentSummary>("POST", `/api/documents/${encodeURIComponent(id)}/reprocess`, {}))!,
@@ -568,6 +596,8 @@ export interface BulkMatch {
   favorite?: boolean;
   owner?: string;
   tz?: string;
+  /** The trash instead of the live documents: needed for restore and purge, refused otherwise. */
+  trashed?: boolean;
 }
 
 /** The match of a list: the same documents the list shows, on every page. owner=me while an admin's "Everyone's documents" is off. */
@@ -581,6 +611,7 @@ export function bulkMatch(dq: DocumentQuery, timeZone = browserTimeZone()): Bulk
   if (dq.favorite) m.favorite = true;
   if (dq.ownOnly) m.owner = "me";
   if (timeZone) m.tz = timeZone;
+  if (dq.trashed) m.trashed = true;
   return m;
 }
 
@@ -615,13 +646,23 @@ export interface BulkCount {
   fingerprint?: string;
 }
 
+/**
+ * What a bulk request does besides a field change: move to the trash,
+ * restore from it, or delete permanently (match.trashed must be true for
+ * the last two).
+ */
+export type BulkAction = "trash" | "restore" | "purge";
+
 const bulkPath = "/api/documents/bulk";
 
 export const bulkApi = {
-  /** Counts a match without changing anything. */
-  count: async (match: BulkMatch): Promise<BulkCount> => (await send<BulkCount>("POST", bulkPath, { match, dryRun: true }))!,
+  /** Counts a match without changing anything; the fingerprint is for action (a field change without one). */
+  count: async (match: BulkMatch, action?: BulkAction): Promise<BulkCount> =>
+    (await send<BulkCount>("POST", bulkPath, action ? { match, dryRun: true, action } : { match, dryRun: true }))!,
   /** Changes the documents, all or nothing; answers how many were changed. */
   apply: async (sel: BulkSelection, change: BulkChange): Promise<number> => (await send<{ updated: number }>("POST", bulkPath, { ...sel, ...change }))!.updated,
+  /** Moves the documents to the trash, restores or purges them, all or nothing; answers how many. */
+  act: async (sel: BulkSelection, action: BulkAction): Promise<number> => (await send<{ updated: number }>("POST", bulkPath, { ...sel, action }))!.updated,
 };
 
 /** A change of a tag: only the fields sent change; parentId null makes it a top-level tag. */

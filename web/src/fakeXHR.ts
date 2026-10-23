@@ -12,6 +12,7 @@ export class FakeXHR {
   status = 0;
   statusText = "";
   responseText = "";
+  responseHeaders: Record<string, string> = {};
   aborted = false;
   upload: { onprogress: ((e: { lengthComputable: boolean; loaded: number; total: number }) => void) | null } = { onprogress: null };
   onload: (() => void) | null = null;
@@ -37,8 +38,13 @@ export class FakeXHR {
   progress(loaded: number, total: number) {
     this.upload.onprogress?.({ lengthComputable: true, loaded, total });
   }
-  respond(status: number, body: unknown) {
+  getResponseHeader(name: string): string | null {
+    const k = Object.keys(this.responseHeaders).find((h) => h.toLowerCase() === name.toLowerCase());
+    return k === undefined ? null : this.responseHeaders[k]!;
+  }
+  respond(status: number, body: unknown, headers: Record<string, string> = {}) {
     this.status = status;
+    this.responseHeaders = headers;
     this.responseText = typeof body === "string" ? body : JSON.stringify(body);
     this.onload?.();
   }

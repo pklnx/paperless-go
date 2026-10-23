@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, bulkApi, type BulkChange, type BulkMatch, type BulkSelection, type Metadata, type NamedRow } from "./api";
+import { ApiError, bulkApi, type BulkAction, type BulkChange, type BulkMatch, type BulkSelection, type Metadata, type NamedRow } from "./api";
 import { sortByName } from "./collate";
 import { t } from "./i18n";
 import { Sheet } from "./Sheet";
-import { button, primary } from "./styles";
+import { button, danger, primary } from "./styles";
 import { flatTagTree } from "./tagTree";
+import type { Notify } from "./Toast";
+import { PurgeConfirm } from "./Trash";
 
 /** What the bar changes: the checked documents, or every match of the list's search (counted by a dry run). */
 export type BulkTarget = { ids: string[] } | { match: BulkMatch; matched: number };
@@ -22,6 +24,23 @@ interface Props {
   owners: number;
   /** After a change went through: the list and counts load again. */
   onDone: () => void;
+  /** The list is the trash: the bar offers Restore and Delete permanently only. */
+  trash?: boolean;
+  /**
+   * The owners of the checked documents when an admin checked other users'
+   * documents: the confirmations name them. Empty otherwise.
+   */
+  ownerNames?: readonly string[];
+  /**
+   * Whether every match may be deleted permanently: only the caller's own
+   * trash (match owner me), so not while an admin sees everyone's.
+   */
+  purgeByMatch?: boolean;
+  /**
+   * The shell's notice: the result of a trash action goes there, since the
+   * documents leave the list, the selection with them, and the bar.
+   */
+  notify?: Notify;
 }
 
 /** What the server's refusal of a bulk change means, in words; whether trying again may help. */
@@ -46,10 +65,14 @@ export function bulkErrorText(err: unknown): { text: string; retry: boolean } {
       return { text: t.bulkEmptySelection, retry: false };
     case "match_changed":
       return { text: t.bulkMatchChangedError, retry: true };
+    case "in_trash":
+      return { text: t.bulkInTrash, retry: false };
+    case "not_in_trash":
+      return { text: t.bulkNotInTrash, retry: false };
   }
   if (err.status === 404) return { text: t.bulkNotFound, retry: false };
-  // A deadlock lost three times (Retry-After), or no audit log: nothing changed.
-  if (err.status === 503) return { text: t.serverBusy, retry: true };
+  // A deadlock lost three times or a busy owner (Retry-After), or no audit log: nothing changed.
+  if (err.status === 503) return { text: err.retryAfter && err.retryAfter > 1 ? t.tryAgainIn(err.retryAfter) : t.serverBusy, retry: true };
   return { text: t.failed(err.message), retry: false };
 }
 
@@ -70,15 +93,36 @@ interface Confirm {
   changed: boolean;
 }
 
+/** The question before a trash action: how many, which selection (the dry run's fingerprint for a match). */
+interface Ask {
+  action: BulkAction;
+  n: number;
+  sel: BulkSelection;
+  /** By search: the confirmation says "every match", and a 409 match_changed counts again. */
+  byMatch: boolean;
+  changed: boolean;
+}
+
+/** What the bar says after a trash action went through. */
+const actionDone: Record<BulkAction, (n: number) => string> = {
+  trash: (n) => t.bulkTrashed(n),
+  restore: (n) => t.bulkRestored(n),
+  purge: (n) => t.purgedCount(n),
+};
+
 /**
  * The bar of a selection: add or remove tags, set or clear correspondent
- * and type, inbox and favourite. Each action is one POST
+ * and type, inbox and favourite, and delete (to the trash); in the trash
+ * restore and delete permanently. Each action is one POST
  * /api/documents/bulk. For every match of a search the bar first counts
- * the matches (dry run) and asks before it sends the change.
+ * the matches (dry run) and asks before it sends the change. Deleting
+ * asks with the count, also for checked documents; deleting permanently
+ * always asks (#12); restoring checked documents does not.
  */
-export function BulkBar({ target, metadata, ownerId, owners, onDone }: Props) {
+export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = false, ownerNames = [], purgeByMatch = true, notify }: Props) {
   const [sheet, setSheet] = useState<"" | "tags" | "corr" | "type">("");
   const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [ask, setAsk] = useState<Ask | null>(null);
   const [busy, setBusy] = useState(false);
   const targetKey = "ids" in target ? `ids:${target.ids.join(",")}` : `match:${JSON.stringify(target.match)}`;
   // The current target, for answers that arrive after it changed.
@@ -172,24 +216,100 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone }: Props) {
     );
   };
 
+  /** Sends a trash action; a 409 match_changed of a change by search counts and asks again. */
+  const act = (sel: BulkSelection, action: BulkAction, byMatch: boolean) => {
+    setBusy(true);
+    setMsg(null);
+    bulkApi.act(sel, action).then(
+      (n) => {
+        setBusy(false);
+        if (notify) {
+          setMsg(null);
+          notify({ text: actionDone[action](n), focus: true });
+        } else setMsg({ kind: "ok", text: actionDone[action](n) });
+        onDone();
+      },
+      (err: unknown) => {
+        setBusy(false);
+        if (byMatch && err instanceof ApiError && err.body.code === "match_changed") prepare(action, true);
+        else fail(err, byMatch ? () => prepare(action) : () => act(sel, action, false));
+      },
+    );
+  };
+
+  /** A trash action: by IDs at once (restore) or after asking; by search after a dry run of the action, then asking with its count. */
+  const prepare = (action: BulkAction, changed = false) => {
+    if ("ids" in target) {
+      if (action === "restore") act({ ids: target.ids }, action, false);
+      else setAsk({ action, n: target.ids.length, sel: { ids: target.ids }, byMatch: false, changed: false });
+      return;
+    }
+    if (action === "purge" && !purgeByMatch) {
+      setMsg({ kind: "error", text: t.purgeMatchOwnOnly });
+      return;
+    }
+    // Every match deleted permanently: the caller's own trash only.
+    const match: BulkMatch = action === "purge" ? { ...target.match, owner: "me" } : target.match;
+    const key = targetKey;
+    setBusy(true);
+    setMsg({ kind: "info", text: t.bulkCounting });
+    bulkApi.count(match, action).then(
+      (c) => {
+        setBusy(false);
+        if (targetRef.current !== key) {
+          setMsg((m) => (m?.kind === "info" ? null : m));
+          return;
+        }
+        if (c.matched === 0) setMsg({ kind: "error", text: t.bulkNoMatches });
+        else if (c.matched > c.limit || c.fingerprint === undefined) setMsg({ kind: "error", text: `${t.bulkMatchCount(c.matched)} ${t.bulkTooMany(c.limit)}` });
+        else {
+          setMsg(null);
+          setAsk({ action, n: c.matched, sel: { match, fingerprint: c.fingerprint }, byMatch: true, changed });
+        }
+      },
+      (err: unknown) => {
+        setBusy(false);
+        if (targetRef.current !== key) {
+          setMsg((m) => (m?.kind === "info" ? null : m));
+          return;
+        }
+        fail(err, () => prepare(action, changed));
+      },
+    );
+  };
+
+  const confirmAsk = () => {
+    if (!ask) return;
+    setAsk(null);
+    act(ask.sel, ask.action, ask.byMatch);
+  };
+  const askNote = ask ? (ask.changed ? t.bulkMatchChanged(ask.n) : ask.byMatch ? t.bulkEveryMatch : undefined) : undefined;
+  const askOwners = ask && !ask.byMatch ? ownerNames : [];
+
+  const actions: readonly (readonly [string, () => void])[] = trash
+    ? [
+        [t.restore, () => prepare("restore")],
+        [t.purge, () => prepare("purge")],
+      ]
+    : [
+        // Tags are one owner's: with several, say so before anything is sent.
+        [t.bulkTags, () => (several ? setMsg({ kind: "error", text: t.bulkSeveralOwners }) : setSheet("tags"))],
+        [t.bulkCorrespondent, () => setSheet("corr")],
+        [t.bulkType, () => setSheet("type")],
+        [t.bulkRemoveFromInbox, () => run({ inbox: false })],
+        [t.bulkMoveToInbox, () => run({ inbox: true })],
+        [t.bulkFavorite, () => run({ favorite: true })],
+        [t.bulkUnfavorite, () => run({ favorite: false })],
+        [t.bulkDelete, () => prepare("trash")],
+      ];
+
   const count = "ids" in target ? target.ids.length : target.matched;
   return (
     <div role="region" aria-label={t.bulkActions} className="sticky bottom-0 z-10 -mx-4 flex flex-col gap-2 border-t border-line bg-surface-raised px-4 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] shadow-lg md:mx-0 md:rounded-lg md:border">
       <div className="flex gap-2 max-sm:overflow-x-auto sm:flex-wrap">
         <span className="shrink-0 self-center text-sm font-medium">{t.selectedCount(count)}</span>
-        {(
-          [
-            // Tags are one owner's: with several, say so before anything is sent.
-            [t.bulkTags, () => (several ? setMsg({ kind: "error", text: t.bulkSeveralOwners }) : setSheet("tags"))],
-            [t.bulkCorrespondent, () => setSheet("corr")],
-            [t.bulkType, () => setSheet("type")],
-            [t.bulkRemoveFromInbox, () => run({ inbox: false })],
-            [t.bulkMoveToInbox, () => run({ inbox: true })],
-            [t.bulkFavorite, () => run({ favorite: true })],
-            [t.bulkUnfavorite, () => run({ favorite: false })],
-          ] as const
-        ).map(([label, act]) => (
-          <button key={label} type="button" className={`${button} shrink-0`} disabled={busy} onClick={act}>
+        {actions.map(([label, run]) => (
+          <button key={label} type="button" className={`${button} shrink-0`} disabled={busy} onClick={run}>
             {label}
           </button>
         ))}
@@ -213,6 +333,36 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone }: Props) {
       <Sheet open={sheet === "type"} onClose={() => setSheet("")} title={t.bulkTypeTitle}>
         <NamedForm rows={several ? [] : own(metadata?.documentTypes ?? [])} onlyClear={several} clearLabel={t.bulkClearType} onApply={(id) => run({ documentType: id })} />
       </Sheet>
+      <Sheet open={ask !== null && ask.action !== "purge"} onClose={() => setAsk(null)} title={ask?.action === "restore" ? t.bulkRestoreTitle : t.bulkTrashTitle}>
+        {ask && (
+          <>
+            {askNote && (
+              <p role="status" className="text-sm font-medium">
+                {askNote}
+              </p>
+            )}
+            <p className="text-sm">{ask.action === "restore" ? t.bulkRestoreText(ask.n) : t.bulkTrashText(ask.n)}</p>
+            {askOwners.length > 0 && <p className="text-sm font-medium wrap-anywhere">{t.purgeOwners(askOwners.join(", "))}</p>}
+            <div className="flex justify-end gap-2">
+              <button type="button" className={button} onClick={() => setAsk(null)}>
+                {t.cancel}
+              </button>
+              <button type="button" className={ask.action === "trash" ? danger : primary} onClick={confirmAsk}>
+                {ask.action === "restore" ? t.bulkRestoreConfirm(ask.n) : t.bulkTrashConfirm(ask.n)}
+              </button>
+            </div>
+          </>
+        )}
+      </Sheet>
+      <PurgeConfirm
+        open={ask !== null && ask.action === "purge"}
+        title={t.purgeBulkTitle}
+        n={ask?.n ?? 0}
+        owners={askOwners}
+        note={askNote}
+        confirm={confirmAsk}
+        cancel={() => setAsk(null)}
+      />
       <Sheet open={confirm !== null} onClose={() => setConfirm(null)} title={t.bulkConfirmTitle}>
         {confirm && (
           <>

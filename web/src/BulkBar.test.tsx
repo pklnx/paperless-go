@@ -1,10 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ApiError, bulkApi, type BulkCount } from "./api";
 import { App } from "./App";
 import { bulkErrorText } from "./BulkBar";
 import { t } from "./i18n";
-import { longPressTimer, maxSelection } from "./selection";
+import { longPressTimer, maxSelection, selectionLimit } from "./selection";
 import { doc, held, named, page, stubServer, tag, type Request, type Server } from "./testServer";
 
 // Selecting documents in the list and changing them together, against a
@@ -26,7 +26,7 @@ afterEach(() => {
 const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const gets = (path: string) => requests.filter((r) => r.method === "GET" && r.path === path);
 const bulks = () => requests.filter((r) => r.path === "/api/documents/bulk").map((r) => r.body);
-// By attribute, not by role: the role queries are slow on the 510 rows of the limit's test.
+// By attribute, not by role: the role queries are slow on long lists.
 const byLabel = <T extends Element>(sel: string, label: string) => {
   const el = Array.from(document.querySelectorAll<T>(sel)).find((e) => e.getAttribute("aria-label") === label);
   if (!el) throw new Error(`no ${sel} labelled ${label}`);
@@ -182,24 +182,32 @@ describe("selection", () => {
     expect(sheet.getAllByRole("radio").map((r) => r.parentElement?.textContent)).toEqual([t.bulkClearCorrespondent, "Bob corr"]);
   });
 
-  it("selects all loaded up to the limit and says so", { timeout: 15_000 }, async () => {
-    // More than the limit, in two pages (the fake server ignores the page size, to keep the test short).
-    const all = Array.from({ length: 510 }, (_, i) => doc(`d${i}`, `Doc ${i}`));
-    server.documents = (p) => (p.get("cursor") ? page(all.slice(255)) : page(all.slice(0, 255), "c1"));
+  it("selects all loaded up to the limit and says so", async () => {
+    // The list's limit is the server's 500; a lowered one checks the same
+    // cap with a few rows (hundreds of rows made the test slow).
+    expect(selectionLimit.max).toBe(maxSelection);
+    expect(maxSelection).toBe(500);
+    selectionLimit.max = 5;
+    onTestFinished(() => {
+      selectionLimit.max = maxSelection;
+    });
+    // More than the limit, in two pages.
+    const all = Array.from({ length: 10 }, (_, i) => doc(`d${i}`, `Doc ${i}`));
+    server.documents = (p) => (p.get("cursor") ? page(all.slice(4)) : page(all.slice(0, 4), "c1"));
     await start();
     fireEvent.click(screen.getByRole("button", { name: t.loadMore }));
-    await screen.findByText("Doc 509");
+    await screen.findByText("Doc 9");
     fireEvent.click(screen.getByRole("checkbox", { name: t.selectAllLoaded }));
-    expect(screen.getByText(t.selectionCapped(maxSelection))).toBeTruthy();
-    expect(bar().getByText(t.selectedCount(maxSelection))).toBeTruthy();
-    expect(box("Doc 499").checked).toBe(true);
-    expect(box("Doc 500").checked).toBe(false);
+    expect(screen.getByText(t.selectionCapped(5))).toBeTruthy();
+    expect(bar().getByText(t.selectedCount(5))).toBeTruthy();
+    expect(box("Doc 4").checked).toBe(true);
+    expect(box("Doc 5").checked).toBe(false);
     // Another one past the limit is refused the same way.
-    fireEvent.click(box("Doc 505"));
-    expect(box("Doc 505").checked).toBe(false);
+    fireEvent.click(box("Doc 7"));
+    expect(box("Doc 7").checked).toBe(false);
     fireEvent.click(bar().getByRole("button", { name: t.bulkFavorite }));
     await waitFor(() => expect(bulks()).toHaveLength(1));
-    expect((bulks()[0]!.ids as string[]).length).toBe(maxSelection);
+    expect((bulks()[0]!.ids as string[]).length).toBe(5);
     // Again: everything is selected, so it clears.
     fireEvent.click(screen.getByRole("checkbox", { name: t.selectAllLoaded }));
     expect(screen.queryByRole("region", { name: t.bulkActions })).toBeNull();
