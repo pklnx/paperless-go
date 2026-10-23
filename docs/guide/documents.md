@@ -77,9 +77,17 @@ exist yet can be created right there ("Create …").
   per level), read-only tasks `- [ ]` and `- [x]`, quotes `>`, code
   between ```` ``` ```` or `~~~` lines, rules `---`, `**bold**`, `*italic*`,
   `~~struck~~`, `` `code` ``, and links `[text](https://…)`. A line break
-  stays a line break. Links open in a new tab and work only for `http`,
-  `https`, `mailto` and `tel` addresses; any other link shows its text.
-  Everything else, HTML included, shows as you typed it.
+  stays a line break. Addresses written without Markdown become links as
+  in the app: `https://…`, `http://…` and `www.…` addresses, e-mail
+  addresses (`name@example.com`) and `mailto:` and `tel:` addresses, but
+  not inside `` `code` ``, a code block or a link's text. A link ends
+  before punctuation that ends the sentence (`.`, `,`, `!`, `?`, a quote)
+  and before a closing bracket it did not open, so `(https://a.example).`
+  links `https://a.example`. Links open in a new tab and work only for
+  `http`, `https`, `mailto` and `tel` addresses; any other link shows its
+  text. Entities such as `&amp;` or `&#228;` show as their character
+  (`&`, `ä`) in the text, never in a link's address. Everything else, HTML
+  included, shows as you typed it.
 - Leaving a document with unsaved changes (another document, Back, logging
   out, closing the tab) asks first.
 
