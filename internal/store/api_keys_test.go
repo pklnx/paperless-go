@@ -388,6 +388,9 @@ func TestAPIKeyUploadScopeMigration(t *testing.T) {
 		}
 		return out
 	}
+	if err := st.MigrateDownTo(ctx, 17); err != nil { // the later migrations first
+		t.Fatal(err)
+	}
 	if m, err := st.MigrateDown(ctx); err != nil || m != "00017_api_key_upload_scope.sql" {
 		t.Fatalf("down: %q, %v", m, err)
 	}

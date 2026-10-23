@@ -283,6 +283,34 @@ keys keep their rights. Rolling the migration back
 keys that have another scope too and deletes the keys that have only
 `upload`; their scripts need new keys after going back.
 
+**Search vocabulary (#56, `00018_search_vocabulary.sql`).** The migration
+collects the words of every document's search index into a per-user list
+with a trigram index, which the search will use to find words inside
+longer words (`rechnung` in `Stromrechnung`); this version changes nothing
+visible yet. Plan on about a minute per 100 000 documents of about 5 000
+characters (measured: 1 min 40 s for 150 000 documents with 4.1 million
+distinct words on 4 CPUs), during which documents cannot be written (the
+web server does not run while migrations are pending), and on disk space
+of about a sixth of the documents table: 415 MB next to 2.4 GB in that
+measurement. As documents are added and changed afterwards, the list grows
+to about a quarter (620 MB when the same documents were added one by one).
+Saving a document's text now also updates the list: an import with text,
+an OCR result or a delete takes about 10 ms longer, and adding documents
+in bulk (a large import) about three times as long in the database.
+
+It creates the PostgreSQL extension `pg_trgm`, a trusted extension like
+`unaccent` (#6) that needs only the `CREATE` privilege on the database: in
+the Compose setup the database user creates it itself. With your own
+PostgreSQL server and a user without that privilege, have an administrator
+run `CREATE EXTENSION pg_trgm SCHEMA public;` in the database first. The
+extension must be in the `public` schema: if it is already installed in
+another one, the migration stops with `the extension pg_trgm is installed
+in schema …, it must be in public`; run `ALTER EXTENSION pg_trgm SET SCHEMA
+public;` and migrate again. Rolling the migration back (`migrate down`)
+drops the list, and `pg_trgm` too if the paperless-go database user owns
+it (it created it) and nothing else uses it; one an administrator created
+stays. No document data changes either way.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build
