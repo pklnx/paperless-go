@@ -160,7 +160,7 @@ func (in *NewDocument) validate() error {
 // ErrASNTaken; an owner that does not exist gives ErrUnknownUser. An entry
 // from WithAudit is written in the same transaction; a document target
 // without an ID gets the new document's. The transaction takes the
-// owner's write lock first (locking.go).
+// owner's gate and write lock first (ownerTx).
 func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*Document, error) {
 	owner, err := sc.creator()
 	if err != nil {
@@ -187,10 +187,7 @@ func (s *Store) CreateDocument(ctx context.Context, sc Scope, in NewDocument) (*
 	}
 
 	var id pgtype.UUID
-	err = s.inTxWith(ctx, func(t *writeTx) error {
-		if err := t.lockOwners(ctx, owner); err != nil {
-			return err
-		}
+	err = s.ownerTx(ctx, []int64{owner}, func(ctx context.Context, t *writeTx) error {
 		q := t.q
 		var err error
 		id, err = q.CreateDocument(ctx, db.CreateDocumentParams{
@@ -273,20 +270,18 @@ func (s *Store) ListDocuments(ctx context.Context, sc Scope) ([]*Document, error
 
 // DeleteDocument removes a document row with its tag links. Its files stay
 // in the blob store; the orphan sweep comes with the trash (#12). It reads
-// the owner, takes the owner's write lock, then deletes.
+// the owner, takes the owner's gate and write lock (ownerTx), then
+// deletes.
 func (s *Store) DeleteDocument(ctx context.Context, sc Scope, id string) error {
 	u, ok := parseID(id)
 	if !ok {
 		return ErrNotFound
 	}
-	return mapErr(s.inTxWith(ctx, func(t *writeTx) error {
-		owner, err := t.q.DocumentOwner(ctx, db.DocumentOwnerParams{ID: u, Owner: sc.owner()})
-		if err != nil {
-			return err
-		}
-		if err := t.lockOwners(ctx, owner); err != nil {
-			return err
-		}
+	owner, err := s.q.DocumentOwner(ctx, db.DocumentOwnerParams{ID: u, Owner: sc.owner()})
+	if err != nil {
+		return mapErr(err)
+	}
+	return mapErr(s.ownerTx(ctx, []int64{owner}, func(ctx context.Context, t *writeTx) error {
 		got, err := t.q.DeleteDocument(ctx, db.DeleteDocumentParams{ID: u, Owner: sc.owner()})
 		if err != nil {
 			return err

@@ -405,25 +405,73 @@ first) and its retry loop.
 - **The helper.** `writeTx.lockOwners(ctx, owners...)`
   (`internal/store/locking.go`) dedupes and sorts the owners and takes one
   `LockOwner` per owner (a Go loop: SQL does not promise the order in
-  which a function runs over rows). It runs once per transaction (a second
-  call is an internal error, so composed helpers cannot break the order)
-  and never with an empty list: a writer answers an empty selection
-  before (`ErrNotFound` for IDs that are all outside the scope, the
-  empty-match answer of a bulk change by search). The lock is released at
-  commit or rollback, also on an error or a cancelled context, so a pool
-  connection never carries it into the next request.
+  which a function runs over rows). Only `ownerTx` calls it, as the first
+  statement of its transaction and with the owners it gated (other owners
+  are `errNotGated`, an internal error). It runs once per transaction (a
+  second call is an internal error, so composed helpers cannot break the
+  order) and never with an empty list: a writer answers an empty
+  selection before (`ErrNotFound` for IDs that are all outside the scope,
+  the empty-match answer of a bulk change by search). The lock is
+  released at commit or rollback, also on an error or a cancelled
+  context, so a pool connection never carries it into the next request.
+- **The gate** (#117, `internal/store/ownergate.go`). A writer that waits
+  at `pg_advisory_xact_lock` holds a pool connection, and the pool is
+  pgxpool's default `max(4, NumCPU)`: a few waiting writers of one owner
+  took every connection, so every other user, logins and `/healthz` waited
+  for that owner's bulk change. So before its transaction (and so before
+  it takes a connection) a writer takes the owner's token of the store's
+  in-process gate, one one-slot channel per owner (entries live only
+  while used), and gives it back after the commit or rollback. In one
+  process at most one writer per owner holds a connection for that
+  owner's lock; the others wait in Go, without a connection.
+  `Store.ownerTx(ctx, owners, fn)` is the only entry point: gate, then
+  `inTxWith`, then `lockOwners` over the same owners, then `fn`; the
+  owners are known before (below). The gate is not reentrant: `fn` gets a
+  context marked as gated, and a writer started with it fails
+  (`errNestedOwnerTx`) instead of waiting for itself. One gate per
+  `Store`, shared by the handlers and the worker inside `serve`; the
+  advisory lock stays the guarantee across processes (an `import` run, a
+  second server), each of which waits with at most one connection per
+  owner. Deadlock freedom: gates are taken in ascending owner id like the
+  locks; a writer waiting at the gate holds only lower gates, no
+  connection and no advisory lock; a transaction never waits for a gate.
+  Gate waits therefore form ascending chains ending at a writer that holds
+  or waits for advisory locks, whose waits are acyclic as before, and a
+  gate holder waiting for a pool connection waits for transactions that
+  wait only for locks. `DisableOwnerLock` leaves the gate on; the
+  test-only `DisableOwnerGate` turns it off.
+- **Bounded wait.** `store.WithOwnerWait(ctx, d)` bounds the wait at the
+  gate and at the owner lock together, from the start of `ownerTx`: at the
+  gate by a timer, at the lock by `SET LOCAL lock_timeout` of the time
+  left before each `LockOwner` (at least 1 ms; none left gives up without
+  the statement) and `SET LOCAL lock_timeout TO DEFAULT` after the last,
+  so row locks and triggers never run under it. Giving up is
+  `store.ErrBusy` (`55P03` counts only at `LockOwner`); nothing was
+  written. The web server sets 15 s on every request in `Handler()`
+  (`ownerWait`, a constant), and `failStore` answers `503` with
+  `Retry-After: 5` and `another change of these documents is still
+  running; try again`. Without it a request's write waited as long as its
+  context: about 30 s for most handlers (the request context ends with
+  the `ReadTimeout`, see Web server), an hour for an upload. The worker
+  (`CompleteJob`, limited by its lease), the consume folder and the import
+  set no bound: they wait gated, without a connection, and failing an OCR
+  attempt because the owner is busy would gain nothing.
 - **Owners the writer does not know.** A writer of an existing row reads
-  its owner in the scope first, without a lock (`DocumentOwner`,
-  `DocumentOwners`, `TagOwner`, `CorrespondentOwner`,
-  `DocumentTypeOwner`; out of scope stays `ErrNotFound`), takes the lock,
-  then locks or writes the row and checks that the row's owner is one it
-  locked (`writeTx.holds`; owners never change, so a mismatch is an
-  internal error, never a silent write under the wrong lock). A row
+  its owner in the scope first, on the pool before its transaction and
+  the gate (`DocumentOwner`, `DocumentOwners`, `TagOwner`,
+  `CorrespondentOwner`, `DocumentTypeOwner`; out of scope stays
+  `ErrNotFound`, now answered without a transaction), takes the gate and
+  the lock, then locks or writes the row and checks that the row's owner
+  is one it locked (`writeTx.holds`; owners never change, so a mismatch is
+  an internal error, never a silent write under the wrong lock). A row
   deleted between the read and the lock gives `ErrNotFound` from the row
   lock as before. A bulk change by search locks its one owner before the
-  match; in an admin's scope over all owners it locks the owners of the
-  first match, whose locked documents are a subset of it (the recheck
-  only removes).
+  match; in an admin's scope over all owners the first match runs on the
+  pool before the gate (the limit and an empty match answer there, as
+  before without an audit entry), and the change gates and locks the
+  owners of that match, whose locked documents are a subset of it (the
+  recheck only removes; under READ COMMITTED the match inside the
+  transaction ran on its own snapshot before the locks too).
 - **Every writer:** `CreateDocument` (upload, consume folder, import),
   `DeleteDocument`, `PatchDocument`, `BulkUpdateDocuments`,
   `Create/Update/Patch/Delete` of tags, correspondents and document
@@ -472,7 +520,10 @@ first) and its retry loop.
   table nor on the list of non-writers) and
   `TestTransactionsOnlyThroughTheGuard` (a static check that `Begin`,
   `pgx.BeginFunc`, `WithTx` and `db.New` appear only in the guarded
-  constructors; `collation.go`'s `REINDEX` is allowed).
+  constructors, `pgx.Connect`, `pgx.ConnectConfig` and `Acquire` only in
+  `ListenJobs`, and `lockOwners` only in `ownerTx`; `collation.go`'s
+  `REINDEX` is allowed). The regular expression also matches quoted table
+  names (`UPDATE "documents"`, `public."tags"`).
 - **`ErrRetry` stays** (`40P01`, `503` with `Retry-After: 1`) as the net
   for SQL outside the store and for deadlocks among jobs-only writers;
   store writers of the five tables no longer retry.
@@ -484,9 +535,22 @@ first) and its retry loop.
   `PatchTag`, review B's foreign-key re-check) hold one side after its
   locks (`WithAfterLock`), wait for the other at the advisory lock in
   `pg_stat_activity`, and give the side that would lose a deadlock a
-  10 ms `deadlock_timeout` (the other an hour). With
-  `store.DisableOwnerLock` (test-only; it also turns the guard off) the
-  same tests deadlock (`ErrRetry`); with the lock they pass.
+  10 ms `deadlock_timeout` (the other an hour). The competing sides run
+  on stores of their own (a gate each, as other processes would see it),
+  so they really meet at the SQL lock; a second writer of the same store
+  waits at the gate instead, which tests see through
+  `store.WithGateWait` or `Store.OwnerGateWaiters`. With
+  `store.DisableOwnerLock` (test-only; it also turns the guard off; a
+  package-global switch, so no `t.Parallel`) the cases that can deadlock
+  (the #99 pairs, review A's and review B's) fail with `ErrRetry`; the
+  others (#84, parent and child delete, the serialisation tests) fail on
+  their serialisation assertion. With the lock they pass.
+  `TestOtherOwnerNotDelayedByWaitingWriters` (pool of 4, alice's patch
+  held after its lock, 6 more of her writers waiting) checks that bob's
+  patch, read and tag create and a ping go through and that at most one
+  connection is in use; `PAPERLESS_GO_TEST_WITHOUT_GATE=1` runs it with
+  `DisableOwnerGate`, where it fails (bob's calls run into their 5 s
+  failure deadline).
 - **Cost** (the load test of `scripts/loadtest`, before and after on one
   host, 4 CPUs, the server's default pool of 4 connections; #108): one
   user's concurrent writes (S2, 21 threads as one user) went from 22.7 to
@@ -495,7 +559,18 @@ first) and its retry loop.
   33.9 to 38.1 requests/s, 45 deadlocks and one `503` → none. An upload of
   the owner whose bulk changes over 5 000 documents loop waits for at
   most one of them (S3: p99 2.6 s, the bulk loop's p99 2.8 s; 8 ms p50
-  alone); another owner's upload does not wait (p99 16 ms).
+  alone). Another owner's request does not wait for the lock, and since
+  the gate (#117) it does not wait for a pool connection either while any
+  number of one owner's writers wait for each other: the pool fills up
+  only with real concurrent work of different owners
+  (`TestOtherOwnerNotDelayedByWaitingWriters`; before the gate four
+  waiting writers of alice took bob's PATCH from 8 ms to 156 ms p50 and
+  `/healthz` to its 5 s timeout). The accepted cost: one owner's
+  concurrent writes serialise even when they touch different rows (review
+  B of #116 measured an adversarial mix of one owner's non-overlapping
+  writes about 15× slower than without the lock). The pool size is
+  `pool_max_conns` in `PAPERLESS_GO_DATABASE_URL`
+  (`docs/reference/configuration.md`).
 
 ## Blob durability
 
@@ -841,7 +916,10 @@ another user's document answers `404` and an admin sees all.
   (`existing` left out if the lookup failed, and for an API key without
   `read`, so an `upload` key learns only that the file is there), `413` `too_large`, `415`
   `unsupported`, `422` `unreadable` or `too_many_pixels` (with `reason`),
-  `400` for a body that broke off, `503` without the audit log.
+  `400` for a body that broke off, `503` without the audit log, `503`
+  with `Retry-After: 5` when another change of the caller's documents ran
+  longer than 15 s (Write locking, bounded wait; the body must be sent
+  again).
 - **`GET /api/documents`** lists and searches the scope's documents
   through `store.SearchDocuments`, without their text, with
   `maxUploadSize` for the UI. Parameters (`listQuery`):
@@ -869,8 +947,10 @@ another user's document answers `404` and an admin sees all.
   order`, `invalid time zone`, `invalid tag id` (likewise for
   `correspondent` and `type`), `too many tag ids`, `inbox must be true or
   false`, `limit must be a positive number`. `failStore` maps the store's
-  `ErrInvalidCursor` and `ErrInvalidSort` to `400` and `ErrRetry` to `503`
-  with `Retry-After: 1`; any other error is a logged `500` with `internal
+  `ErrInvalidCursor` and `ErrInvalidSort` to `400`, `ErrRetry` to `503`
+  with `Retry-After: 1` and `ErrBusy` (a write that waited 15 s for
+  another change of the same owner) to `503` with `Retry-After: 5`; any
+  other error is a logged `500` with `internal
   error`, so no database message reaches the client.
   The first page of a typed search (`q` with free text or search syntax,
   no cursor) writes `document.search` after the search ran, with `q` as
@@ -922,9 +1002,9 @@ another user's document answers `404` and an admin sees all.
   no field to change (not in `fields`, alone it is `nothing_to_change`):
   the document's `modifiedAt` exactly as `GET` or the last `PATCH`
   answered it (RFC 3339 with microseconds; the UI keeps the string and
-  never passes it through a `Date`, which has milliseconds only). One
-  transaction reads the document's owner, takes the owner's write lock
-  (Write locking, under Search index), locks the row (`LockDocument`,
+  never passes it through a `Date`, which has milliseconds only). It
+  reads the document's owner, then one transaction takes the owner's gate
+  and write lock (Write locking, under Search index), locks the row (`LockDocument`,
   `FOR NO KEY UPDATE`: no key column changes, so a foreign-key check of a
   row referencing the document, such as a new job, does not wait; it also
   returns `modified_at`), checks the precondition after the lock (`404`
@@ -942,7 +1022,8 @@ another user's document answers `404` and an admin sees all.
   `documentId` of the document that has the number, `409`
   `document_changed` with `modifiedAt`, `503` without the
   audit log or after a deadlock with SQL outside the store (`Retry-After:
-  1`). Without
+  1`), `503` with `Retry-After: 5` when another change of the owner ran
+  longer than 15 s (nothing changes). Without
   `expectedModifiedAt` a change goes through as before (API clients that
   set one field need not read first); the UI always sends it, and on
   `document_changed` loads the document again and keeps the user's edits
@@ -1039,8 +1120,11 @@ another user's document answers `404` and an admin sees all.
   scope of one owner that owner, before the match, so in that case no
   store writer can change the match before the documents are locked
   (only SQL outside the store); in an admin's scope over all owners the
-  owners of the first match, after it. There is no retry: a deadlock
-  with SQL outside the store answers `503` with `Retry-After: 1`.
+  owners of the first match, after it (that match runs before the
+  transaction). There is no retry: a deadlock with SQL outside the store
+  answers `503` with `Retry-After: 1`; a change that waited 15 s for
+  another change of the same owners answers `503` with `Retry-After: 5`
+  and changes nothing.
 
   **Audit.** One `document.bulk_update` per change (no target; `count`,
   `fields`, `selection` `ids` or `match`, `ids` of the changed documents,
@@ -1082,7 +1166,9 @@ answers `404` and an admin may change everyone's (the row keeps its owner).
   Search index), locks the row (`SELECT … FOR NO KEY UPDATE`), merges and
   writes in one transaction, so a concurrent patch of another field is not
   lost. Opposite tag moves of one owner serialise at the owner's lock:
-  one succeeds, the other answers `409` `tag_cycle`.
+  one succeeds, the other answers `409` `tag_cycle`. A `POST` or `PATCH`
+  that waited 15 s for another change of the owner answers `503` with
+  `Retry-After: 5` and changes nothing.
   Only the fields sent are checked: a name of 1 to 128 characters after
   trimming, no control characters (Unicode Cc, also NUL; checked before
   trimming, so a trailing newline is refused) (`invalid_name`), a colour `#RRGGBB` (`invalid_color`); an
@@ -1092,7 +1178,8 @@ answers `404` and an admin may change everyone's (the row keeps its owner).
   takes the owner's write lock (Write locking, under Search index) and
   deletes; the cascade, the `SET NULL` and the search triggers run under
   that lock. A deadlock with SQL outside the store answers `503` with
-  `Retry-After: 1`; there is no retry.
+  `Retry-After: 1`; there is no retry. A delete that waited 15 s for
+  another change of the owner answers `503` with `Retry-After: 5`.
 - **Errors** carry `error` and `code`: `409` `name_taken` (case-insensitive
   per owner, per parent for tags), `409` `tag_cycle`, `409`
   `tag_name_conflict` (a child would clash with a root tag on delete;

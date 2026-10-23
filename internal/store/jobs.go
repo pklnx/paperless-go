@@ -309,23 +309,22 @@ type ProcessResult struct {
 // stays. A document deleted meanwhile gives ErrNotFound (its job went with
 // it), a lease that is no longer j's ErrLeaseLost; either way nothing is
 // stored. Older finished jobs of the document are deleted. It takes the
-// document owner's write lock first (locking.go).
+// document owner's gate and write lock first (ownerTx), without a bound:
+// its wait is limited by the worker's context.
 func (s *Store) CompleteJob(ctx context.Context, j *Job, now time.Time, r ProcessResult) error {
 	doc, ok := parseID(j.DocumentID)
 	if !ok {
 		return ErrNotFound
 	}
-	return s.inTxWith(ctx, func(t *writeTx) error {
+	// The document's owner, then the owner's gate and write lock
+	// (ownerTx): an OCR result waits for a bulk change of the same owner,
+	// without a connection while another writer of the owner holds it.
+	owner, err := s.q.DocumentOwner(ctx, db.DocumentOwnerParams{ID: doc})
+	if err != nil {
+		return mapErr(err)
+	}
+	return s.ownerTx(ctx, []int64{owner}, func(ctx context.Context, t *writeTx) error {
 		q := t.q
-		// The document's owner, then the owner's write lock (locking.go):
-		// an OCR result waits for a bulk change of the same owner.
-		owner, err := q.DocumentOwner(ctx, db.DocumentOwnerParams{ID: doc})
-		if err != nil {
-			return mapErr(err)
-		}
-		if err := t.lockOwners(ctx, owner); err != nil {
-			return err
-		}
 		locked, err := q.LockDocument(ctx, db.LockDocumentParams{ID: doc})
 		if err != nil {
 			return mapErr(err)

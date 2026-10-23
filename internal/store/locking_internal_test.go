@@ -92,6 +92,12 @@ func TestWritesOwnerTables(t *testing.T) {
 		"SELECT id FROM documents WHERE id = $1 FOR NO KEY UPDATE":                        true,
 		"SELECT 1 FROM jobs JOIN documents d ON d.id = jobs.document_id FOR UPDATE":       true,
 		"SELECT id FROM tags FOR KEY SHARE":                                               true,
+		`UPDATE "documents" SET title = 'x'`:                                              true,
+		`DELETE FROM public."tags" WHERE id = $1`:                                         true,
+		`insert into "public"."document_tags" (document_id, tag_id) values ($1, $2)`:      true,
+		`SELECT id FROM "documents" WHERE id = $1 FOR UPDATE`:                             true,
+		`SELECT 1 FROM "documents"`:                                                       false,
+		`UPDATE "documents_x" SET a = 1`:                                                  false,
 		"SELECT * FROM documents":                                                         false,
 		"UPDATE jobs SET state = 'done'":                                                  false,
 		"INSERT INTO jobs (document_id) SELECT id FROM documents":                         false,
@@ -121,19 +127,25 @@ func TestWritesOwnerTables(t *testing.T) {
 // Transactions and query sets are built only in the guarded constructors,
 // so no store code reaches the raw pool or a raw transaction: Begin,
 // BeginTx, pgx.BeginFunc, pgx.BeginTxFunc and WithTx only where listed,
-// db.New only on the guard, and the pool's Exec, Query and QueryRow only
-// in collation.go (catalog reads and REINDEX, which write no owner table).
+// db.New only on the guard, the pool's Exec, Query and QueryRow only in
+// collation.go (catalog reads and REINDEX, which write no owner table),
+// connections of their own (pgx.Connect, pgx.ConnectConfig, Acquire) only
+// for LISTEN, and the owner lock only through the owner gate (ownerTx).
 func TestTransactionsOnlyThroughTheGuard(t *testing.T) {
 	allowed := map[string][]string{
-		"Begin":         {"audit.go:inTxWith"},
-		"BeginTx":       {"locking.go:readTx"},
-		"BeginFunc":     {"collation.go:reindex"},
-		"BeginTxFunc":   nil,
-		"WithTx":        nil,
-		"db.New":        {"store.go:Open", "audit.go:inTxWith", "documents_edit.go:match", "search.go:SearchDocuments"},
-		"pool.Exec":     {"collation.go:*"},
-		"pool.Query":    {"collation.go:*"},
-		"pool.QueryRow": {"collation.go:*"},
+		"Begin":             {"audit.go:inTxWith"},
+		"BeginTx":           {"locking.go:readTx"},
+		"BeginFunc":         {"collation.go:reindex"},
+		"BeginTxFunc":       nil,
+		"WithTx":            nil,
+		"db.New":            {"store.go:Open", "audit.go:inTxWith", "documents_edit.go:match", "search.go:SearchDocuments"},
+		"pool.Exec":         {"collation.go:*"},
+		"pool.Query":        {"collation.go:*"},
+		"pool.QueryRow":     {"collation.go:*"},
+		"pgx.Connect":       nil,
+		"pgx.ConnectConfig": {"jobs.go:ListenJobs"},
+		"Acquire":           nil,
+		"lockOwners":        {"ownergate.go:ownerTx"},
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -172,6 +184,10 @@ func TestTransactionsOnlyThroughTheGuard(t *testing.T) {
 					key = "db.New"
 				case (m == "Exec" || m == "Query" || m == "QueryRow") && isPool(sel.X):
 					key = "pool." + m
+				case (m == "Connect" || m == "ConnectConfig") && isIdent(sel.X, "pgx"):
+					key = "pgx." + m
+				case m == "Acquire" || m == "lockOwners":
+					key = m
 				default:
 					return true
 				}

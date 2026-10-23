@@ -70,7 +70,14 @@ func newAuthFixture(t *testing.T) *authFixture {
 // directory.
 func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 	t.Helper()
-	st, dbURL := storetest.NewWithURL(t)
+	return newAuthFixtureDB(t, opts, nil)
+}
+
+// newAuthFixtureDB is newAuthFixtureOpts with extra connection parameters
+// for the store (storetest.NewWithParams), such as pool_max_conns.
+func newAuthFixtureDB(t *testing.T, opts Options, params map[string]string) *authFixture {
+	t.Helper()
+	st, dbURL := storetest.NewWithParams(t, params)
 	key := bytes.Repeat([]byte{7}, crypto.KeySize)
 	sealer, err := crypto.NewSealer(key)
 	if err != nil {

@@ -216,6 +216,7 @@ func TestFailStore(t *testing.T) {
 		{"invalid query", search.ErrInvalid, http.StatusBadRequest, `{"error":"invalid query"}`},
 		{"invalid query text", &store.ValidationError{Field: "q"}, http.StatusBadRequest, `{"error":"invalid query"}`},
 		{"deadlock", fmt.Errorf("set tags: %w", store.ErrRetry), http.StatusServiceUnavailable, `{"error":"a concurrent change got in the way; try again"}`},
+		{"owner busy", fmt.Errorf("ingest: create document: %w", store.ErrBusy), http.StatusServiceUnavailable, `{"error":"another change of these documents is still running; try again"}`},
 		{"timestamp out of range", &pgconn.PgError{Code: "22008", Message: "timestamp out of range"}, http.StatusInternalServerError, `{"error":"internal error"}`},
 		{"raw database error", raw, http.StatusInternalServerError, `{"error":"internal error"}`},
 		{"wrapped unknown error", fmt.Errorf("query: %w", raw), http.StatusInternalServerError, `{"error":"internal error"}`},
@@ -226,12 +227,34 @@ func TestFailStore(t *testing.T) {
 			if rec.Code != tc.status || strings.TrimSpace(rec.Body.String()) != tc.body {
 				t.Errorf("answer = %d %s, want %d %s", rec.Code, rec.Body, tc.status, tc.body)
 			}
-			if retry := rec.Header().Get("Retry-After"); (tc.status == http.StatusServiceUnavailable) != (retry == "1") {
-				t.Errorf("Retry-After %q", retry)
+			want := ""
+			switch {
+			case errors.Is(tc.err, store.ErrBusy):
+				want = "5"
+			case tc.status == http.StatusServiceUnavailable:
+				want = "1"
+			}
+			if retry := rec.Header().Get("Retry-After"); retry != want {
+				t.Errorf("Retry-After %q, want %q", retry, want)
 			}
 		})
 	}
 	if !strings.Contains(logs.String(), "SQLSTATE 23505") {
 		t.Errorf("the 500's cause is not logged: %s", logs.String())
+	}
+}
+
+// An ErrBusy 503 is load, not a fault: logged as a warning, never as
+// "request failed" at level ERROR.
+func TestFailStoreBusyLogsWarning(t *testing.T) {
+	var logs strings.Builder
+	s := New(nil, slog.New(slog.NewTextHandler(&logs, nil)), Options{})
+	rec := httptest.NewRecorder()
+	s.failStore(rec, httptest.NewRequest("PATCH", "http://localhost/api/documents/x", nil), fmt.Errorf("x: %w", store.ErrBusy))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if l := logs.String(); !strings.Contains(l, "level=WARN") || strings.Contains(l, "level=ERROR") {
+		t.Errorf("busy logged as: %s", l)
 	}
 }

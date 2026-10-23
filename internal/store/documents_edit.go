@@ -234,8 +234,8 @@ func (p DocumentPatch) validate() error {
 // when p.ExpectedModifiedAt is set and the document's modified_at is
 // another (checked after the lock, after ErrNotFound, before any write);
 // a *ValidationError (ErrInvalid) for refused text or nothing to change.
-// It reads the document's owner in the scope, takes the owner's write
-// lock (locking.go), then locks the row.
+// It reads the document's owner in the scope, takes the owner's gate and
+// write lock (ownerTx), then locks the row.
 func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p DocumentPatch) (*Document, error) {
 	u, ok := parseID(id)
 	if !ok {
@@ -256,16 +256,13 @@ func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p Docume
 	if err != nil {
 		return nil, err
 	}
+	o, err := s.q.DocumentOwner(ctx, db.DocumentOwnerParams{ID: u, Owner: sc.owner()})
+	if err != nil {
+		return nil, mapErr(err)
+	}
 	var owner int64
-	err = s.inTxWith(ctx, func(t *writeTx) error {
+	err = s.ownerTx(ctx, []int64{o}, func(ctx context.Context, t *writeTx) error {
 		q := t.q
-		o, err := q.DocumentOwner(ctx, db.DocumentOwnerParams{ID: u, Owner: sc.owner()})
-		if err != nil {
-			return err
-		}
-		if err := t.lockOwners(ctx, o); err != nil {
-			return err
-		}
 		locked, err := q.LockDocument(ctx, db.LockDocumentParams{ID: u, Owner: sc.owner()})
 		if err != nil {
 			return err
@@ -527,12 +524,13 @@ func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelectio
 // changes nothing and writes no audit entry when its dry run matched
 // nothing too.
 //
-// Write lock (locking.go): the owners' write locks come first, in
+// Write lock (ownerTx): the owners' gates and write locks come first, in
 // ascending id. By IDs they are the owners of the IDs in the scope (read
-// before the lock; none means ErrNotFound); by search in a scope of one
-// owner that owner, before the match; by search in an admin's scope over
-// all owners the owners of the first match, before the documents are
-// locked. Every locked document's owner must be one of them.
+// before the transaction; none means ErrNotFound); by search in a scope
+// of one owner that owner, before the match; by search in an admin's
+// scope over all owners the owners of the first match, which runs before
+// the transaction (with the limit and an empty match answered there).
+// Every locked document's owner must be one of them.
 func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelection, c BulkChange, perDocument string) ([]string, error) {
 	if (sel.IDs == nil) == (sel.Match == nil) || (sel.Match != nil) == (sel.Fingerprint == "") {
 		return nil, invalid("selection")
@@ -596,19 +594,52 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 		}
 	}
 
+	// The owners to gate and lock (ownerTx). By IDs they are read first;
+	// in an admin's scope over all owners the first match runs first, on
+	// the pool, and gives them; in a scope of one owner it is that owner,
+	// and the match runs under the lock.
+	var owners []int64
+	switch {
+	case sel.Match != nil && lsc.owner() != nil:
+		owners = []int64{*lsc.owner()}
+	case sel.Match != nil:
+		rows, total, err := s.match(ctx, s.g, m, nil)
+		if err != nil {
+			return nil, mapErr(err)
+		}
+		if total > MaxBulkMatches {
+			return nil, &TooManyError{Count: total, Limit: MaxBulkMatches}
+		}
+		if total == 0 {
+			if err := confirmMatch(sel.Fingerprint, nil); !errors.Is(err, errNothingMatched) {
+				return nil, err
+			}
+			return []string{}, nil
+		}
+		ids = make([]pgtype.UUID, len(rows))
+		owners = make([]int64, len(rows))
+		for i, r := range rows {
+			ids[i], owners[i] = r.ID, r.OwnerID
+		}
+		beforeLock(ctx)
+	default:
+		if owners, err = s.q.DocumentOwners(ctx, db.DocumentOwnersParams{Ids: ids, Owner: lsc.owner()}); err != nil {
+			return nil, mapErr(err)
+		}
+		if len(owners) == 0 {
+			return nil, ErrNotFound
+		}
+		beforeLock(ctx)
+	}
+
 	var changed []string
-	err = s.inTxWith(ctx, func(t *writeTx) error {
+	err = s.ownerTx(ctx, owners, func(ctx context.Context, t *writeTx) error {
 		q := t.q
 		want := ids
-		if sel.Match != nil {
+		if sel.Match != nil && lsc.owner() != nil {
 			// In a scope of one owner the lock comes first, so the
 			// match already sees that owner's documents as they will
 			// be changed.
-			if o := lsc.owner(); o != nil {
-				if err := t.lockOwners(ctx, *o); err != nil {
-					return err
-				}
-			}
 			rows, total, err := s.match(ctx, t.g, m, nil)
 			if err != nil {
 				return err
@@ -620,28 +651,10 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 				return confirmMatch(sel.Fingerprint, nil)
 			}
 			want = make([]pgtype.UUID, len(rows))
-			owners := make([]int64, len(rows))
 			for i, r := range rows {
-				want[i], owners[i] = r.ID, r.OwnerID
+				want[i] = r.ID
 			}
 			beforeLock(ctx)
-			if lsc.owner() == nil {
-				if err := t.lockOwners(ctx, owners...); err != nil {
-					return err
-				}
-			}
-		} else {
-			owners, err := q.DocumentOwners(ctx, db.DocumentOwnersParams{Ids: want, Owner: lsc.owner()})
-			if err != nil {
-				return err
-			}
-			if len(owners) == 0 {
-				return ErrNotFound
-			}
-			beforeLock(ctx)
-			if err := t.lockOwners(ctx, owners...); err != nil {
-				return err
-			}
 		}
 		locked, err := q.LockDocuments(ctx, db.LockDocumentsParams{Ids: want, Owner: lsc.owner()})
 		if err != nil {
@@ -651,14 +664,15 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 		if sel.Match != nil {
 			// The match ran before the documents were locked under READ
 			// COMMITTED. In an admin's scope over all owners it also ran
-			// before the owner locks, and SQL outside the store does not
-			// take them at all: a change committed in between may have
-			// taken a document out of it. Run it again now that the
-			// documents are locked (the statement sees every change
-			// committed before the lock, and the lock keeps them as they
-			// are) and keep the locked ones that still match; a match
-			// deleted before the lock is left out too. Documents that
-			// match only now were not part of the selection.
+			// before the gate and the owner locks, on the pool, and SQL
+			// outside the store does not take them at all: a change
+			// committed in between may have taken a document out of it.
+			// Run it again now that the documents are locked (the
+			// statement sees every change committed before the lock, and
+			// the lock keeps them as they are) and keep the locked ones
+			// that still match; a match deleted before the lock is left
+			// out too. Documents that match only now were not part of the
+			// selection.
 			locked, err = s.stillMatching(ctx, t.g, m, locked)
 			if err != nil {
 				return err
