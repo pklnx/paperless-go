@@ -433,7 +433,7 @@ func TestEveryWriterLocksItsOwner(t *testing.T) {
 		"TouchAPIKey", "TouchSession", "TwoFactorChallengeUser", "UpdateDeadline", "UpdateSavedView",
 		"VerifyTwoFactorCode",
 		// The file removal (blob_removals.go): blob_removals and reads.
-		"BlobRemovalsDue", "ExclusiveSweep", "FinishBlobRemoval", "RequeueBlobRemoval", "HasDocuments", "MarkBlobRemoval", "QueueUnreferencedBlobs",
+		"BlobRemovalsDue", "ExclusiveSweep", "FinishBlobRemoval", "RequeueBlobRemoval", "HasDocuments", "MarkBlobRemoval", "NewestDocumentChange", "QueueUnreferencedBlobs",
 		"UnreferencedBlobs", "WalkCandidates",
 	} {
 		nonWriters[m] = true

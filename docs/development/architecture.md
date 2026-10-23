@@ -822,6 +822,34 @@ and thumbnail minutes before `CompleteJob`.
   marked row whose file is gone: `Remove` is fine with that. A writer whose
   `Put` re-created the file between step 2 and 3 fails once at the mark;
   its retry finds the file.
+- **The residual bound.** A committed file can only be lost when all of
+  these happen together:
+  - a sweep pass stalls for more than `MarkStale` (5 min) between its
+    `StillMarked` check and the unlink;
+  - its database session is lost during that stall;
+  - another sweep process takes the mark over and finishes;
+  - a writer stores and commits the same file before the stalled unlink
+    runs.
+
+  If the session survives the stall, no other pass gets the sweep lock;
+  if it is lost, the other pass's lock is already the proof that it is,
+  and what is left is an unlink already under way, which no check on the
+  database side can stop. This is the limit of any check-then-act between
+  a database and a filesystem. Closing it fully would need a fence in the
+  filesystem (rename the file to a tombstone, check again, then unlink or
+  rename it back, plus tombstone recovery after a crash), which is out of
+  proportion to the window.
+
+  `MarkStale` stays at 5 minutes. A raise to 15–60 minutes would only
+  require a longer stall, but the stalls that matter here are either short
+  (a pause of seconds) or open-ended (a frozen process, a suspended VM),
+  and an open-ended one outlasts an hour as easily as 5 minutes. The cost
+  of a raise is real: after a crashed pass, writers of the marked hash are
+  refused for `MarkStale` plus a round. `Retry-After` tells uploads how
+  long (at most 350 s now, about an hour then), but the processing worker
+  retries after 1 and 5 minutes only, so with a longer `MarkStale` every
+  attempt of a job whose archive or thumbnail is that hash would fail, and
+  the job with it.
 - **The grace** (`store.BlobGrace`, 1 h, `due_at` of every queued row) is
   not needed for correctness. It keeps a file that an upload or the worker
   has just stored, and no row names yet, from being queued by the walk and
@@ -841,7 +869,23 @@ and thumbnail minutes before `CompleteJob`.
   and, unless `sweep --force`, the database must have documents when the
   directory has files (`ErrEmptyDatabase`) and one walk may queue at most
   10 % of the files it saw or at most 100 (`ErrTooMany`), counted over all
-  candidates before any is queued. `migrate` writes the marker into a data
+  candidates before any is queued. Unless `--force`, the walk also keeps
+  (does not queue) the candidates whose file was written after the
+  database's newest document change (`store.NewestDocumentChange`: the
+  latest `created_at` or `modified_at` of a document, or `finished_at` of a
+  job, since a processing result does not touch `modified_at`), counts them
+  in `WalkStats.Newer`, and `serve` logs a warning, `sweep` a warning line.
+  Such files most likely belong to documents the database does not have:
+  an older dump of the same installation restored with the newer data
+  directory, where the marker matches and the newer files are below the
+  10 % stop (`TestWalkKeepsFilesNewerThanTheDatabase`). Every error of
+  this check keeps a file: an orphan of an upload that failed after the
+  last change is kept until a later change, and a file written before the
+  first change after such a restore counts as older again, so it only
+  helps right after the restore (at `serve`'s first walk, or `sweep
+  --dry-run` before it). The file times come from the data directory's
+  clock, the change times from the database's and the worker's; a skew
+  that makes files look newer only keeps them. `migrate` writes the marker into a data
   directory without a marker and without a file below `documents/`; an
   existing installation binds once with `sweep --bind`, which needs
   documents in the database and `--force` over another installation's

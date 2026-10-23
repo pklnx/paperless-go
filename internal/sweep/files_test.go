@@ -469,9 +469,11 @@ func TestQueuePassDryRun(t *testing.T) {
 func TestWalk(t *testing.T) {
 	e := newFileEnv(t)
 	e.bind()
-	e.doc(e.alice, "kept", "", "")
 	orphan := e.put("orphan")
 	late := e.put("late")
+	// After the orphans, so they are older than the newest document
+	// change (TestWalkKeepsFilesNewerThanTheDatabase).
+	e.doc(e.alice, "kept", "", "")
 	root := e.blobs.Root()
 	oldTemp, newTemp := filepath.Join(root, "tmp", "put-old"), filepath.Join(root, "tmp", "put-new")
 	for _, p := range []string{oldTemp, newTemp} {
@@ -594,7 +596,9 @@ func TestWalkRefusals(t *testing.T) {
 			e.put(fmt.Sprint("orphan ", i))
 		}
 		w, err := e.sw.Walk(e.ctx, sweep.WalkOptions{})
-		if !errors.Is(err, sweep.ErrTooMany) || w.Candidates != sweep.MinRefusal+1 || e.queued() != 0 {
+		// The orphans came after the document: the refusal reports them as
+		// newer, and --force queues them all the same.
+		if !errors.Is(err, sweep.ErrTooMany) || w.Candidates != sweep.MinRefusal+1 || w.Newer != sweep.MinRefusal+1 || e.queued() != 0 {
 			t.Fatalf("walk: %+v, %v, %d queued", w, err, e.queued())
 		}
 		if !sweep.Refused(err) {
@@ -607,14 +611,153 @@ func TestWalkRefusals(t *testing.T) {
 	t.Run("up to 100 files is no refusal", func(t *testing.T) {
 		e := newFileEnv(t)
 		e.bind()
-		e.doc(e.alice, "kept", "", "")
 		for i := range sweep.MinRefusal {
 			e.put(fmt.Sprint("orphan ", i))
 		}
+		e.doc(e.alice, "kept", "", "")
 		if w, err := e.sw.Walk(e.ctx, sweep.WalkOptions{}); err != nil || w.Queued != sweep.MinRefusal {
 			t.Fatalf("walk: %+v, %v", w, err)
 		}
 	})
+}
+
+// setModTime sets the last write of the file of hash.
+func (e *fileEnv) setModTime(hash string, t time.Time) {
+	e.t.Helper()
+	p := filepath.Join(e.blobs.Root(), "documents", hash[0:2], hash[2:4], hash)
+	if err := os.Chtimes(p, t, t); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// newestChange is the database's newest document change.
+func (e *fileEnv) newestChange() time.Time {
+	e.t.Helper()
+	t, ok, err := e.st.NewestDocumentChange(e.ctx)
+	if err != nil || !ok {
+		e.t.Fatalf("newest document change: %v, %v, %v", t, ok, err)
+	}
+	return t
+}
+
+// An older dump restored with a newer data directory: the files of the
+// newer documents are named by no document and are newer than the newest
+// document change, so the walk keeps them (counted in Newer, a warning
+// in serve's log) and queues only the older unreferenced file. --force
+// queues them too.
+func TestWalkKeepsFilesNewerThanTheDatabase(t *testing.T) {
+	e := newFileEnv(t)
+	e.bind()
+	e.doc(e.alice, "restored", "restored archive", "restored thumb")
+	newest := e.newestChange()
+	old := e.put("an orphan from before the dump")
+	e.setModTime(old, newest.Add(-time.Hour))
+	// The newer installation's document and its archive and thumbnail.
+	var newer []string
+	for i, c := range []string{"newer original", "newer archive", "newer thumb"} {
+		h := e.put(c)
+		e.setModTime(h, newest.Add(time.Duration(i+1)*time.Minute))
+		newer = append(newer, h)
+	}
+	queuedHash := func(h string) bool {
+		var n int
+		if err := e.conn.QueryRow(e.ctx, `SELECT count(*) FROM blob_removals WHERE sha256 = $1`, h).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	}
+
+	dry, err := e.sw.Walk(e.ctx, sweep.WalkOptions{DryRun: true})
+	if err != nil || dry != (sweep.WalkStats{Blobs: 7, Candidates: 4, Newer: 3}) {
+		t.Fatalf("dry run: %+v, %v", dry, err)
+	}
+	if e.queued() != 0 {
+		t.Fatal("the dry run queued")
+	}
+
+	// serve's walk: the first round of Run.
+	walks := make(chan struct{}, 1)
+	sweep.SetWalkSeam(e.sw, func() { walks <- struct{}{} })
+	tick := make(chan time.Time)
+	ctx, cancel := context.WithCancel(e.ctx)
+	done := make(chan struct{})
+	go func() {
+		e.sw.Run(ctx, tick, nil)
+		close(done)
+	}()
+	<-walks
+	tick <- e.now() // the round of that walk has finished
+	cancel()
+	<-done
+	sweep.SetWalkSeam(e.sw, nil)
+	if e.queued() != 1 || !queuedHash(old) {
+		t.Fatalf("serve's walk queued %d rows, the older file %v; want only the older file", e.queued(), queuedHash(old))
+	}
+	logs := e.logs.String()
+	if !strings.Contains(logs, "newer than the newest document change") || !strings.Contains(logs, "kept=3") {
+		t.Errorf("no warning about the kept files:\n%s", logs)
+	}
+
+	// The queue pass after the grace removes the older file only.
+	e.advance(store.BlobGrace)
+	if q, err := e.sw.QueuePass(e.ctx, false); err != nil || q != (sweep.QueueStats{Removed: 1}) {
+		t.Fatalf("queue pass: %+v, %v", q, err)
+	}
+	if e.blobs.Exists(old) {
+		t.Error("the older unreferenced file stayed")
+	}
+	for _, h := range newer {
+		if !e.blobs.Exists(h) {
+			t.Errorf("a newer file was removed: %s", h)
+		}
+	}
+
+	// A later walk keeps them again; --force queues them.
+	if w, err := e.sw.Walk(e.ctx, sweep.WalkOptions{}); err != nil || w.Candidates != 3 || w.Newer != 3 || w.Queued != 0 {
+		t.Fatalf("second walk: %+v, %v", w, err)
+	}
+	if w, err := e.sw.Walk(e.ctx, sweep.WalkOptions{Force: true}); err != nil || w.Newer != 3 || w.Queued != 3 {
+		t.Fatalf("forced walk: %+v, %v", w, err)
+	}
+	for _, h := range newer {
+		if !queuedHash(h) {
+			t.Errorf("forced walk did not queue %s", h)
+		}
+	}
+}
+
+// A file newer than the newest document's creation but older than the end
+// of a later processing job (a reprocess replaced its thumbnail, without
+// touching modified_at) is queued: the job's end counts as a change.
+func TestWalkCountsProcessingAsAChange(t *testing.T) {
+	e := newFileEnv(t)
+	e.bind()
+	d := e.doc(e.alice, "doc", "", "")
+	created := e.newestChange()
+	replaced := e.put("the thumbnail a reprocess replaced")
+	e.setModTime(replaced, created.Add(time.Minute))
+	if w, err := e.sw.Walk(e.ctx, sweep.WalkOptions{DryRun: true}); err != nil || w.Candidates != 1 || w.Newer != 1 {
+		t.Fatalf("before the reprocess: %+v, %v", w, err)
+	}
+	// The reprocess ends later (the job's finished_at).
+	e.advance(2 * time.Minute)
+	if _, err := e.st.Reprocess(e.ctx, store.ReprocessSelection{IDs: []string{d.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	j, err := e.st.ClaimJob(e.ctx, e.now(), time.Minute)
+	if err != nil || j == nil {
+		t.Fatalf("claim: %+v, %v", j, err)
+	}
+	if err := e.st.CompleteJob(e.ctx, j, e.now(), store.ProcessResult{PageCount: 1, TextSource: store.TextSourceTesseract,
+		ThumbnailSHA256: e.put("the new thumbnail")}); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.newestChange(); !got.Equal(e.now()) {
+		t.Fatalf("newest change %v, want the job's end %v", got, e.now())
+	}
+	if w, err := e.sw.Walk(e.ctx, sweep.WalkOptions{}); err != nil || w.Candidates != 1 || w.Newer != 0 || w.Queued != 1 {
+		t.Fatalf("after the reprocess: %+v, %v", w, err)
+	}
 }
 
 // migrate binds only a fresh data directory; --bind needs documents and

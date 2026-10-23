@@ -412,7 +412,7 @@ type Entry struct {
 	SHA256 string // for EntryBlob
 	Size   int64  // for regular files
 	Reason string // for EntryUnexpected
-	// ModTime is the last write of a file in tmp/, for EntryTemp.
+	// ModTime is the file's last write, for EntryBlob and EntryTemp.
 	ModTime time.Time
 }
 
@@ -470,7 +470,7 @@ func (s *Store) walkDocuments(fn func(Entry) error) error {
 		if err != nil {
 			return err
 		}
-		return fn(Entry{Kind: EntryBlob, Path: rel, SHA256: hash, Size: info.Size()})
+		return fn(Entry{Kind: EntryBlob, Path: rel, SHA256: hash, Size: info.Size(), ModTime: info.ModTime()})
 	})
 }
 

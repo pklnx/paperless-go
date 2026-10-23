@@ -28,6 +28,7 @@ docker compose stop web
 ./pgo restore --yes backups/paperless-YYYYMMDDTHHMMSSZ.dump
 # now restore the data directory from the same backup
 ./pgo migrate
+./pgo sweep --dry-run   # check: no warning about newer files
 docker compose up -d web
 ```
 
@@ -79,11 +80,30 @@ copied before the marker existed stays unbound (a warning in the log) until
 `./pgo sweep --bind`. So a database restore never removes files of the
 restored state: the walk refuses a data directory that is not the
 installation's, and the per-minute pass removes only files the restored
-database itself queued. Keeping the newer data directory with an older dump
-of the same installation does make the files that only newer documents
-needed unreferenced: the walk queues them (unless they are more than 10 %
-of the files), and they go an hour later. That is why the data directory
-goes back together with the dump, as above.
+database itself queued.
+
+**An older dump with the newer data directory.** Keeping the current data
+directory with an older dump of the same installation makes the files that
+only the newer documents needed unreferenced. The walk keeps them: a file
+no document names that is newer than the newest document change in the
+database (a document created or edited, a processing job ended) is not
+queued, and the walk warns instead, in `serve`'s log ("kept files no
+document names that are newer than the newest document change", with the
+count) and in `./pgo sweep`:
+
+```text
+walk: warning: kept 19 unreferenced files that are newer than the newest document change. ...
+```
+
+`./pgo sweep --dry-run` before starting the web server shows it, as in the
+steps above. Then put back the data directory of the same backup. If the
+files are really not needed (you restored on purpose and want the newer
+documents gone), `./pgo sweep --force` queues them once. The check only
+keeps files, it never removes one, and it is not watertight: once the
+restored server creates or edits a document, files written before that
+count as older again, and the next daily walk queues them (they go an hour
+later). So check right after the restore, and restore the data directory
+together with the dump, as above.
 
 Move the current data directory aside instead of overwriting it, and keep
 it until the restored server works: going back to the replaced database
@@ -121,12 +141,17 @@ directory is not bound to this installation (see the marker under
 directory has files, or when it would queue more than 10 % of the files
 (and more than 100). These are the signs of a wrong
 `PAPERLESS_GO_DATABASE_URL`, a restore into the wrong database or a
-reinstall that kept the data directory.
+reinstall that kept the data directory. It also keeps, with a warning, the
+unreferenced files that are newer than the newest document change, the
+sign of an older dump restored with a newer data directory (see
+[Restore](#restore)). Rarely, a file left by an upload that failed after
+the last document change is kept that way too; it is queued once a later
+document change is newer.
 
 ```sh
 ./pgo sweep --dry-run   # what one pass and one walk would do
 ./pgo sweep             # do it now; files queued now still wait an hour
-./pgo sweep --force     # once, after checking: override the 10 % and empty-database stops
+./pgo sweep --force     # once, after checking: override the 10 % and empty-database stops, queue newer files
 ./pgo sweep --bind      # bind the data directory to this installation (see the upgrade note)
 ```
 

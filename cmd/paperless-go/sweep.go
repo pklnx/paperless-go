@@ -31,13 +31,16 @@ The walk only runs in a data directory bound to this installation (the
 file "installation" in it, written by migrate into a fresh data directory),
 and it queues nothing when the database has no documents but the data
 directory has files, or when it would queue more than 10 % of the files.
+It keeps the files no document names that are newer than the newest
+document change (after a restore of an older backup with a newer data
+directory) and warns about them.
 
   --bind     bind an existing data directory to this installation (once,
              after the upgrade that added the marker); it needs documents
              in the database, and --force to replace a marker of another
              installation
-  --force    override the 10 % and empty-database stops for this run (or,
-             with --bind, bind anyway)
+  --force    override the 10 % and empty-database stops for this run and
+             queue the newer files too (or, with --bind, bind anyway)
   --dry-run  only report what would be done`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -91,7 +94,11 @@ directory has files, or when it would queue more than 10 % of the files.
 			w, walkErr := s.Walk(ctx, sweep.WalkOptions{DryRun: dryRun, Force: force})
 			queued, temp := fmt.Sprintf("queued: %d", w.Queued), "temporary files removed"
 			if dryRun {
-				queued, temp = fmt.Sprintf("would queue: %d", w.Candidates), "stale temporary files"
+				n := w.Candidates
+				if !force {
+					n -= w.Newer
+				}
+				queued, temp = fmt.Sprintf("would queue: %d", n), "stale temporary files"
 			}
 			switch {
 			case errors.Is(walkErr, store.ErrSweepRunning):
@@ -106,12 +113,21 @@ directory has files, or when it would queue more than 10 % of the files.
 				} else {
 					hint = fmt.Sprintf("; check %s and the data directory", config.EnvDatabaseURL)
 				}
+				if w.Newer > 0 && errors.Is(walkErr, sweep.ErrTooMany) {
+					hint += fmt.Sprintf("; %d of the unreferenced files are newer than the newest document change "+
+						"(an older backup restored with a newer data directory?), and --force would queue them too", w.Newer)
+				}
 				fmt.Fprintf(out, "walk: refused: %v (files: %d, unreferenced: %d)%s\n", walkErr, w.Blobs, w.Candidates, hint)
 			case walkErr != nil:
 				return walkErr
 			default:
 				fmt.Fprintf(out, "walk: files: %d, unreferenced: %d, %s, %s: %d, unexpected entries: %d\n",
 					w.Blobs, w.Candidates, queued, temp, w.Temp, w.Unexpected)
+				if w.Newer > 0 && !force {
+					fmt.Fprintf(out, "walk: warning: kept %d unreferenced files that are newer than the newest document change. "+
+						"If an older backup was restored, put back the data directory of the same backup; "+
+						"if these files are not needed, run %s sweep --force once\n", w.Newer, commandName())
+				}
 			}
 			if walkErr != nil || q.Failed > 0 {
 				return &exitError{code: 1, msg: "the sweep did not finish"}

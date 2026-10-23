@@ -619,3 +619,44 @@ func TestHoldBlobsLookupError(t *testing.T) {
 		t.Fatalf("create with a failing lookup: %v", err)
 	}
 }
+
+// NewestDocumentChange is the latest creation, edit or job end of any
+// document, none without documents and jobs; a trashed document counts.
+func TestNewestDocumentChange(t *testing.T) {
+	st := storetest.New(t)
+	ctx := context.Background()
+	if got, ok, err := st.NewestDocumentChange(ctx); err != nil || ok {
+		t.Fatalf("empty database: %v, %v, %v", got, ok, err)
+	}
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	doc := mustDoc(t, st, alice, newDoc("first"))
+	newest := func(want time.Time, what string) {
+		t.Helper()
+		got, ok, err := st.NewestDocumentChange(ctx)
+		if err != nil || !ok || !got.Equal(want) {
+			t.Fatalf("after %s: %v, %v, %v; want %v", what, got, ok, err, want)
+		}
+	}
+	newest(doc.CreatedAt, "the creation")
+	patched, err := st.PatchDocument(ctx, alice, doc.ID, store.DocumentPatch{Title: ptr("edited")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newest(patched.ModifiedAt, "an edit")
+	// A processing job ends later; its result does not touch modified_at.
+	end := patched.ModifiedAt.Add(time.Hour).Truncate(time.Microsecond)
+	j, err := st.ClaimJob(ctx, end, time.Minute)
+	if err != nil || j == nil {
+		t.Fatalf("claim: %+v, %v", j, err)
+	}
+	if err := st.CompleteJob(ctx, j, end, store.ProcessResult{PageCount: 1, TextSource: store.TextSourceTesseract}); err != nil {
+		t.Fatal(err)
+	}
+	newest(end, "a job's end")
+	if err := st.TrashDocument(ctx, alice, doc.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := st.NewestDocumentChange(ctx); err != nil || !ok || got.Before(end) {
+		t.Fatalf("trashed: %v, %v, %v", got, ok, err)
+	}
+}

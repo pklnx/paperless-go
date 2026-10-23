@@ -212,6 +212,38 @@ func TestSweepCommand(t *testing.T) {
 	if err != nil || !strings.Contains(out, "queue: removed: 1") || blobs.Exists(orphan.SHA256) || !blobs.Exists(kept.SHA256) {
 		t.Fatalf("sweep after the grace: %q, %v", out, err)
 	}
+	// A file no document names that is newer than the newest document
+	// change (an older dump restored with a newer data directory): kept,
+	// with a warning, unless --force.
+	newer, _, err := blobs.Put(strings.NewReader("newer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(dir, newer.Path), future, future); err != nil {
+		t.Fatal(err)
+	}
+	warning := "walk: warning: kept 1 unreferenced files that are newer than the newest document change"
+	for _, c := range []struct {
+		args       []string
+		want       string
+		warns      bool
+		queuedRows int
+	}{
+		{[]string{"sweep", "--dry-run"}, "walk: files: 2, unreferenced: 1, would queue: 0,", true, 0},
+		{[]string{"sweep", "--dry-run", "--force"}, "walk: files: 2, unreferenced: 1, would queue: 1,", false, 0},
+		{[]string{"sweep"}, "walk: files: 2, unreferenced: 1, queued: 0,", true, 0},
+		{[]string{"sweep", "--force"}, "walk: files: 2, unreferenced: 1, queued: 1,", false, 1},
+	} {
+		out, err := run(t, url, c.args...)
+		if err != nil || !strings.Contains(out, c.want) || strings.Contains(out, warning) != c.warns {
+			t.Fatalf("%v: %q, %v; want %q, warning %v", c.args, out, err, c.want, c.warns)
+		}
+		var n int
+		if err := conn.QueryRow(context.Background(), `SELECT count(*) FROM blob_removals WHERE sha256 = $1`, newer.SHA256).Scan(&n); err != nil || n != c.queuedRows {
+			t.Fatalf("%v: %d rows, %v", c.args, n, err)
+		}
+	}
 	// A data directory of another installation: the queue pass removes
 	// nothing and the command exits 1.
 	marker := filepath.Join(dir, sweep.MarkerFile)

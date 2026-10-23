@@ -445,3 +445,17 @@ func (s *Store) QueueUnreferencedBlobs(ctx context.Context, hashes []string, due
 func (s *Store) HasDocuments(ctx context.Context) (bool, error) {
 	return s.q.HasDocuments(ctx)
 }
+
+// NewestDocumentChange is the latest time a document was created or
+// changed or a processing job (which stores the archive and the
+// thumbnail) ended; ok is false when there is none. A file no document
+// names that was written after it most likely belongs to documents the
+// database does not have, such as after a restore of an older dump with a
+// newer data directory: the walk keeps those (sweep.WalkStats.Newer).
+func (s *Store) NewestDocumentChange(ctx context.Context) (newest time.Time, ok bool, err error) {
+	r, err := s.q.NewestDocumentChange(ctx)
+	if err != nil || !r.Found {
+		return time.Time{}, false, err
+	}
+	return r.Newest, true, nil
+}

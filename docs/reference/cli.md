@@ -89,14 +89,19 @@ later pass. The walk queues the files no document names and removes
 temporary files older than a day. It refuses, queues nothing and exits with
 status 1 when the data directory is not bound to this installation, when
 the database has no documents but the data directory has files, or when it
-would queue more than 10 % of the files (and more than 100). Only one sweep
+would queue more than 10 % of the files (and more than 100). Files no
+document names that are newer than the newest document change (a creation,
+an edit or the end of a processing job) are kept, not queued, with a
+warning line: they most likely belong to documents this database does not
+have, as after a restore of an older backup that kept the newer data
+directory (see [Restore](../guide/operations#restore)). Only one sweep
 runs at a time: while another one runs (`serve`'s sweeper, for a moment
 every minute), it does nothing, says so and exits with status 1.
 
 | Flag | Does |
 |---|---|
 | `--dry-run` | Only reports what the pass and the walk would do. |
-| `--force` | Overrides the empty-database and 10 % stops for this run, after you checked that the database and the data directory belong together. Never overrides the binding. |
+| `--force` | Overrides the empty-database and 10 % stops for this run and also queues the files newer than the newest document change, after you checked that the database and the data directory belong together. Never overrides the binding. |
 | `--bind` | Binds the data directory to this installation (writes `installation` into it) and does nothing else. It refuses when the database has no documents, and when the data directory is bound to another installation, unless `--force`. Run it once on an installation from before the marker. |
 
 ## Audit log
