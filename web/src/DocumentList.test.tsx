@@ -495,6 +495,13 @@ describe("processing status", () => {
     });
   });
   const live = () => timers.filter((x) => !x.cleared);
+  // A timer that fired is no longer pending, so a wait for the next one sees
+  // only the timer armed after the poll ended.
+  const fire = () => {
+    const x = live()[0]!;
+    x.cleared = true;
+    act(() => x.fn());
+  };
 
   it("shows a badge per state, the error of a failed document and the thumbnail", async () => {
     server.documents = () =>
@@ -545,13 +552,13 @@ describe("processing status", () => {
     // A failed poll keeps the list and tries again.
     const ok = globalThis.fetch;
     vi.stubGlobal("fetch", (url: string, init?: RequestInit) => (url.startsWith("/api/documents?") ? Promise.reject(new TypeError("Failed to fetch")) : ok(url, init)));
-    act(() => live()[0]!.fn());
+    fire();
     await waitFor(() => expect(live()).toHaveLength(1));
     expect(screen.getByText("Later")).toBeTruthy();
     vi.stubGlobal("fetch", ok);
 
     state = "done";
-    act(() => live()[0]!.fn());
+    fire();
     await waitFor(() => expect(within(row("Scan")).queryByRole("status")).toBeNull());
     expect(lists.length).toBe(before + 1);
     expect(lists.at(-1)!.has("cursor")).toBe(false);
