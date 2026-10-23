@@ -716,6 +716,16 @@ describe("notes in Markdown (#12)", () => {
     expect(within(rendered()).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["•eins", "•zwei"]);
   });
 
+  it("opens a note nested thousands deep, and Edit opens it as text", async () => {
+    const notes = "*a ".repeat(20_000) + "b*".repeat(20_000);
+    serve(doc("d1", "A", { notes }));
+    await openAt("/?doc=d1");
+    expect(rendered().querySelector("em")).not.toBeNull();
+    fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
+    expect(notesArea()!.value).toBe(notes);
+    expect(detail().queryByTestId("notes-rendered")).toBeNull();
+  });
+
   it("shows the textarea again when the server refuses the notes", async () => {
     serve(doc("d1", "A", { notes: "alt" }));
     await openAt("/?doc=d1");

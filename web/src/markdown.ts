@@ -282,8 +282,28 @@ function heading(line: string, steps: Steps): { level: 1 | 2 | 3; text: string }
 interface Tok {
   text: string;
   node: Inline | null;
+  /** The node's nesting depth (1 for a node without nodes inside). */
+  depth?: number;
   prev: Tok | null;
   next: Tok | null;
+}
+
+/**
+ * The deepest nesting of inline nodes (emphasis, links, images). A node
+ * that would be deeper keeps its own formatting but shows its content as
+ * plain text, so rendering never recurses deeper than this, whatever the
+ * input (`*a *a … b* b*` thousands deep would overflow the stack).
+ */
+export const maxInlineDepth = 16;
+
+/** The text of inline nodes, without their formatting. */
+function plainText(nodes: Inline[], steps: Steps): string {
+  let out = "";
+  for (const node of nodes) {
+    steps.n++;
+    out += node.t === "text" || node.t === "code" ? node.v : plainText(node.c, steps);
+  }
+  return out;
 }
 
 /** A run of "*", "_" or "~~" that may open or close emphasis. */
@@ -335,9 +355,9 @@ export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
     append({ text: buf, node: null, prev: null, next: null });
     buf = "";
   };
-  const addNode = (node: Inline) => {
+  const addNode = (node: Inline, depth = 1) => {
     flush();
-    append({ text: "", node, prev: null, next: null });
+    append({ text: "", node, depth, prev: null, next: null });
   };
 
   let delimHead: Delim | null = null;
@@ -355,12 +375,18 @@ export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
   let linkFloor = 0;
 
   /** The tokens after `from` and before `stop` (null: to the end), unlinked, as inline nodes. */
+  /** The deepest node among the tokens the last collect took. */
+  let collectedDepth = 0;
   const collect = (from: Tok, stop: Tok | null): Inline[] => {
     const out: Inline[] = [];
+    collectedDepth = 0;
     let tok = from.next;
     while (tok && tok !== stop) {
       steps.n++;
-      if (tok.node) out.push(tok.node);
+      if (tok.node) {
+        out.push(tok.node);
+        collectedDepth = Math.max(collectedDepth, tok.depth ?? 1);
+      }
       else if (tok.text !== "") {
         const last = out[out.length - 1];
         if (last?.t === "text") last.v += tok.text;
@@ -372,6 +398,15 @@ export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
     if (tok) tok.prev = from;
     else tail = from;
     return out;
+  };
+
+  /**
+   * The children of a new node taken by the last collect, and the node's
+   * depth: beyond maxInlineDepth the children become their plain text.
+   */
+  const nest = (children: Inline[]): { c: Inline[]; depth: number } => {
+    if (collectedDepth + 1 <= maxInlineDepth) return { c: children, depth: collectedDepth + 1 };
+    return { c: [{ t: "text", v: plainText(children, steps) }], depth: 1 };
   };
 
   /** CommonMark's "process emphasis" over the delimiters above `bottom`. */
@@ -404,8 +439,9 @@ export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
         continue;
       }
       const use = closer.ch === "~" ? 2 : found.count >= 2 && closer.count >= 2 ? 2 : 1;
-      const node: Inline = { t: closer.ch === "~" ? "del" : use === 2 ? "strong" : "em", c: collect(found.tok, closer.tok) };
-      const nodeTok: Tok = { text: "", node, prev: found.tok, next: found.tok.next };
+      const inner = nest(collect(found.tok, closer.tok));
+      const node: Inline = { t: closer.ch === "~" ? "del" : use === 2 ? "strong" : "em", c: inner.c };
+      const nodeTok: Tok = { text: "", node, depth: inner.depth, prev: found.tok, next: found.tok.next };
       if (found.tok.next) found.tok.next.prev = nodeTok;
       found.tok.next = nodeTok;
       if (tail === found.tok) tail = nodeTok;
@@ -513,10 +549,10 @@ export function parseInline(s: string, steps: Steps = { n: 0 }): Inline[] {
       }
       flush();
       processEmphasis(opener.delimBefore);
-      const children = collect(opener.tok, null);
+      const inner = nest(collect(opener.tok, null));
       unlink(opener.tok);
       const href = opener.image ? null : safeHref(dest.url);
-      addNode(href ? { t: "link", href, c: children } : { t: "plain", c: children });
+      addNode(href ? { t: "link", href, c: inner.c } : { t: "plain", c: inner.c }, inner.depth);
       if (!opener.image) linkFloor = seq;
       i = dest.end + 1;
       continue;

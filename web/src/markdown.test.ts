@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { cleanup, render } from "@testing-library/react";
 import markdownSource from "./markdown.ts?raw";
 import detailSource from "./DocumentDetail.tsx?raw";
-import { parseInline, parseNotes, renderNotes, safeHref, type Inline, type Steps } from "./markdown";
+import { maxInlineDepth, parseInline, parseNotes, renderNotes, safeHref, type Block, type Inline, type Steps } from "./markdown";
 
 // The notes' Markdown: the app's subset (MarkdownNotes.swift), links only
 // to http, https, mailto and tel, and work bounded by the input's length.
@@ -316,5 +316,57 @@ describe("work bound", () => {
     parseNotes("*a ".repeat(100), short);
     parseNotes("*a ".repeat(1000), long);
     expect(long.n).toBeGreaterThan(5 * short.n);
+  });
+});
+
+describe("nesting depth", () => {
+  /** The deepest nesting of inline nodes. */
+  const depth = (nodes: Inline[]): number => {
+    let max = 0;
+    for (const n of nodes) if (n.t !== "text" && n.t !== "code") max = Math.max(max, 1 + depth(n.c));
+    return max;
+  };
+  const blockDepth = (blocks: Block[]) => {
+    let max = 0;
+    for (const b of blocks) if ("text" in b && typeof b.text !== "string") max = Math.max(max, depth(b.text));
+    return max;
+  };
+  const size = 100_000;
+  /** k openers, then k closers: k levels deep, at least size characters. */
+  const nested = (open: string, close: string, middle = "") => {
+    const k = Math.ceil((size - middle.length) / (open.length + close.length));
+    return open.repeat(k) + middle + close.repeat(k);
+  };
+  const inputs: [string, string][] = [
+    ["emphasis", nested("*a ", "b*")],
+    ["strong", nested("**a ", "b**")],
+    ["strikethrough", nested("~~a ", "b~~")],
+    ["images", nested("![", "](x)", "a")],
+    ["emphasis inside link text", `[${nested("*a ", "b*")}](https://a.example)`],
+    ["emphasis inside a quote", `> ${nested("*a ", "b*")}`],
+    ["images inside a link", `[${nested("![", "](x)", "a")}](https://a.example)`],
+  ];
+
+  it.each(inputs)("%s, 100 000 characters deep: nesting capped, linear work, and it renders", (_, md) => {
+    expect(md.length).toBeGreaterThanOrEqual(size);
+    const steps: Steps = { n: 0 };
+    const blocks = parseNotes(md, steps);
+    expect(blockDepth(blocks)).toBeLessThanOrEqual(maxInlineDepth);
+    expect(steps.n).toBeLessThanOrEqual(10 * md.length);
+    const el = show(md);
+    expect(el.textContent).toContain("a");
+  });
+
+  it("keeps the formatting up to the cap and shows deeper content as text", () => {
+    const shallow = parseInline("*a ".repeat(3) + "b*".repeat(3));
+    expect(depth(shallow)).toBe(3);
+    const full = parseInline("*a ".repeat(maxInlineDepth) + "b*".repeat(maxInlineDepth));
+    expect(depth(full)).toBe(maxInlineDepth);
+    const deep = parseInline("*a ".repeat(40) + "b*".repeat(40));
+    expect(depth(deep)).toBeLessThanOrEqual(maxInlineDepth);
+    expect(deep[0]!.t).toBe("em");
+    // Nothing of the text is lost.
+    const text = (nodes: Inline[]): string => nodes.map((n) => (n.t === "text" || n.t === "code" ? n.v : text(n.c))).join("");
+    expect(text(deep)).toBe("a ".repeat(40) + "b".repeat(40));
   });
 });

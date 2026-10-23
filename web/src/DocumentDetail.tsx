@@ -11,7 +11,7 @@ import { button, input, primary } from "./styles";
 import { buildTagTree, type TagNode } from "./tagTree";
 import { sortByName } from "./collate";
 import { formatSize } from "./uploads";
-import { renderNotes } from "./markdown";
+import { NotesView } from "./NotesView";
 import { formatState, parseState, setNavigationGuard } from "./urlState";
 
 interface Props {
@@ -365,9 +365,6 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     return row.id;
   };
 
-  const notesText = form?.notes ?? "";
-  const renderedNotes = useMemo(() => renderNotes(notesText), [notesText]);
-
   const metaData = meta && doc && meta.owner === doc.ownerId ? meta.data : null;
   const options = useMemo(() => {
     if (!metaData) return null;
@@ -525,7 +522,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
                       </>
                     ) : (
                       <div role="group" aria-labelledby={`${headingId}-notes-label`} data-testid="notes-rendered" className="flex flex-col gap-2 text-sm wrap-anywhere">
-                        {form.notes !== "" ? renderedNotes : <p className="text-ink-muted">{t.notesNone}</p>}
+                        {form.notes !== "" ? <NotesView text={form.notes} /> : <p className="text-ink-muted">{t.notesNone}</p>}
                       </div>
                     )}
                     {fieldError("notes")}
