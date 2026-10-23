@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pklnx/paperless-go/internal/store"
 )
@@ -343,5 +344,63 @@ func TestASNTakenInTrash(t *testing.T) {
 	resp, out := f.do("PATCH", docPath(f.ids["Strom"]), map[string]any{"archiveSerialNumber": 5})
 	if resp.StatusCode != 409 || out["code"] != codeASNTaken || out["documentId"] != f.ids["Telekom"] || out["trashed"] != true {
 		t.Errorf("asn of a trashed document: %d %v", resp.StatusCode, out)
+	}
+}
+
+// The automatic restore for an upload-only key meets a document that
+// changed after the duplicate check. One that became due for purge in
+// between (the store's clock passes the retention between the two
+// decisions) answers 503 with Retry-After, never "duplicate", and
+// restores nothing; one that someone else restored in between is a plain
+// duplicate, not an error.
+func TestUploadKeyRestoreRaces(t *testing.T) {
+	f, _ := newTrashFixture(t)
+	phone := f.createKey("iPhone", []string{"upload"}, "")
+	id := f.uploadOK("letter.pdf", pdf("letter"))
+	f.expect("DELETE", docPath(id), nil, 204)
+	ctx := context.Background()
+
+	// The first decision (the duplicate check) sees it trashed; from the
+	// second on (the restore) the retention has passed.
+	var calls atomic.Int32
+	f.setStoreNow(func() time.Time {
+		if calls.Add(1) == 1 {
+			return time.Now()
+		}
+		return time.Now().Add(store.DefaultTrashRetention + time.Hour)
+	})
+	n := len(auditLog(t, f.st))
+	resp, out := f.keyUpload(phone, "again.pdf", pdf("letter"))
+	f.setStoreNow(nil)
+	if resp.StatusCode != 503 || resp.Header.Get("Retry-After") != purgeRetryAfter || out["duplicate"] != nil {
+		t.Errorf("due after the check: %d %v %q", resp.StatusCode, out, resp.Header.Get("Retry-After"))
+	}
+	if calls.Load() < 2 {
+		t.Errorf("%d store clock calls, want the check and the restore", calls.Load())
+	}
+	if d := f.doc(id); d.DeletedAt == nil {
+		t.Error("restored although it was due")
+	}
+	if e := newEntries(t, f.st, n); len(e) != 0 {
+		t.Errorf("entries: %+v", e)
+	}
+
+	// Restored by someone else between the check and the key's restore.
+	calls.Store(0)
+	f.setStoreNow(func() time.Time {
+		if calls.Add(1) == 2 {
+			if _, err := f.st.RestoreDocument(ctx, f.alice, id); err != nil {
+				t.Errorf("concurrent restore: %v", err)
+			}
+		}
+		return time.Now()
+	})
+	resp, out = f.keyUpload(phone, "again.pdf", pdf("letter"))
+	f.setStoreNow(nil)
+	if resp.StatusCode != 200 || fmt.Sprint(out) != "map[duplicate:true]" {
+		t.Errorf("restored meanwhile: %d %v", resp.StatusCode, out)
+	}
+	if d := f.doc(id); d.DeletedAt != nil {
+		t.Error("not live after the concurrent restore")
 	}
 }

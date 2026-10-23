@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,6 +59,19 @@ type authFixture struct {
 	handler   http.Handler
 	// secrets are the TOTP secrets by user name, for login.
 	secrets map[string]string
+	// storeNow, when set, is the store's clock (setStoreNow); the wall
+	// clock otherwise.
+	storeNow *atomic.Pointer[func() time.Time]
+}
+
+// setStoreNow makes now the store's clock for the trash decisions (nil:
+// the wall clock again). It may be called while the server runs.
+func (f *authFixture) setStoreNow(now func() time.Time) {
+	if now == nil {
+		f.storeNow.Store(nil)
+		return
+	}
+	f.storeNow.Store(&now)
 }
 
 func newAuthFixture(t *testing.T) *authFixture {
@@ -78,6 +92,13 @@ func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 func newAuthFixtureDB(t *testing.T, opts Options, params map[string]string) *authFixture {
 	t.Helper()
 	st, dbURL := storetest.NewWithParams(t, params)
+	storeNow := &atomic.Pointer[func() time.Time]{}
+	st.Now = func() time.Time {
+		if f := storeNow.Load(); f != nil {
+			return (*f)()
+		}
+		return time.Now()
+	}
 	key := bytes.Repeat([]byte{7}, crypto.KeySize)
 	sealer, err := crypto.NewSealer(key)
 	if err != nil {
@@ -99,7 +120,7 @@ func newAuthFixtureDB(t *testing.T, opts Options, params map[string]string) *aut
 	jar, _ := cookiejar.New(nil)
 	return &authFixture{
 		t: t, st: st, srv: srv, client: &http.Client{Jar: jar}, clock: clock, dbURL: dbURL,
-		sealer: sealer, secretKey: key, blobs: blobs, handler: h, secrets: map[string]string{},
+		sealer: sealer, secretKey: key, blobs: blobs, handler: h, secrets: map[string]string{}, storeNow: storeNow,
 	}
 }
 

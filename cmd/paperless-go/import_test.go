@@ -10,11 +10,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/pklnx/paperless-go/internal/blobstore"
 	"github.com/pklnx/paperless-go/internal/config"
+	"github.com/pklnx/paperless-go/internal/ingest"
 	"github.com/pklnx/paperless-go/internal/store"
 	"github.com/pklnx/paperless-go/internal/store/storetest"
 )
@@ -369,5 +373,59 @@ func TestImportRestoresTrashedDocument(t *testing.T) {
 	}
 	if summary["restored"] != float64(1) || summary["imported"] != float64(0) {
 		t.Errorf("summary: %v", summary)
+	}
+}
+
+// A document that becomes due for purge between the duplicate check and
+// the restore (the store's clock passes the retention between the two
+// decisions) fails the file, which a later run imports as new; it is not
+// counted as restored, and nothing is restored.
+func TestImportRestoreOfDocumentDueMeanwhile(t *testing.T) {
+	st, _ := importEnv(t)
+	ctx := context.Background()
+	alice := storetest.User(t, st, "alice", false)
+	var calls atomic.Int32
+	jumpAfter := int32(1 << 30)
+	st.Now = func() time.Time {
+		if calls.Add(1) > jumpAfter {
+			return time.Now().Add(store.DefaultTrashRetention + time.Hour)
+		}
+		return time.Now()
+	}
+	blobs, err := blobstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	im, err := ingest.New(st, blobs, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	m := &importer{
+		ctx: ctx, out: &out, st: st, im: im, owner: alice, maxSize: 1 << 20,
+		entry: func(action string) *store.AuditEntry { return &store.AuditEntry{Actor: store.ActorCLI, Action: action} },
+	}
+	src := t.TempDir()
+	writeFile(t, src, "a.pdf", tinyPDF("a"))
+	m.file(filepath.Join(src, "a.pdf"), "a.pdf", "a.pdf")
+	docs, err := st.ListDocuments(ctx, store.Scope{UserID: alice.ID})
+	if err != nil || len(docs) != 1 {
+		t.Fatalf("documents: %v, %v", docs, err)
+	}
+	if err := st.TrashDocument(ctx, store.Scope{UserID: alice.ID}, docs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The duplicate check is the first decision; the restore comes after.
+	m.tally, out = importTally{}, bytes.Buffer{}
+	calls.Store(0)
+	jumpAfter = 1
+	m.file(filepath.Join(src, "a.pdf"), "a.pdf", "a.pdf")
+	jumpAfter = 1 << 30
+	if m.tally != (importTally{failed: 1}) || !strings.Contains(out.String(), "a.pdf: failed: the existing document is being removed permanently") {
+		t.Errorf("tally %+v, output:\n%s", m.tally, out.String())
+	}
+	if d, err := st.GetDocument(ctx, store.Scope{UserID: alice.ID}, docs[0].ID); err != nil || d.DeletedAt == nil {
+		t.Errorf("document: %+v, %v", d, err)
 	}
 }

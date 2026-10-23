@@ -530,3 +530,26 @@ func TestImportTrashedDuplicate(t *testing.T) {
 		t.Errorf("after the purge: %+v", res)
 	}
 }
+
+// goneAfterCollision answers every duplicate check with "no document": the
+// first as if a concurrent import created the row right after it, the
+// lookup after the insert's collision as if the row was purged since.
+type goneAfterCollision struct{ ingest.Store }
+
+func (goneAfterCollision) FindDocumentByOriginal(context.Context, int64, string) (*store.DocumentRef, error) {
+	return nil, store.ErrNotFound
+}
+
+// A collision whose document cannot be found afterwards (purged in
+// between) is no duplicate: nothing holds the file, so it is the transient
+// ErrPurgePending, and a retry imports the file as new.
+func TestImportCollisionWithPurgedDocument(t *testing.T) {
+	e := newEnv(t)
+	pdf := pdfOfSize(250, 'g')
+	run(t, e.importer(t, 1<<20), e.user.ID, "Brief.pdf", pdf)
+	im := e.importerWith(t, goneAfterCollision{Store: e.st}, e.blobs, 1<<20)
+	res, err := im.Import(context.Background(), ingest.Request{OwnerID: e.user.ID, FileName: "Brief.pdf", Body: bytes.NewReader(pdf)})
+	if !errors.Is(err, store.ErrPurgePending) || res.Outcome == ingest.Duplicate {
+		t.Errorf("collision with a purged document: %+v, %v", res, err)
+	}
+}

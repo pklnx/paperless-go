@@ -377,11 +377,17 @@ does not run while migrations are pending anyway). Deleting a document now moves
 permanently", `serve` removes the row within a minute and records it in
 the audit log. Its files stay on disk for now; removing them comes with
 the next part of #12 (about an hour after the purge). A user who has
-documents in the trash cannot be removed until they are purged. Rolling
-the migration back (`migrate down`) brings every trashed document back as
-a live one and forgets the queued file removals (the files stay); it works
-only until the first audit entry about a saved view, after which going
-back needs a backup restore.
+documents in the trash cannot be removed until they are purged. An invalid
+`PAPERLESS_GO_TRASH_RETENTION` (negative or unreadable) stops every
+command, not only `serve`: `migrate`, `user`, `import` and the others read
+it too. Rolling the migration back (`migrate down`) brings every trashed
+document back as a live one, including those whose "delete permanently"
+was asked for but not yet carried out by the sweeper (their
+`document.purge` stays in the log): in the old version they show up again
+in every list and search, so empty the trash and let the sweeper finish
+(a minute) before going back if that matters. It forgets the queued file
+removals (the files stay), and works only until the first audit entry
+about a saved view, after which going back needs a backup restore.
 
 ### Versions
 

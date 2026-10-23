@@ -105,8 +105,8 @@ type Result struct {
 	// Document is the new document (Imported).
 	Document *store.Document
 	// Existing is the owner's document that already has the file
-	// (Duplicate). Its ID is empty in the rare case that the document was
-	// deleted between the collision and the lookup. Existing.Trashed says
+	// (Duplicate). Its ID is empty when the lookup after a collision failed
+	// for another reason than the row being gone. Existing.Trashed says
 	// that it is in the trash; the caller decides whether to restore it.
 	Existing store.DocumentRef
 	// Refusal says why the file was refused (Refused).
@@ -216,10 +216,14 @@ func (im *Importer) Import(ctx context.Context, req Request) (Result, error) {
 	var dup *store.DuplicateError
 	if errors.As(err, &dup) {
 		res := Result{Outcome: Duplicate, Existing: store.DocumentRef{ID: dup.ExistingID}}
-		if ref, lerr := im.store.FindDocumentByOriginal(ctx, req.OwnerID, blob.SHA256); lerr == nil {
-			if ref.Due {
-				return Result{}, fmt.Errorf("ingest: create document: %w", store.ErrPurgePending)
-			}
+		ref, lerr := im.store.FindDocumentByOriginal(ctx, req.OwnerID, blob.SHA256)
+		switch {
+		case lerr == nil && ref.Due, errors.Is(lerr, store.ErrNotFound):
+			// Due for purge, or purged since the collision: no document
+			// holds the file now, so it is not a duplicate; a retry
+			// imports it as new.
+			return Result{}, fmt.Errorf("ingest: create document: %w", store.ErrPurgePending)
+		case lerr == nil:
 			res.Existing = *ref
 		}
 		return res, nil

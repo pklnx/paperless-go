@@ -791,10 +791,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			re.SetTarget(store.TargetDocument, res.Existing.ID, res.Existing.Title)
 			re.Detail("via", "upload")
 			_, err := s.store.RestoreDocument(withAudit(r, re), store.Scope{UserID: sc.UserID}, res.Existing.ID)
-			if errors.Is(err, store.ErrNotFound) {
+			switch {
+			case errors.Is(err, store.ErrNotFound):
 				// Due for purge (or purged) since the duplicate check:
 				// the next try imports the file as new.
 				err = store.ErrPurgePending
+			case errors.Is(err, store.ErrNotInTrash):
+				// Restored by someone else meanwhile: a plain duplicate.
+				err = nil
 			}
 			if err != nil {
 				s.failStore(w, r, err)

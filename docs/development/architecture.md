@@ -688,7 +688,10 @@ purge too), and the sweeper deletes its row.
   `import` reports a failure), because a client that heard "duplicate"
   would not retry while the only copy goes. The same holds when the
   restore itself finds the document due (`ErrNotFound`, a window of at
-  most a minute).
+  most a minute), and when the lookup after an insert's collision finds
+  no document any more (purged in between). A restore that finds the
+  document live (someone restored it meanwhile, `ErrNotInTrash`) is a
+  plain duplicate for an upload-only key.
 - **Not yet.** The files of a purged row stay until #12, part 2 removes
   the queued ones that no document references (with a per-hash lock
   against a concurrent upload of the same file). #10's export decides

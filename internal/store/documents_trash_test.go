@@ -441,8 +441,9 @@ func TestPurgeDueDocuments(t *testing.T) {
 	}
 }
 
-// A document restored between the sweeper's scan and its lock stays: the
-// sweeper checks again under the lock.
+// A document restored between the sweeper's scan and its lock stays, and so
+// does one restored and trashed again: the sweeper checks again under the
+// lock.
 func TestPurgeDueSkipsRestoredDocument(t *testing.T) {
 	st, url, clock := trashStore(t)
 	ctx := context.Background()
@@ -471,6 +472,33 @@ func TestPurgeDueSkipsRestoredDocument(t *testing.T) {
 	var n int
 	if err := connect(t, url).QueryRow(ctx, `SELECT count(*) FROM blob_removals`).Scan(&n); err != nil || n != 0 {
 		t.Errorf("queued: %d, %v", n, err)
+	}
+
+	// Restored and trashed again between the scan and the lock: in the
+	// trash, but with a new deleted_at that is not due. Only the recheck
+	// under the lock keeps it (the delete's own condition would not).
+	two := mustDoc(t, st, alice, newDoc("two"))
+	if err := st.TrashDocument(ctx, alice, two.ID); err != nil {
+		t.Fatal(err)
+	}
+	clock.Add(store.DefaultTrashRetention)
+	again := store.WithBeforeLock(ctx, func() {
+		st.Now = func() time.Time { return clock.Now().Add(-time.Second) }
+		_, err := st.RestoreDocument(ctx, alice, two.ID)
+		st.Now = clock.Now
+		if err != nil {
+			t.Errorf("restore: %v", err)
+		}
+		if err := st.TrashDocument(ctx, alice, two.ID); err != nil {
+			t.Errorf("trash again: %v", err)
+		}
+	})
+	res, err = st.PurgeDueDocuments(again, clock.Now(), store.DefaultTrashRetention, 100)
+	if err != nil || res != (store.PurgeResult{Scanned: 1}) {
+		t.Fatalf("purge after a new trash: %+v, %v", res, err)
+	}
+	if d := getDoc(t, st, two.ID); d.DeletedAt == nil || !d.DeletedAt.Equal(clock.Now()) {
+		t.Errorf("trashed again: %+v", d.DeletedAt)
 	}
 }
 
