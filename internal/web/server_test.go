@@ -75,9 +75,14 @@ func TestStrictTransportSecurity(t *testing.T) {
 		{"direct TLS", "192.0.2.1:1234", "", true, "max-age=31536000"},
 		{"loopback proxy", "127.0.0.1:4000", "https", false, "max-age=31536000"},
 		{"trusted proxy", "10.1.2.3:4000", "https", false, "max-age=31536000"},
+		// IPv4-mapped peers count as their IPv4 address (peerAddr unmaps);
+		// the loopback case holds without that too (IsLoopback unmaps).
+		{"IPv4-mapped trusted proxy", "[::ffff:10.1.2.3]:4000", "https", false, "max-age=31536000"},
+		{"IPv4-mapped loopback proxy", "[::ffff:127.0.0.1]:4000", "https", false, "max-age=31536000"},
 		{"plain HTTP", "192.0.2.1:1234", "", false, ""},
 		{"plain HTTP from a trusted proxy", "10.1.2.3:4000", "http", false, ""},
 		{"untrusted peer claims HTTPS", "192.0.2.1:1234", "https", false, ""},
+		{"IPv4-mapped untrusted peer claims HTTPS", "[::ffff:192.0.2.1]:1234", "https", false, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := httptest.NewRequest("GET", "http://localhost/healthz", nil)

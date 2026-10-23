@@ -41,7 +41,7 @@ const passkeyCookieName = "paperless_go_passkey_login" //nolint:gosec // a cooki
 
 // passkeyLoginTokens returns the tokens of the request's passkey login
 // cookies, the __Host- one first. A browser can hold both names, as with
-// the session cookie (sessionTokens), and several cookies of one name: a
+// the session cookie (allSessionTokens), and several cookies of one name: a
 // sibling subdomain can set the plain name for this host too, and a cookie
 // with a longer path is sent before the browser's own (Path=/). So up to
 // maxPasskeyCookies values per name are read; one that names no open login
@@ -507,7 +507,7 @@ func (s *Server) handleRemovePasskey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := currentSession(r)
-	p, err := s.store.RemoveOwnPasskey(withAudit(r, s.auditEntry(r, "profile.passkey_remove")), sess.UserID, id, auth.HashSessionToken(sessionToken(r)))
+	p, err := s.store.RemoveOwnPasskey(withAudit(r, s.auditEntry(r, "profile.passkey_remove")), sess.UserID, id, auth.HashSessionToken(s.sessionToken(r)))
 	if err != nil {
 		s.failStore(w, r, err)
 		return

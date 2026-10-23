@@ -192,7 +192,6 @@ func (s *Server) Handler() http.Handler {
 	}
 	h := s.protect(s.authenticate(mux, accessOf), routeBody)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.warnIgnoredForwardedFor(r)
 		// Every request's writes wait at most ownerWaitBound for other
 		// changes of the same owner (store.ErrBusy, 503).
 		h.ServeHTTP(w, r.WithContext(store.WithOwnerWait(r.Context(), ownerWaitBound)))
@@ -219,7 +218,9 @@ var ownerWaitBound = ownerWait
 // from a peer that is not a trusted proxy, also from loopback: behind a
 // reverse proxy without PAPERLESS_GO_TRUSTED_PROXIES every client gets the
 // proxy's address and all share one login limit. Only the peer is logged;
-// the header comes from the client and could be anything.
+// the header comes from the client and could be anything. protect calls it
+// after the host check, so a request with a wrong Host cannot use up the
+// one warning.
 func (s *Server) warnIgnoredForwardedFor(r *http.Request) {
 	if s.forwardedWarned.Load() || len(r.Header.Values("X-Forwarded-For")) == 0 {
 		return

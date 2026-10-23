@@ -397,6 +397,16 @@ func TestWarnIgnoredForwardedFor(t *testing.T) {
 	if n, logged := run([]netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, "192.0.2.1:1234", "198.51.100.7"); n != 0 {
 		t.Fatalf("trusted proxy: %s", logged)
 	}
+	// IPv4-mapped peers are named and matched as their IPv4 address.
+	if n, logged := run(nil, "[::ffff:192.0.2.1]:1234", "198.51.100.7"); n != 1 || !strings.Contains(logged, "peer=192.0.2.1") {
+		t.Errorf("IPv4-mapped untrusted peer: %d warnings: %s", n, logged)
+	}
+	if n, logged := run(nil, "[::ffff:127.0.0.1]:1234", "198.51.100.7"); n != 1 || !strings.Contains(logged, "peer=127.0.0.1") {
+		t.Errorf("IPv4-mapped loopback: %d warnings: %s", n, logged)
+	}
+	if n, logged := run([]netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, "[::ffff:192.0.2.1]:1234", "198.51.100.7"); n != 0 {
+		t.Errorf("IPv4-mapped trusted proxy: %s", logged)
+	}
 	if n, logged := run(nil, "192.0.2.1:1234"); n != 0 {
 		t.Fatalf("without the header: %s", logged)
 	}
