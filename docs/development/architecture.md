@@ -372,7 +372,23 @@ ranking, cursors, the bulk match and saved views are unchanged.
   never expand into another user's lexemes, an admin's "my documents" uses
   only their own, "Everyone's documents" all owners'. The expanded
   `tsquery` stays a bound parameter inside the store, like before: never
-  logged, never returned (`TestSearchCompoundScope`).
+  logged, never returned (`TestSearchCompoundScope`). Trashed documents
+  keep their words in the vocabulary until the purge, so the trash's own
+  search finds them by a compound too; live searches never return them
+  (`TestSearchCompoundTrash`).
+- **Cost** (`TestSearchBench`, the #114 data, 4 CPUs, #115; before = the
+  same generator at `00018`). The lookup alone takes under 1 ms p95 for a
+  word, up to 9 ms for a 4-letter part that many lexemes contain;
+  `document_search_tsquery` with 32 such items 22–107 ms. Searches that
+  rank few matches or sort by date stay within noise (`erinnerung` finds
+  its 0.8 % in about 100 ms). A broad word's ranking grows with its extra
+  matches and alternatives (`rechnung`: 55 000 → 64 000 hits, 4.5 s →
+  5.8–8.1 s). Many short words are the worst case: 32 items of 4
+  characters make a `tsquery` of about 3 300 alternatives, which PostgreSQL
+  checks row by row (AND, by relevance: 78 ms → 3.6–5.2 s) or ranks for
+  every match (OR, by relevance: 5 min → over an hour); by date the OR
+  takes 0.3–0.5 s. The foreign key of `search_vocabulary` to `users` costs
+  no measurable time.
 
 **Reads.** No query reads the vectors back: `GetDocument` and
 `ListDocuments` list their columns instead of `d.*`.
