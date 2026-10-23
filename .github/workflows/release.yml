@@ -27,6 +27,8 @@ jobs:
   release:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # 8 min so far; the runtime stages are always rebuilt (arm64 under QEMU).
+    timeout-minutes: 30
     permissions:
       contents: write # the tag and the release
       packages: write # the image on ghcr.io

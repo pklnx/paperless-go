@@ -8,17 +8,40 @@ on:
 permissions:
   contents: read
 
+# A pull request run cancels the older run of the same pull request (its group
+# is the PR ref). A push to main gets a group of its own per commit and is never
+# cancelled, so every merge gets a complete CI result, also when the next merge
+# follows seconds later.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Docker Hub images: CI pulls them through mirror.gcr.io (Google's public
+# Docker Hub cache), with Docker Hub as the fallback, so a Docker Hub error or
+# rate limit does not fail a job (option (b) of #151; no secrets, the same for
+# fork and Dependabot pull requests). dockerd gets the mirror from
+# scripts/ci-docker-mirror.sh, the buildx builders from buildkitd-config-inline,
+# and the test job's service names the mirror directly. Users' builds (the
+# Dockerfile, docker-compose.yml, ./pgo, release.yml) do not use it.
+#
+# Timeouts are about 2-3 times the longest run seen (2026-10-21 to 2026-10-23).
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The slowest passing run took 17 min on a slow runner.
+    timeout-minutes: 25
     services:
       postgres:
-        # The image and locale of docker-compose.yml.
-        image: postgres:18
+        # The image and locale of docker-compose.yml. The runner pulls service
+        # images before any step, so no daemon mirror config applies here: the
+        # image is named on mirror.gcr.io directly, without a Docker Hub
+        # fallback (the runner retries a failed pull itself). postgres:18 is a
+        # heavily used tag and always cached there, though the mirror may serve
+        # the previous patch release for a short time after a new one. Should
+        # the mirror ever fail this job, start PostgreSQL with `docker run` in a
+        # step after scripts/ci-docker-mirror.sh instead.
+        image: mirror.gcr.io/library/postgres:18
         env:
           POSTGRES_USER: paperless
           POSTGRES_PASSWORD: paperless
@@ -41,13 +64,16 @@ jobs:
       # The load test (scripts/loadtest) builds only with its tag: keep it
       # compiling and its report logic tested.
       - run: go vet -tags loadtest ./scripts/loadtest/...
-      - run: go test -tags loadtest -count=1 ./scripts/loadtest/...
-      - run: go test -race -count=1 ./...
+      # Random test order (-shuffle=on): a failure prints its seed as
+      # -test.shuffle N; rerun it with go test -shuffle=N.
+      - run: go test -tags loadtest -shuffle=on -count=1 ./scripts/loadtest/...
+      - run: go test -race -shuffle=on -count=1 ./...
         env:
           TEST_DATABASE_URL: postgres://paperless:paperless@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/paperless?sslmode=disable
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -65,6 +91,7 @@ jobs:
 
   vulncheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -78,11 +105,21 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    # Up to 10 min with a cold layer cache.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - run: scripts/ci-docker-mirror.sh
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # BuildKit in the builder container pulls the Dockerfile's images
+          # (and its # syntax frontend) through the mirror, falling back to
+          # Docker Hub when the mirror fails or lacks a tag.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       - name: Build amd64 and arm64 images
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -98,11 +135,20 @@ jobs:
     # Tests of internal/process with the real OCR tools, in the toolstest
     # stage of the Dockerfile (the runtime packages), as UID 65532.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - run: scripts/ci-docker-mirror.sh
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # BuildKit in the builder container pulls the Dockerfile's images
+          # (and its # syntax frontend) through the mirror, falling back to
+          # Docker Hub when the mirror fails or lacks a tag.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       - name: Build the toolstest stage
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -117,10 +163,15 @@ jobs:
   compose:
     # End-to-end test of docker-compose.yml, the image and the ./pgo wrapper.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - run: scripts/ci-docker-mirror.sh
+      # The base images and postgres:18 with retries; the smoke test's build
+      # then takes them from the local store.
+      - run: scripts/ci-pull-images.sh
       - run: scripts/compose-smoke-test.sh
       # The release bundle, with the image the run above built: its
       # docker-compose.yml must work without the source and without a build.
@@ -144,6 +195,7 @@ jobs:
 
   web:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: web
@@ -163,4 +215,24 @@ jobs:
       # The built output has no eval( or new Function( (the CSP has no
       # 'unsafe-eval'); a missing or incomplete build fails too.
       - run: pnpm check:dist
+
+  audit:
+    # pnpm audit of the UI's production dependencies. Not a required check:
+    # it asks the npm registry, which can time out, and Dependabot covers the
+    # same advisories. A finding still turns it red. It audits the lockfile,
+    # so it needs no install.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      # Node 25+ no longer bundles corepack; keep the version in sync with the Dockerfile.
+      - run: npm install -g corepack@0.36.0 && corepack enable
       - run: pnpm audit --prod
