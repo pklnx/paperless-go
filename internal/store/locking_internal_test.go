@@ -130,21 +130,25 @@ func TestWritesOwnerTables(t *testing.T) {
 // db.New only on the guard, the pool's Exec, Query and QueryRow only in
 // collation.go (catalog reads and REINDEX, which write no owner table),
 // connections of their own (pgx.Connect, pgx.ConnectConfig, Acquire) only
-// for LISTEN, and the owner lock only through the owner gate (ownerTx).
+// for LISTEN and the sweep lock (ExclusiveSweep, on the guard), and the
+// owner lock only through the owner gate (ownerTx). The queue pass's step
+// 1 (readCommittedTx) begins its own READ COMMITTED transaction, on the
+// guard too.
 func TestTransactionsOnlyThroughTheGuard(t *testing.T) {
 	allowed := map[string][]string{
-		"Begin":             {"audit.go:inTxWith"},
-		"BeginTx":           {"locking.go:readTx"},
-		"BeginFunc":         {"collation.go:reindex"},
-		"BeginTxFunc":       nil,
-		"WithTx":            nil,
-		"db.New":            {"store.go:Open", "audit.go:inTxWith", "documents_edit.go:match", "search.go:SearchDocuments"},
+		"Begin":       {"audit.go:inTxWith"},
+		"BeginTx":     {"locking.go:readTx", "blob_removals.go:readCommittedTx"},
+		"BeginFunc":   {"collation.go:reindex"},
+		"BeginTxFunc": nil,
+		"WithTx":      nil,
+		"db.New": {"store.go:Open", "audit.go:inTxWith", "documents_edit.go:match", "search.go:SearchDocuments",
+			"blob_removals.go:ExclusiveSweep", "blob_removals.go:readCommittedTx"},
 		"pool.Exec":         {"collation.go:*"},
 		"pool.Query":        {"collation.go:*"},
 		"pool.QueryRow":     {"collation.go:*"},
 		"pgx.Connect":       nil,
 		"pgx.ConnectConfig": {"jobs.go:ListenJobs"},
-		"Acquire":           nil,
+		"Acquire":           {"blob_removals.go:ExclusiveSweep"},
 		"lockOwners":        {"ownergate.go:ownerTx"},
 	}
 	files, err := filepath.Glob("*.go")
@@ -230,6 +234,53 @@ func TestQueryName(t *testing.T) {
 	} {
 		if got := queryName(sql); got != want {
 			t.Errorf("queryName(%q) = %q, want %q", sql, got, want)
+		}
+	}
+}
+
+// hashWriterQueries holds exactly the queries that insert or update
+// documents and name a hash column, so the guard refuses each of them
+// without holdBlobs (blob_removals.go).
+func TestHashWriterQueriesComplete(t *testing.T) {
+	queries := namedQueries(t)
+	var want []string
+	for name, body := range queries {
+		if writesHashColumns(body) {
+			want = append(want, name)
+		}
+	}
+	slices.Sort(want)
+	var got []string
+	for name := range hashWriterQueries {
+		got = append(got, name)
+		if _, ok := queries[name]; !ok {
+			t.Errorf("hashWriterQueries names %s, which is no query", name)
+		}
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("hashWriterQueries = %v,\nthe queries writing a hash column of documents are %v", got, want)
+	}
+}
+
+// The classifier of hash writers: inserts and updates of documents that
+// name a hash column, ignoring comments.
+func TestWritesHashColumns(t *testing.T) {
+	for sql, want := range map[string]bool{
+		"INSERT INTO documents (owner_id, original_sha256) VALUES (1, 'x')":            true,
+		"UPDATE documents SET archive_sha256 = $1 WHERE id = $2":                       true,
+		"update public.documents set thumbnail_sha256 = $1":                            true,
+		`UPDATE "documents" SET Original_SHA256 = $1`:                                  true,
+		"WITH x AS (UPDATE documents SET archive_sha256 = NULL RETURNING id) SELECT 1": true,
+		"UPDATE documents SET title = 'x'":                                             false,
+		"UPDATE documents SET title = 'x' -- archive_sha256":                           false,
+		"DELETE FROM documents RETURNING original_sha256":                              false,
+		"SELECT original_sha256 FROM documents":                                        false,
+		"INSERT INTO blob_removals (sha256) SELECT archive_sha256 FROM documents":      false,
+		"UPDATE documents_x SET archive_sha256 = $1":                                   false,
+	} {
+		if got := writesHashColumns(sql); got != want {
+			t.Errorf("writesHashColumns(%q) = %v, want %v", sql, got, want)
 		}
 	}
 }

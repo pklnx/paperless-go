@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/pklnx/paperless-go/internal/blobstore"
 	"github.com/pklnx/paperless-go/internal/store"
 	"github.com/pklnx/paperless-go/internal/store/storetest"
 	"github.com/pklnx/paperless-go/internal/sweep"
@@ -39,7 +40,7 @@ func TestRunOnceLoopsBatches(t *testing.T) {
 		FROM generate_series(1, 251) i`, alice.ID, bob.ID, now); err != nil {
 		t.Fatal(err)
 	}
-	s := &sweep.Sweeper{Store: st, Now: st.Now, Retention: store.DefaultTrashRetention}
+	s := &sweep.Sweeper{Store: st, Blobs: newBlobs(t), Now: st.Now, Retention: store.DefaultTrashRetention}
 	got, err := s.RunOnce(ctx)
 	if err != nil || got != (sweep.Stats{Purged: 250, Retention: 250}) {
 		t.Fatalf("RunOnce: %+v, %v", got, err)
@@ -90,6 +91,27 @@ func (f *fakeStore) PurgeDueDocuments(_ context.Context, now time.Time, _ time.D
 	return r.res, r.err
 }
 
+// The file passes of the fake store find nothing to do.
+func (f *fakeStore) BlobRemovalsDue(context.Context, time.Time, int) ([]string, error) {
+	return nil, nil
+}
+
+// ExclusiveSweep runs fn without a session: the fake queue is empty.
+func (f *fakeStore) ExclusiveSweep(_ context.Context, fn func(*store.SweepSession) error) error {
+	return fn(nil)
+}
+func (f *fakeStore) UnreferencedBlobs(context.Context, []string) ([]string, error) {
+	return nil, nil
+}
+func (f *fakeStore) WalkCandidates(context.Context, []string) ([]string, error) { return nil, nil }
+func (f *fakeStore) QueueUnreferencedBlobs(context.Context, []string, time.Time) (int64, error) {
+	return 0, nil
+}
+func (f *fakeStore) HasDocuments(context.Context) (bool, error) { return true, nil }
+func (f *fakeStore) Installation(context.Context) (*store.Installation, error) {
+	return &store.Installation{ID: "00000000-0000-4000-8000-000000000001"}, nil
+}
+
 type syncBuf struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -122,7 +144,7 @@ func TestRunTicksWakesAndErrors(t *testing.T) {
 	}
 	var logs syncBuf
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
-	s := &sweep.Sweeper{Store: f, Log: slog.New(slog.NewTextHandler(&logs, nil)), Now: func() time.Time { return now }}
+	s := &sweep.Sweeper{Store: f, Blobs: newBlobs(t), Log: slog.New(slog.NewTextHandler(&logs, nil)), Now: func() time.Time { return now }}
 	tick := make(chan time.Time)
 	wake, wakeFn := sweep.Wake()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -146,4 +168,14 @@ func TestRunTicksWakesAndErrors(t *testing.T) {
 	if !strings.Contains(out, "purged=103") || !strings.Contains(out, "database down") {
 		t.Errorf("log:\n%s", out)
 	}
+}
+
+// newBlobs is a blob store in a fresh directory.
+func newBlobs(t *testing.T) *blobstore.Store {
+	t.Helper()
+	b, err := blobstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

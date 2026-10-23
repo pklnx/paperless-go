@@ -190,6 +190,10 @@ type importer struct {
 // errPurgePending is the reason of a file whose document is due for purge.
 var errPurgePending = errors.New("the existing document is being removed permanently; import the file again in a minute")
 
+// errBlobRemoved is the reason of a file whose stored copy the sweeper was
+// removing meanwhile (its last document was purged).
+var errBlobRemoved = errors.New("the stored copy of this file was being cleaned up; import the file again")
+
 // walk imports every regular file below root (or root itself, if it is
 // one) in lexical order. Symbolic links and special files are skipped.
 // Names are printed relative to root.
@@ -243,6 +247,8 @@ func (m *importer) file(p, rel, name string) {
 	switch {
 	case errors.Is(err, store.ErrPurgePending):
 		m.fail(rel, errPurgePending)
+	case errors.Is(err, store.ErrBlobRemoved):
+		m.fail(rel, errBlobRemoved)
 	case err != nil:
 		m.fail(rel, err)
 	case res.Outcome == ingest.Imported:

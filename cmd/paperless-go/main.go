@@ -48,6 +48,7 @@ func newRootCmd() *cobra.Command {
 		newProcessCmd(),
 		newReprocessCmd(),
 		newImportCmd(),
+		newSweepCmd(),
 	)
 	return root
 }
