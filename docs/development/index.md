@@ -153,8 +153,9 @@ file changes on `main`.
   longest run so far.
 - CI pulls Docker Hub images through mirror.gcr.io (Google's public Docker Hub
   cache), with Docker Hub as the fallback, so a Docker Hub error or rate limit
-  does not fail a job. The `test` job's PostgreSQL service is named on the
-  mirror directly. Users' builds (the Dockerfile, `docker-compose.yml`,
+  does not fail a job. These pulls are anonymous: dockerd would send the
+  runner's Docker Hub login to the mirror, which refuses it. The `test` job's
+  PostgreSQL service is named on the mirror directly. Users' builds (the Dockerfile, `docker-compose.yml`,
   `./pgo`) do not use the mirror; see the comments in
   `.github/workflows/ci.yml`.
 

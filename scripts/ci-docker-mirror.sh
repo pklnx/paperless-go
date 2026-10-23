@@ -13,6 +13,13 @@
 # other settings, and restarts dockerd. Run it before anything uses Docker:
 # the restart stops running containers.
 #
+# GitHub's runners are logged in to Docker Hub (`docker info` shows a user).
+# dockerd sends those credentials to the mirror as well, and mirror.gcr.io
+# refuses them ("unauthorized: authentication failed"), so every pull would
+# skip the mirror. In GitHub Actions the script therefore points DOCKER_CONFIG
+# at an empty client config for the job's later steps: pulls are anonymous,
+# through the mirror first and from Docker Hub as the fallback.
+#
 # Usage: scripts/ci-docker-mirror.sh   (needs sudo, jq and systemd)
 set -eu
 
@@ -35,6 +42,15 @@ cat "$tmp"
 # A restart rather than a reload (SIGHUP): it makes sure the built-in BuildKit
 # uses the mirror too. Nothing runs on Docker yet at this point.
 sudo systemctl restart docker
+
+if [ -n "${GITHUB_ENV:-}" ]; then
+	DOCKER_CONFIG="${RUNNER_TEMP:?}/docker-config-anonymous"
+	mkdir -p "$DOCKER_CONFIG"
+	echo '{}' >"$DOCKER_CONFIG/config.json"
+	export DOCKER_CONFIG
+	echo "DOCKER_CONFIG=$DOCKER_CONFIG" >>"$GITHUB_ENV"
+	echo "Docker client config for the later steps, without credentials: $DOCKER_CONFIG"
+fi
 
 mirrors=$(docker info --format '{{json .RegistryConfig.Mirrors}}')
 echo "registry mirrors: $mirrors"
