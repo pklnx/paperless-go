@@ -34,11 +34,27 @@ Case and accents do not matter: `cafe` finds `Café`, `strasse` finds
 `Straße`, and `Gebuhren` finds `Gebühren`. From PostgreSQL 18 on, which the
 Compose setup uses, `Gebuehren` finds `Gebühren` too.
 
+**Compound words.** A word of 4 or more characters also finds the longer
+words that contain it: `rechnung` finds `Stromrechnung` and `Gasrechnung`,
+`erinnerung` finds `Zahlungserinnerung`, `arzt` finds `Zahnarzt`, in every
+field. Inflected forms work the same way (`Rechnungen` finds
+`Stromrechnungen` and `Stromrechnung`), and so do accents (`bäckerei` and
+`backerei` find `Großbäckerei`). The start of a compound is found as
+before: `Strom` finds `Stromrechnung` as a prefix. This is a plain
+substring match, like the search in the Document Archive app, so it also
+finds words that are not compounds: `rechnung` finds `Berechnung` and
+`Verrechnung`. Numbers work alike: `2023` also finds `15.01.2023`, `RE2023`
+and `12023`. An excluded word (`-rechnung`) excludes these longer words
+too.
+
 Some limits of the word match:
 
-- **Compound words.** A word inside a German compound is not found:
-  `rechnung` does not find `Stromrechnung`. The start of a compound is:
-  `Strom` finds it as a prefix.
+- **Compound words.** For each word the search uses at most the 100 longer
+  words that occur in the most of your documents (with "Everyone's
+  documents", in all users' documents). A rarer compound beyond them is
+  not found by its part. Within a phrase (`"Rechnung für Juli"`) words
+  match exactly, never inside longer words, and a word of fewer than 4
+  characters never does either.
 - **Short words.** A word of one or two characters matches only whole
   words and whole names, never as a prefix or part of a name.
 - **Phrases in long texts.** A phrase is found within roughly the first

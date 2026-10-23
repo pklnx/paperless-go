@@ -366,6 +366,13 @@ drops the list, and `pg_trgm` too if the paperless-go database user owns
 it (it created it) and nothing else uses it; one an administrator created
 stays. No document data changes either way.
 
+**Words inside compounds (#56, `00019_search_infix.sql`).** The search
+uses that list: a word of 4 or more characters also finds the longer words
+that contain it (see [Search](./search), "Compound words"). The migration
+only replaces a function and takes no noticeable time. Rolling it back
+(`migrate down`) restores the search without compound matches; the list
+stays until `00018` is rolled back too.
+
 ### Versions
 
 Versions are named after the year and month of the release, plus a build

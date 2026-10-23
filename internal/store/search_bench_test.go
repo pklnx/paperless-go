@@ -5,9 +5,11 @@ package store_test
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -23,7 +25,7 @@ import (
 )
 
 // TestSearchBench measures the search on generated documents (#6, part 2;
-// #56):
+// #56, parts 1 and 2):
 //
 //	TEST_DATABASE_URL=... go test -tags searchbench -run TestSearchBench -v -timeout 4h ./internal/store/
 //
@@ -31,21 +33,27 @@ import (
 // about 5 000 characters of synthetic German and English text each.
 // "rechnung" is in half of them, "zahlungserinnerung" in 0.8 %; the
 // compounds stromrechnung (5 %), gasrechnung (2 %), berechnung (2 %) and
-// rechnungsbetrag (5 %) are in documents without "rechnung". 30 % of the
+// rechnungsbetrag (5 %) are in documents without "rechnung", and no other
+// word of the generator contains "rechnung", so the compound shares hold
+// for the expansion of part 2 (berechnung is its false hit). 30 % of the
 // words are a long tail of letter tokens (benchTail), which gives each
 // owner well over 1.5 million distinct lexemes, closer to an OCR archive.
 // bob has half as many documents with twice the share of tail words, so
 // his vocabulary is about as large: the trigram index is not per owner.
 //
-// SEARCHBENCH_BEFORE=1 runs the same generator on a database migrated only
-// to 00017, without the search vocabulary, and at the end times migrating
-// up to 00018 (its backfill); SEARCHBENCH_FILLFACTOR sets the fillfactor
-// of search_vocabulary before the generation. "Before" and "after" are
-// two runs on the same host and server, with the same seed.
+// SEARCHBENCH_BEFORE=<version> runs the same generator on a database
+// migrated only to that version, and at the end times migrating up: 17 is
+// part 1's "before" (no vocabulary; the migration times the backfill), 18
+// part 2's (the vocabulary without the expansion of 00019).
+// SEARCHBENCH_FILLFACTOR sets the fillfactor of search_vocabulary before
+// the generation. "Before" and "after" are two runs on the same host and
+// server, with the same seed.
 //
 // It logs the timings of each case, EXPLAIN (ANALYZE, BUFFERS) of the
-// queries the store ran, the per-document write paths and the sizes. It is
-// not run in CI and asserts nothing.
+// queries the store ran, hit counts of the compound cases, the
+// per-document write paths (with the vocabulary also once more after
+// dropping its foreign key to users) and the sizes. It is not run in CI
+// and asserts nothing.
 func TestSearchBench(t *testing.T) {
 	n := 100000
 	if v := os.Getenv("SEARCHBENCH_DOCS"); v != "" {
@@ -54,13 +62,19 @@ func TestSearchBench(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	before := os.Getenv("SEARCHBENCH_BEFORE") == "1"
+	var beforeVersion int64
+	if v := os.Getenv("SEARCHBENCH_BEFORE"); v != "" {
+		beforeVersion = int64(atoi(t, v))
+	}
+	before := beforeVersion != 0
+	// hasVocabulary: the database has search_vocabulary (00018).
+	hasVocabulary := !before || beforeVersion >= vocabularyVersion
 	st, url := storetest.NewWithURL(t)
 	ctx := context.Background()
 	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
 	bob := store.Scope{UserID: storetest.User(t, st, "bob", false).ID}
 	if before {
-		if err := st.MigrateDownTo(ctx, vocabularyVersion-1); err != nil {
+		if err := st.MigrateDownTo(ctx, beforeVersion); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -69,12 +83,12 @@ func TestSearchBench(t *testing.T) {
 	if err := conn.QueryRow(ctx, `SHOW server_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	mode := "after (with the search vocabulary)"
+	mode := "after (all migrations)"
 	if before {
-		mode = "before (migrated to 00017)"
+		mode = fmt.Sprintf("before (migrated to %05d)", beforeVersion)
 	}
 	t.Logf("PostgreSQL %s, %d documents of alice, %d of bob, %s, %d CPUs", version, n, n/2, mode, runtime.NumCPU())
-	if ff := os.Getenv("SEARCHBENCH_FILLFACTOR"); ff != "" && !before {
+	if ff := os.Getenv("SEARCHBENCH_FILLFACTOR"); ff != "" && hasVocabulary {
 		if _, err := conn.Exec(ctx, "ALTER TABLE search_vocabulary SET (fillfactor = "+strconv.Itoa(atoi(t, ff))+")"); err != nil {
 			t.Fatal(err)
 		}
@@ -127,7 +141,7 @@ func TestSearchBench(t *testing.T) {
 	}
 	analyze := func() {
 		for _, table := range []string{"documents", "document_tags", "search_vocabulary"} {
-			if before && table == "search_vocabulary" {
+			if table == "search_vocabulary" && !hasVocabulary {
 				continue
 			}
 			if _, err := conn.Exec(ctx, "VACUUM ANALYZE "+table); err != nil {
@@ -194,7 +208,7 @@ func TestSearchBench(t *testing.T) {
 		}
 		t.Logf("EXPLAIN (ANALYZE, BUFFERS) %s:\n%s", name, strings.Join(lines, "\n"))
 	}
-	measure := func(name string, runs int, fn func()) {
+	stat := func(name string, runs int, fn func()) {
 		fn() // warm the cache
 		times := make([]time.Duration, runs)
 		for i := range runs {
@@ -206,6 +220,9 @@ func TestSearchBench(t *testing.T) {
 		t.Logf("%-55s p50 %8v  p95 %8v  max %8v  (%d runs)", name,
 			times[runs/2].Round(time.Microsecond), times[runs*95/100].Round(time.Microsecond),
 			times[runs-1].Round(time.Microsecond), runs)
+	}
+	measure := func(name string, runs int, fn func()) {
+		stat(name, runs, fn)
 		explain(name)
 	}
 	search1 := func(q search.Query) func() {
@@ -237,6 +254,105 @@ func TestSearchBench(t *testing.T) {
 	measure("negation only -zahlungserinnerung (99 %), default sort", 20, search1(query("-Zahlungserinnerung", "")))
 	measure("negation only -zahlungserinnerung, sort=relevance", 10, search1(query("-Zahlungserinnerung", search.SortRelevance)))
 	measure("tag:Steuer (10 %), sort=added", 20, search1(query("tag:Steuer", "")))
+
+	// Compound words (#56, part 2). Before 00019 these find only exact
+	// words and prefixes; the hit counts show the difference.
+	measure("selective infix erinnerung (0.8 %), relevance", 40, search1(query("erinnerung", "")))
+	measure("selective infix erinnerung, sort=added", 40, search1(query("erinnerung", search.SortAdded)))
+	measure("broad infix rechnung, relevance", 10, search1(query("rechnung", "")))
+	measure("broad infix rechnung, sort=added", 20, search1(query("rechnung", search.SortAdded)))
+	measure("compound stromrechnung (5 %), relevance", 40, search1(query("stromrechnung", "")))
+	// 32 items of 4 characters, the parser's maximum: 16 of the common
+	// words' parts and 16 of the tail's, each matching at least 100
+	// vocabulary lexemes of alice.
+	worst := strings.Fields("rech nung zahl trag kund steu wohn miet beit glie bitt tage ment tung ungs erha " +
+		"bcdf ghjk lmnp qrst dfgh jklm npqr stbc cdfg hjkl mnpq rstb fghj klmn pqrs tbcd")
+	measure("32 items of 4 characters, AND, relevance", 10, search1(query(strings.Join(worst, " "), "")))
+	measure("32 items of 4 characters, OR, sort=added", 10, search1(query(strings.Join(worst, " OR "), search.SortAdded)))
+	// Ranking every match against thousands of alternatives is slow:
+	// one cold run, no EXPLAIN (it would run the query again).
+	start = time.Now()
+	search1(query(strings.Join(worst, " OR "), ""))()
+	t.Logf("%-55s %v (1 run)", "32 items of 4 characters, OR, relevance", time.Since(start).Round(time.Millisecond))
+	tsquery := func(owner *int64, terms ...string) string {
+		n := len(terms)
+		groups := make([]int32, n)
+		for i := range groups {
+			groups[i] = int32(i)
+		}
+		var q string
+		if err := conn.QueryRow(ctx, `SELECT coalesce(document_search_tsquery($1, $2, $3, $4, $5)::text, '')`,
+			owner, terms, make([]bool, n), make([]bool, n), groups).Scan(&q); err != nil {
+			t.Fatal(err)
+		}
+		return q
+	}
+	for _, term := range []string{"rechnung", "erinnerung", "rech", "bcdf"} {
+		stat("document_search_tsquery, one item "+term, 100, func() { tsquery(&alice.UserID, term) })
+	}
+	stat("document_search_tsquery, 32 items of 4 characters", 20, func() { tsquery(&alice.UserID, worst...) })
+	stat("document_search_tsquery, admin over all owners, rechnung", 100, func() { tsquery(nil, "rechnung") })
+	var src string
+	if err := conn.QueryRow(ctx, `SELECT prosrc FROM pg_proc WHERE proname = 'document_search_tsquery'`).Scan(&src); err != nil {
+		t.Fatal(err)
+	}
+	if m := regexp.MustCompile(`(?s)\$lookup\$(.*?)\$lookup\$`).FindStringSubmatch(src); m != nil {
+		for _, c := range []struct {
+			name  string
+			owner *int64
+			p     []string
+		}{
+			{"rechnung", &alice.UserID, []string{"rechnung"}},
+			{"erinnerung", &alice.UserID, []string{"erinnerung"}},
+			{"rechnungen (with its stem)", &alice.UserID, []string{"rechnungen", "rechnung"}},
+			{"rech", &alice.UserID, []string{"rech"}},
+			{"bcdf", &alice.UserID, []string{"bcdf"}},
+			{"rech, admin over all owners", nil, []string{"rech"}},
+		} {
+			var like, prefix []string
+			for _, p := range c.p {
+				like, prefix = append(like, "%"+p+"%"), append(prefix, p+"%")
+			}
+			stat("vocabulary lookup alone, "+c.name, 100, func() {
+				var found []string
+				if err := conn.QueryRow(ctx, m[1], pgx.QueryExecModeCacheDescribe, c.owner, like, prefix).Scan(&found); err != nil {
+					t.Fatal(err)
+				}
+			})
+			rows, err := conn.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS) "+m[1], pgx.QueryExecModeCacheDescribe, c.owner, like, prefix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("EXPLAIN (ANALYZE, BUFFERS) vocabulary lookup, %s:\n%s", c.name, strings.Join(lines, "\n"))
+		}
+	}
+	hits := func(q string) int {
+		var n int
+		if err := conn.QueryRow(ctx, `SELECT count(*) FROM documents d WHERE d.owner_id = $1 AND (d.search_text || d.search_links) @@ $2::tsquery`,
+			alice.UserID, q).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	for _, term := range []string{"rechnung", "erinnerung", "stromrechnung", "rechnungen"} {
+		q := tsquery(&alice.UserID, term)
+		t.Logf("hits of %s: %d (%d alternatives)", term, hits(q), strings.Count(q, "|")+1)
+	}
+	// berechnung is the expansion's false hit: documents rechnung finds
+	// that hold no word starting with rechnung and no other compound.
+	if q := tsquery(&alice.UserID, "rechnung"); q != "" {
+		var n int
+		if err := conn.QueryRow(ctx, `SELECT count(*) FROM documents d WHERE d.owner_id = $1
+			AND (d.search_text || d.search_links) @@ $2::tsquery
+			AND NOT d.search_text @@ 'rechnung:* | stromrechnung | gasrechnung'::tsquery`, alice.UserID, q).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("hits of rechnung through berechnung only: %d", n)
+	}
 	measure("plain list, first page", 40, search1(search.Query{Limit: 25}))
 
 	var deepID string
@@ -255,16 +371,30 @@ func TestSearchBench(t *testing.T) {
 	}
 	t.Logf("rename a tag of 10 %% of the documents: %v", time.Since(start).Round(time.Microsecond))
 
-	benchWrites(ctx, t, st, conn, alice, n)
+	benchWrites(ctx, t, st, conn, alice, n, 0)
 	analyze()
 	sizes("after the writes")
+	if hasVocabulary {
+		// The foreign key of search_vocabulary to users costs one check
+		// per new row (#120's review): the same writes again, with it as a
+		// control and then without it.
+		t.Log("write paths again, with the foreign key of search_vocabulary:")
+		benchWrites(ctx, t, st, conn, alice, n, 1)
+		if _, err := conn.Exec(ctx, `ALTER TABLE search_vocabulary DROP CONSTRAINT search_vocabulary_owner_id_fkey`); err != nil {
+			t.Fatal(err)
+		}
+		t.Log("write paths again, without the foreign key of search_vocabulary:")
+		benchWrites(ctx, t, st, conn, alice, n, 2)
+	}
 
 	if before {
 		start := time.Now()
 		if _, err := st.Migrate(ctx); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("migrate up to 00018 (backfill of the vocabulary, its indexes): %v", time.Since(start).Round(time.Millisecond))
+		t.Logf("migrate up from %05d (with 00018: the backfill of the vocabulary, its indexes): %v",
+			beforeVersion, time.Since(start).Round(time.Millisecond))
+		hasVocabulary = true
 		analyze()
 		sizes("after the migration")
 	}
@@ -272,7 +402,7 @@ func TestSearchBench(t *testing.T) {
 
 // benchVocab are the generator's common words.
 var benchVocab = strings.Fields(`Versicherung Vertrag Kündigung Zahlung Betrag Konto Überweisung Gebühren
-	Steuer Finanzamt Bescheid Einkommen Abrechnung Strom Wasser Miete Nebenkosten Vermieter Wohnung Straße
+	Steuer Finanzamt Bescheid Einkommen Abschlag Strom Wasser Miete Nebenkosten Vermieter Wohnung Straße
 	Häuser Termin Arzt Krankenkasse Beitrag Mitglied Kunde Kundennummer Auftrag Lieferung Bestellung Datum
 	sehr geehrte Damen Herren freundlichen Grüßen anbei erhalten Sie bitte innerhalb Tagen fällig zahlbar
 	invoice insurance contract payment amount account transfer fees tax office notice income statement
@@ -314,8 +444,11 @@ func benchText(r *rand.Rand, words int, tail float64) string {
 // (the n generated ones are "Dokument 1" to "Dokument n"): text updates
 // in SQL, deletes, imports with text, uploads and their OCR results
 // through the store, and a retitle of 1 000 documents in one statement.
-func benchWrites(ctx context.Context, t *testing.T, st *store.Store, conn *pgx.Conn, alice store.Scope, n int) {
-	r := rand.New(rand.NewPCG(53, 56))
+//
+// round (0, 1, …) picks other documents and names, so the writes can be
+// measured again on the same data.
+func benchWrites(ctx context.Context, t *testing.T, st *store.Store, conn *pgx.Conn, alice store.Scope, n, round int) {
+	r := rand.New(rand.NewPCG(53, 56+uint64(round)))
 	timings := func(name string, runs int, fn func(i int)) {
 		times := make([]time.Duration, runs)
 		for i := range runs {
@@ -328,16 +461,27 @@ func benchWrites(ctx context.Context, t *testing.T, st *store.Store, conn *pgx.C
 			times[runs/2].Round(time.Microsecond), times[runs*95/100].Round(time.Microsecond),
 			times[runs-1].Round(time.Microsecond), runs)
 	}
+	// docID returns the generated document k, or the next one that an
+	// earlier round has not deleted or retitled and this round has not
+	// used yet.
+	used := map[string]bool{}
 	docID := func(k int) string {
-		var id string
-		if err := conn.QueryRow(ctx, `SELECT id::text FROM documents WHERE owner_id = $1 AND title = $2`,
-			alice.UserID, fmt.Sprint("Dokument ", k)).Scan(&id); err != nil {
-			t.Fatal(err)
+		for ; ; k = k%n + 1 {
+			var id string
+			err := conn.QueryRow(ctx, `SELECT id::text FROM documents WHERE owner_id = $1 AND title = $2`,
+				alice.UserID, fmt.Sprint("Dokument ", k)).Scan(&id)
+			if errors.Is(err, pgx.ErrNoRows) || err == nil && used[id] {
+				continue
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			used[id] = true
+			return id
 		}
-		return id
 	}
 	// Distinct documents for each step, spread over the range.
-	pick := func(step, i int) int { return 1 + (step*7919+i*487)%n }
+	pick := func(step, i int) int { return 1 + (step*7919+round*104729+i*487)%n }
 
 	ids := make([]string, 200)
 	texts := make([]string, 200)
@@ -361,15 +505,15 @@ func benchWrites(ctx context.Context, t *testing.T, st *store.Store, conn *pgx.C
 		texts[i] = benchText(r, 650, 0.3)
 	}
 	timings("CreateDocument with text (import)", 200, func(i int) {
-		in := newDoc(fmt.Sprint("import ", i))
+		in := newDoc(fmt.Sprint("import ", round, " ", i))
 		in.ExtractedText = texts[i]
-		in.ArchiveSHA256, in.ArchiveSize = ptr(hashOf(fmt.Sprint("import archive ", i))), ptr(int64(1))
+		in.ArchiveSHA256, in.ArchiveSize = ptr(hashOf(fmt.Sprint("import archive ", round, " ", i))), ptr(int64(1))
 		if _, err := st.CreateDocument(ctx, alice, in); err != nil {
 			t.Fatal(err)
 		}
 	})
 	timings("CreateDocument without text (upload)", 200, func(i int) {
-		if _, err := st.CreateDocument(ctx, alice, newDoc(fmt.Sprint("upload ", i))); err != nil {
+		if _, err := st.CreateDocument(ctx, alice, newDoc(fmt.Sprint("upload ", round, " ", i))); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -380,7 +524,7 @@ func benchWrites(ctx context.Context, t *testing.T, st *store.Store, conn *pgx.C
 	}
 	timings("CompleteJob with new text (OCR result)", 200, func(i int) {
 		if err := st.CompleteJob(ctx, jobs[i], time.Now(), store.ProcessResult{PageCount: 1, Text: texts[i],
-			TextSource: store.TextSourceTesseract, ArchiveSHA256: hashOf(fmt.Sprint("ocr ", i)), ArchiveSize: 1}); err != nil {
+			TextSource: store.TextSourceTesseract, ArchiveSHA256: hashOf(fmt.Sprint("ocr ", round, " ", i)), ArchiveSize: 1}); err != nil {
 			t.Fatal(err)
 		}
 	})

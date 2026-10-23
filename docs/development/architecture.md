@@ -206,6 +206,8 @@ free-text items as bound arrays. Each item becomes, joined by `|`:
 `plainto_tsquery` (or `phraseto_tsquery`) in the three configurations; for
 a word of 3 or more characters, a prefix query from the lexemes
 `paperless_simple` makes of it, each quoted by a fixed escaper plus `:*`;
+for a word of 4 or more characters, the compounds from the search
+vocabulary that contain it (Compounds, below; `00019_search_infix.sql`);
 and the link lexemes of the tags (with their descendants), correspondents
 and document types whose name contains the term, ignoring case and accents
 (`ILIKE` over `unaccent`, wildcards escaped; a term under 3 characters
@@ -242,9 +244,8 @@ extension uses it.
 characters in the owner's `search_text` vectors and the number of the
 owner's documents that hold it (`CHECK (n > 0)`, primary key `(owner_id,
 lexeme)`). A GIN trigram index (`public.gin_trgm_ops`, extension
-`pg_trgm`) on `lexeme` lets part 2 find the lexemes that contain a typed
-word; part 1 changes nothing visible. The vocabulary is never returned by
-any API.
+`pg_trgm`) on `lexeme` lets a search find the lexemes that contain a typed
+word (Compounds, below). The vocabulary is never returned by any API.
 - **One rule.** `search_vocabulary_lexemes(tsvector)` (immutable SQL) is the
   only definition of what the vocabulary holds: the distinct lexemes of
   `tsvector_to_array`, `char_length` 5 to 64 (characters, not bytes), in
@@ -322,6 +323,51 @@ any API.
   conditions of `unaccent` in `00011`, `pg_trgm` (owned by the current user,
   nothing outside the extension depends on it; the `pg_amproc` entries of
   `pg_trgm`'s own operator families count as part of it).
+
+**Compounds** (#56, part 2; `00019_search_infix.sql`, which replaces
+`document_search_tsquery` and whose Down restores `00011`'s body). A word
+also matches the vocabulary's lexemes that contain it, so `rechnung` finds
+`Stromrechnung` without a second index on the documents: the expansion only
+makes the constant `tsquery` longer (`rechnung | 'stromrechnung' |
+'gasrechnung' | …`), and the six search queries, `documents_search_idx`,
+ranking, cursors, the bulk match and saved views are unchanged.
+- **Which items.** A non-phrase item of 4 or more characters whose
+  `paperless_simple` parse is one lexeme of 4 or more characters (a term
+  such as `Strom-Rechnung` makes several, whose parts match already). The
+  patterns are that lexeme and, when it differs and has 4 or more
+  characters, the term's `german` stem (`rechnungen` → `rechnung`).
+- **The lookup.** `lexeme LIKE ANY ('%p%', …) AND lexeme NOT LIKE ALL
+  ('p%', …)` over `search_vocabulary` within `owner` (all owners for
+  `NULL`, the counts summed), wildcards escaped like the name pattern.
+  Lexemes that start with a pattern are left out: the word's prefix query
+  covers those of the simple lexeme, and the stem's own prefixes stay
+  unmatched as before (a stem prefix would let `Zufallsende`, stem
+  `zufalls`, find `Zufallstext`). At most 100 lexemes per item, ordered by
+  `n DESC, lexeme`, so the result is deterministic and `-X` excludes
+  exactly what `X` finds; each is quoted by the fixed escaper and ORed into
+  the item before `!!`. It runs through `EXECUTE … USING`, so it is planned
+  with its values and the trigram index serves it
+  (`TestSearchCompoundLookupUsesTrigramIndex` reads the statement between
+  `$lookup$` from `pg_proc` and checks its plan).
+- **Behaviour.** A plain substring match, like the app's search: `Berechnung`
+  and `Verrechnung` match `rechnung` (decision 1 of #56), a number such as
+  `2023` matches `15.01.2023`, `re2023` and `12023`. A compound counts in
+  `ts_rank_cd` like the word itself. Accents: the pattern is the unaccented
+  simple lexeme, which every field has, so `bäckerei` finds
+  `grossbackerei`; an `english` lexeme with an accent (`großbäckerei`) does
+  not contain the unaccented pattern and takes no slot. A compound with an
+  accent outside the pattern (`mülltonnenrechnung` for `rechnung`) has two
+  lexemes, the `english` and the simple one, and takes two of the 100
+  slots.
+- **Snippets.** The `german` pass of `ts_headline` does not mark
+  `Stromrechnung` (its stem is `stromrechn`), the `english` or
+  `paperless_simple` pass behind it does (`TestSearchCompoundSnippets`,
+  `TestSearchCompoundUmlauts`).
+- **Privacy.** The lookup sees only the scope's vocabulary: a user's words
+  never expand into another user's lexemes, an admin's "my documents" uses
+  only their own, "Everyone's documents" all owners'. The expanded
+  `tsquery` stays a bound parameter inside the store, like before: never
+  logged, never returned (`TestSearchCompoundScope`).
 
 **Reads.** No query reads the vectors back: `GetDocument` and
 `ListDocuments` list their columns instead of `d.*`.
