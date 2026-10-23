@@ -159,7 +159,7 @@ function UploadRow({ item, limit, cancel, retry, restored }: { item: UploadItem;
       },
       (err: unknown) => {
         setBusy(false);
-        setError(trashErrorText(err));
+        setError(trashErrorText(err, "restore"));
       },
     );
   };

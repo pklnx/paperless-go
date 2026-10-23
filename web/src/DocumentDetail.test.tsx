@@ -894,9 +894,39 @@ describe("the trash (#12)", () => {
     docs.set("d1", { ...docs.get("d1")!, ...trashed });
     patchAnswer = { status: 409, body: { error: "the document is in the trash", code: "in_trash" } };
     fireEvent.click(detail().getByRole("button", { name: t.save }));
-    expect((await detail().findByText(t.inTrashError)).getAttribute("role")).toBe("alert");
+    const countsBefore = requests.filter((r) => r.url.startsWith("/api/documents/counts")).length;
+    expect((await detail().findByText(t.inTrashEditsKept)).getAttribute("role")).toBe("alert");
     await waitFor(() => expect(detail().getByRole("region", { name: t.trash })).toBeTruthy());
     expect(titleField().matches(":disabled")).toBe(true);
+    // The edit is kept, not dropped for the server's state.
+    expect(titleField().value).toBe("Neu");
+    // The counts load again: the document left the list elsewhere.
+    await waitFor(() => expect(requests.filter((r) => r.url.startsWith("/api/documents/counts")).length).toBeGreaterThan(countsBefore));
+
+    // After Restore the kept edit can be saved.
+    patchAnswer = null;
+    fireEvent.click(within(detail().getByRole("region", { name: t.trash })).getByRole("button", { name: t.restore }));
+    await waitFor(() => expect(titleField().matches(":disabled")).toBe(false));
+    expect(titleField().value).toBe("Neu");
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(2));
+    expect(patches()[1]!.body).toMatchObject({ title: "Neu" });
+  });
+
+  it("shows a document trashed elsewhere when its Delete meets in_trash, with the text for one document", async () => {
+    serve(doc("d1", "Rechnung"));
+    await openAt("/?doc=d1");
+    docs.set("d1", { ...docs.get("d1")!, ...trashed });
+    fireEvent.click(detail().getByRole("button", { name: t.deleteDocumentLabel("Rechnung") }));
+    expect(await detail().findByText(t.alreadyInTrash)).toBeTruthy();
+    await waitFor(() => expect(detail().getByRole("region", { name: t.trash })).toBeTruthy());
+  });
+
+  it("makes the read-only fields of a trashed document look disabled", async () => {
+    serve(doc("d1", "Rechnung", trashed));
+    await openAt("/?doc=d1&trash=1");
+    expect(titleField().className).toContain("disabled:bg-surface-hover");
+    expect(titleField().className).toContain("disabled:text-ink-muted");
   });
 
   it("says when the archive serial number is taken by a document in the trash", async () => {

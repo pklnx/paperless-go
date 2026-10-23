@@ -12,6 +12,7 @@ import { MetadataPage } from "./MetadataPage";
 import { ProfilePage } from "./Profile";
 import { Sheet } from "./Sheet";
 import { Sidebar, type Loaded } from "./Sidebar";
+import { Toast, useNotice } from "./Toast";
 import { useCollapsedTags } from "./tagTree";
 import { UploadQueue } from "./uploads";
 import { UsersPage } from "./UsersPage";
@@ -77,6 +78,14 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
     return () => ctl.abort();
   }, [ownOnly, imported, edits]);
   const collapsed = useCollapsedTags(user.name, metadata.data?.tags ?? null);
+  // Opening the trash counts again: a document may have been deleted elsewhere.
+  const inTrashView = state.trash === "1" && state.view === "";
+  useEffect(() => {
+    if (inTrashView) onChanged();
+  }, [inTrashView, onChanged]);
+  // The notices (Delete's Undo, results of changes) live here, so they
+  // outlive the list: another page opened within their time keeps them.
+  const { notice, show: notify, close: closeNotice } = useNotice();
 
   // "All documents" lists everything: no filter, no search. Another entry
   // keeps the search and replaces the filter.
@@ -124,7 +133,8 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
       <WindowDrop
         onFiles={(files) => {
           queue.add(files);
-          if (view !== "") update({ view: "", doc: "" });
+          // The uploads show on the documents' page, which the trash is not.
+          if (view !== "" || state.trash === "1") update({ view: "", doc: "", trash: "" });
         }}
       />
       <aside className="hidden w-64 shrink-0 flex-col overflow-y-auto border-r border-line bg-surface-sunken md:flex" data-testid="sidebar">
@@ -145,8 +155,19 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
         <main className="flex-1 overflow-y-auto">
           {view === "" && (
             <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6">
-              <DocumentsUpload queue={queue} maxSize={maxSize} onRestored={onUploadRestored} />
-              <DocumentList state={state} update={update} query={query} user={user} metadata={metadata.data} everyone={everyone} reload={imported + restoredUploads} onMaxUploadSize={onMaxUploadSize} onChanged={onChanged} />
+              {state.trash !== "1" && <DocumentsUpload queue={queue} maxSize={maxSize} onRestored={onUploadRestored} />}
+              <DocumentList
+                state={state}
+                update={update}
+                query={query}
+                user={user}
+                metadata={metadata.data}
+                everyone={everyone}
+                reload={imported + restoredUploads}
+                onMaxUploadSize={onMaxUploadSize}
+                onChanged={onChanged}
+                notify={notify}
+              />
             </div>
           )}
           {view === "metadata" && <MetadataPage metadata={metadata} userId={user.id} onChanged={onChanged} open={select} />}
@@ -155,6 +176,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
           {view === "users" && <UsersPage />}
         </main>
       </div>
+      <Toast notice={notice} close={closeNotice} />
       <Sheet open={menuOpen} onClose={closeMenu} title={t.navigation}>
         {sidebar}
       </Sheet>

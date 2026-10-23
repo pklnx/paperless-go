@@ -136,7 +136,8 @@ so before anything is sent: "Tags…" explains the rule, and
 
 **Delete** in a row, in a document's form or in the bar of checked
 documents moves documents to the trash. Deleting one document asks
-nothing: a notice "… moved to the trash" offers **Undo** for 8 seconds.
+nothing: a notice "… moved to the trash" offers **Undo** for 8 seconds,
+also when another page is opened meanwhile; the keyboard focus moves to it.
 Deleting checked documents, or every match of a search, asks first with
 their number.
 
@@ -150,6 +151,8 @@ of a taken number then says the other document is in the trash.
 number, newest deleted first; each row says when the document was deleted
 and when it will be removed. The search field searches the trash with the
 same syntax as everywhere; the sidebar's other entries leave the trash.
+The upload panel is not shown there (a file dropped on the window opens
+the documents again).
 
 - **Restore** brings a document back as it was: its tags, correspondent,
   type, archive serial number, inbox and favourite.
@@ -165,7 +168,9 @@ same syntax as everywhere; the sidebar's other entries leave the trash.
 
 Opened from the trash, a document shows "In the trash since …" with
 Restore and Delete permanently; its form is read-only until it is
-restored. Previous and next walk the trash.
+restored. Previous and next walk the trash. If the document was moved to
+the trash elsewhere while you edited it, saving is refused, your changes
+stay in the form, and after Restore you can save them.
 
 Uploading a file that is already there as a document in the trash says
 "already there, in the trash" with a **Restore** button; nothing is

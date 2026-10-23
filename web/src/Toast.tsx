@@ -16,7 +16,16 @@ export interface Notice {
   error?: boolean;
   /** A button in the notice, such as Undo; clicking it closes the notice first. */
   action?: { label: string; run: () => void };
+  /**
+   * Move the keyboard focus into the notice (its action, else its close
+   * button): after a row action the focused row is gone, and Undo stays
+   * one key away.
+   */
+  focus?: boolean;
 }
+
+/** Shows a notice; the shell's, so a notice outlives the page that showed it. */
+export type Notify = (n: Notice) => void;
 
 /**
  * One notice at a time: show replaces the current one and starts its timer
@@ -48,10 +57,15 @@ export function useNotice(): { notice: Notice | null; show: (n: Notice) => void;
 
 /** The notice at the bottom of the screen: its text, its action and a close button. Plain text only. */
 export function Toast({ notice, close }: { notice: Notice | null; close: () => void }) {
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (notice?.focus) box.current?.querySelector("button")?.focus();
+  }, [notice]);
   if (!notice) return null;
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-[calc(1rem+env(safe-area-inset-bottom))] z-40 flex justify-center px-4">
       <div
+        ref={box}
         role={notice.error ? "alert" : "status"}
         data-testid="notice"
         className="pointer-events-auto flex max-w-lg items-center gap-3 rounded-lg bg-ink py-1.5 pr-1.5 pl-4 text-sm text-bg shadow-lg"

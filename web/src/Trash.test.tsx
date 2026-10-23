@@ -6,7 +6,7 @@ import { bulkErrorText } from "./BulkBar";
 import { FakeXHR } from "./fakeXHR";
 import { t } from "./i18n";
 import { noticeDuration, noticeTimer } from "./Toast";
-import { trashDay } from "./Trash";
+import { trashDay, trashErrorText } from "./Trash";
 import { doc, page, stubServer, type Request, type Server } from "./testServer";
 
 // The trash in the web UI (#12, part 3) against a fake server: what the
@@ -67,6 +67,8 @@ const sent = (method: string, path: string) => requests.filter((r) => r.method =
 const sidebar = () => within(screen.getByTestId("sidebar"));
 const bar = () => within(screen.getByRole("region", { name: t.bulkActions }));
 const notice = () => screen.findByTestId("notice");
+/** Waits until the shell's notice says text. */
+const noticeSays = (text: string) => waitFor(() => expect(screen.getByTestId("notice").textContent).toContain(text));
 const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 async function start(url = "/") {
@@ -194,6 +196,98 @@ describe("delete with Undo", () => {
   });
 });
 
+describe("notices and row actions (review follow-ups)", () => {
+  it("sends one request for a double click on Delete or Restore, and keeps the Undo", async () => {
+    put(doc("1", "Rechnung"), doc("2", "Alt", deleted));
+    await start();
+    const del = screen.getByRole("button", { name: t.deleteDocumentLabel("Rechnung") });
+    fireEvent.click(del);
+    fireEvent.click(del);
+    await noticeSays(t.movedToTrash("Rechnung"));
+    expect(sent("DELETE", "/api/documents/1")).toHaveLength(1);
+    expect(within(screen.getByTestId("notice")).getByRole("button", { name: t.undo })).toBeTruthy();
+
+    await openTrash();
+    const restore = screen.getByRole("button", { name: t.restoreLabel("Alt") });
+    fireEvent.click(restore);
+    fireEvent.click(restore);
+    await noticeSays(t.restoredDocument("Alt"));
+    expect(sent("POST", "/api/documents/2/restore")).toHaveLength(1);
+    expect(screen.getByTestId("notice").getAttribute("role")).toBe("status");
+  });
+
+  it("moves the focus to the notice's Undo after a row's Delete", async () => {
+    put(doc("1", "Rechnung"));
+    await start();
+    const del = screen.getByRole("button", { name: t.deleteDocumentLabel("Rechnung") });
+    del.focus();
+    fireEvent.click(del);
+    await notice();
+    await waitFor(() => expect(document.activeElement?.textContent).toBe(t.undo));
+  });
+
+  it("keeps the Undo when another page opens within its time", async () => {
+    put(doc("1", "Rechnung"));
+    await start();
+    fireEvent.click(screen.getByRole("button", { name: t.deleteDocumentLabel("Rechnung") }));
+    await noticeSays(t.movedToTrash("Rechnung"));
+    fireEvent.click(sidebar().getByRole("button", { name: t.log }));
+    await waitFor(() => expect(window.location.search).toBe("?view=log"));
+    fireEvent.click(within(screen.getByTestId("notice")).getByRole("button", { name: t.undo }));
+    await waitFor(() => expect(sent("POST", "/api/documents/1/restore")).toHaveLength(1));
+    await noticeSays(t.restoredDocument("Rechnung"));
+  });
+
+  it("shows Empty trash's result after the emptied trash took the button away", async () => {
+    put(doc("2", "Alt", deleted));
+    server.bulk = (b) => {
+      if (b.dryRun) return { body: { matched: 1, owners: 1, limit: 5000, fingerprint: "v2.f" } };
+      store.clear();
+      return { body: { updated: 1 } };
+    };
+    await start("/?trash=1");
+    fireEvent.click(screen.getByRole("button", { name: t.emptyTrash }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: t.emptyTrashTitle })).getByRole("button", { name: t.purgeConfirm(1) }));
+    await screen.findByText(t.trashEmpty);
+    expect(screen.queryByRole("button", { name: t.emptyTrash })).toBeNull();
+    await noticeSays(t.purgedCount(1));
+  });
+
+  it("shows a bulk delete's result after the documents and the bar are gone", async () => {
+    put(doc("1", "Eins"), doc("2", "Zwei"));
+    server.bulk = (b) => {
+      for (const id of b.ids as string[]) store.set(id, { ...store.get(id)!, ...deleted });
+      return { body: { updated: 2 } };
+    };
+    await start();
+    fireEvent.click(screen.getByRole("checkbox", { name: t.selectDocument("Eins") }));
+    fireEvent.click(screen.getByRole("checkbox", { name: t.selectDocument("Zwei") }));
+    fireEvent.click(bar().getByRole("button", { name: t.bulkDelete }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: t.bulkTrashTitle })).getByRole("button", { name: t.bulkTrashConfirm(2) }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: t.bulkActions })).toBeNull());
+    await noticeSays(t.bulkTrashed(2));
+  });
+
+  it("counts again when the trash opens, and hides the upload panel there", async () => {
+    put(doc("1", "Live"));
+    await start();
+    expect(screen.getByTestId("file-picker")).toBeTruthy();
+    const before = gets("/api/documents/counts").length;
+    await openTrash();
+    await waitFor(() => expect(gets("/api/documents/counts").length).toBeGreaterThan(before));
+    expect(screen.queryByTestId("file-picker")).toBeNull();
+    expect(screen.queryByText(t.uploadTitle)).toBeNull();
+  });
+
+  it("words single-document errors about that document", () => {
+    expect(trashErrorText(new ApiError(409, "x", { code: "in_trash" }), "trash")).toBe(t.alreadyInTrash);
+    expect(trashErrorText(new ApiError(409, "x", { code: "not_in_trash" }), "restore")).toBe(t.restoredMeanwhile);
+    expect(trashErrorText(new ApiError(404, "x"), "trash")).toBe(t.documentNotFound);
+    expect(trashErrorText(new ApiError(404, "x"), "purge")).toBe(t.notInTrashAnyMore);
+    expect(trashErrorText(new ApiError(503, "x", {}, 5), "restore")).toBe(t.tryAgainIn(5));
+  });
+});
+
 describe("restore and delete permanently in the trash", () => {
   it("restores a row at once and drops it from the trash", async () => {
     put(doc("2", "Alt", deleted), doc("3", "Bleibt", deleted));
@@ -303,7 +397,7 @@ describe("bulk delete, restore and purge", () => {
     expect(ask.getByText(t.bulkTrashText(2))).toBeTruthy();
     expect(bulks()).toEqual([]);
     fireEvent.click(ask.getByRole("button", { name: t.bulkTrashConfirm(2) }));
-    expect(await bar().findByText(t.bulkTrashed(2))).toBeTruthy();
+    await noticeSays(t.bulkTrashed(2));
     expect(bulks()).toEqual([{ ids: ["1", "2"], action: "trash" }]);
   });
 
@@ -319,7 +413,7 @@ describe("bulk delete, restore and purge", () => {
     const ask = within(await screen.findByRole("dialog", { name: t.bulkTrashTitle }));
     expect(ask.getByText(t.bulkEveryMatch)).toBeTruthy();
     fireEvent.click(ask.getByRole("button", { name: t.bulkTrashConfirm(70) }));
-    await bar().findByText(t.bulkTrashed(70));
+    await noticeSays(t.bulkTrashed(70));
     const match = { q: "Rechnung", tz };
     expect(bulks()).toEqual([
       { match, dryRun: true },
@@ -337,7 +431,7 @@ describe("bulk delete, restore and purge", () => {
     expect(bar().queryByRole("button", { name: t.bulkDelete })).toBeNull();
     expect(bar().queryByRole("button", { name: t.bulkTags })).toBeNull();
     fireEvent.click(bar().getByRole("button", { name: t.restore }));
-    await bar().findByText(t.bulkRestored(2));
+    await noticeSays(t.bulkRestored(2));
     expect(bulks()).toEqual([{ ids: ["2", "3"], action: "restore" }]);
 
     fireEvent.click(bar().getByRole("button", { name: t.purge }));
@@ -346,7 +440,7 @@ describe("bulk delete, restore and purge", () => {
     // Own documents: no owners to name.
     expect(ask.queryByText(/^Owners:|^Besitzer:/)).toBeNull();
     fireEvent.click(ask.getByRole("button", { name: t.purgeConfirm(2) }));
-    await bar().findByText(t.purgedCount(2));
+    await noticeSays(t.purgedCount(2));
     expect(bulks().at(-1)).toEqual({ ids: ["2", "3"], action: "purge" });
   });
 
@@ -362,7 +456,7 @@ describe("bulk delete, restore and purge", () => {
     const ask = within(await screen.findByRole("dialog", { name: t.purgeBulkTitle }));
     expect(ask.getByText(t.purgeOwners("alice, bob, root"))).toBeTruthy();
     fireEvent.click(ask.getByRole("button", { name: t.purgeConfirm(3) }));
-    await bar().findByText(t.purgedCount(3));
+    await noticeSays(t.purgedCount(3));
     expect(bulks()).toEqual([{ ids: ["2", "3", "4"], action: "purge" }]);
   });
 
@@ -403,7 +497,7 @@ describe("bulk delete, restore and purge", () => {
     const ask = within(await screen.findByRole("dialog", { name: t.purgeBulkTitle }));
     expect(ask.getByText(t.bulkEveryMatch)).toBeTruthy();
     fireEvent.click(ask.getByRole("button", { name: t.purgeConfirm(70) }));
-    await bar().findByText(t.purgedCount(70));
+    await noticeSays(t.purgedCount(70));
     const match = { q: "Rechnung", tz, trashed: true, owner: "me" };
     expect(bulks().slice(1)).toEqual([
       { match, dryRun: true, action: "purge" },

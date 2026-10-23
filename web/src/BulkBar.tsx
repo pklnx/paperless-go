@@ -5,6 +5,7 @@ import { t } from "./i18n";
 import { Sheet } from "./Sheet";
 import { button, danger, primary } from "./styles";
 import { flatTagTree } from "./tagTree";
+import type { Notify } from "./Toast";
 import { PurgeConfirm } from "./Trash";
 
 /** What the bar changes: the checked documents, or every match of the list's search (counted by a dry run). */
@@ -35,6 +36,11 @@ interface Props {
    * trash (match owner me), so not while an admin sees everyone's.
    */
   purgeByMatch?: boolean;
+  /**
+   * The shell's notice: the result of a trash action goes there, since the
+   * documents leave the list, the selection with them, and the bar.
+   */
+  notify?: Notify;
 }
 
 /** What the server's refusal of a bulk change means, in words; whether trying again may help. */
@@ -113,7 +119,7 @@ const actionDone: Record<BulkAction, (n: number) => string> = {
  * asks with the count, also for checked documents; deleting permanently
  * always asks (#12); restoring checked documents does not.
  */
-export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = false, ownerNames = [], purgeByMatch = true }: Props) {
+export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = false, ownerNames = [], purgeByMatch = true, notify }: Props) {
   const [sheet, setSheet] = useState<"" | "tags" | "corr" | "type">("");
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [ask, setAsk] = useState<Ask | null>(null);
@@ -217,7 +223,10 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = fal
     bulkApi.act(sel, action).then(
       (n) => {
         setBusy(false);
-        setMsg({ kind: "ok", text: actionDone[action](n) });
+        if (notify) {
+          setMsg(null);
+          notify({ text: actionDone[action](n), focus: true });
+        } else setMsg({ kind: "ok", text: actionDone[action](n) });
         onDone();
       },
       (err: unknown) => {

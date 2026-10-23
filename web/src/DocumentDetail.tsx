@@ -33,6 +33,8 @@ interface Props {
   onRestored: (d: Doc) => void;
   /** The document was deleted permanently: the list drops it and closes the detail. */
   onPurged: (d: Doc) => void;
+  /** The document turned out to be changed elsewhere (trashed): the counts load again. */
+  onStale?: () => void;
 }
 
 /** The fields an error can be shown at. */
@@ -65,7 +67,7 @@ function tagOptions(nodes: TagNode[], depth = 0): PickerOption[] {
  * or next document of the list, Escape closes. Unsaved changes are asked
  * about before leaving (in the app and when the page is left).
  */
-export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved, onTrashed, onRestored, onPurged }: Props) {
+export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved, onTrashed, onRestored, onPurged, onStale }: Props) {
   const headingId = useId();
   const [doc, setDoc] = useState<Doc | null>(null);
   const [form, setForm] = useState<DocumentForm | null>(null);
@@ -325,17 +327,21 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
           rebase(doc, form);
           return;
         }
-        // Moved to the trash elsewhere: load it again, so the banner shows.
+        // Moved to the trash elsewhere: load it again, so the banner
+        // shows, and keep the user's edits on top of it (as for
+        // document_changed): after Restore they can be saved.
         if (err instanceof ApiError && err.body.code === "in_trash") {
           setSaving(false);
-          setGeneral(t.inTrashError);
+          setGeneral(t.inTrashEditsKept);
+          onStale?.();
           documentsApi.get(id).then(
             (fresh) => {
               if (!current()) return;
+              const kept = rebaseForm(doc, form, fresh);
               docRef.current = fresh;
-              formRef.current = formFrom(fresh);
+              formRef.current = kept;
               setDoc(fresh);
-              setForm(formRef.current);
+              setForm(kept);
             },
             () => {},
           );
@@ -401,7 +407,22 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
       (err: unknown) => {
         if (visit.current !== mine) return;
         setTrashBusy(false);
-        setGeneral(trashErrorText(err));
+        setGeneral(trashErrorText(err, "trash"));
+        // Trashed elsewhere meanwhile: show it as it is now (the banner).
+        if (err instanceof ApiError && err.body.code === "in_trash") {
+          onStale?.();
+          documentsApi.get(d.id).then(
+            (fresh) => {
+              if (visit.current !== mine) return;
+              const kept = formRef.current ? rebaseForm(d, formRef.current, fresh) : formFrom(fresh);
+              docRef.current = fresh;
+              formRef.current = kept;
+              setDoc(fresh);
+              setForm(kept);
+            },
+            () => {},
+          );
+        }
       },
     );
   };
@@ -410,21 +431,25 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     const mine = visit.current;
     setTrashBusy(true);
     setGeneral("");
+    const before = doc;
     documentsApi.restore(doc.id).then(
       (d) => {
         onRestored(d);
         if (visit.current !== mine) return;
         setTrashBusy(false);
+        // Edits kept from a save refused in the trash stay, ready to save.
+        const kept = formRef.current ? rebaseForm(before, formRef.current, d) : formFrom(d);
         docRef.current = d;
-        formRef.current = formFrom(d);
+        formRef.current = kept;
         setDoc(d);
-        setForm(formRef.current);
-        setNotesEditing(d.notes === "");
+        setForm(kept);
+        setGeneral("");
+        if (!isDirty(d, kept)) setNotesEditing(d.notes === "");
       },
       (err: unknown) => {
         if (visit.current !== mine) return;
         setTrashBusy(false);
-        setGeneral(trashErrorText(err));
+        setGeneral(trashErrorText(err, "restore"));
       },
     );
   };
@@ -443,7 +468,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
       (err: unknown) => {
         if (visit.current !== mine) return;
         setTrashBusy(false);
-        setPurgeAsk({ error: trashErrorText(err) });
+        setPurgeAsk({ error: trashErrorText(err, "purge") });
       },
     );
   };

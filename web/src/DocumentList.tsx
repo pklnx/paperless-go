@@ -10,7 +10,7 @@ import { clickSelect, maxSelection, pruneSelection, selectAll, useLongPress } fr
 import { snippetParts } from "./snippet";
 import { button, input } from "./styles";
 import { chipInk } from "./tagTree";
-import { Toast, useNotice } from "./Toast";
+import type { Notice, Notify } from "./Toast";
 import { EmptyTrash, foreignOwners, PurgeConfirm, trashDay, trashErrorText } from "./Trash";
 import { activeFilter, filterPatch, formatState, type UpdateState, type ViewState } from "./urlState";
 
@@ -57,6 +57,8 @@ interface Props {
   onMaxUploadSize: (bytes: number) => void;
   /** A document was changed in its detail, or several by a bulk change: counts and names may differ now. */
   onChanged?: () => void;
+  /** Shows a notice of the shell (Undo, results): it outlives the list. */
+  notify?: Notify;
 }
 
 /**
@@ -66,7 +68,7 @@ interface Props {
  * documents, with Restore and Delete permanently instead of Delete, and
  * "Empty trash".
  */
-export function DocumentList({ state, update, query, user, metadata, everyone, reload, onMaxUploadSize, onChanged }: Props) {
+export function DocumentList({ state, update, query, user, metadata, everyone, reload, onMaxUploadSize, onChanged, notify }: Props) {
   const key = JSON.stringify(query);
   const [list, setList] = useState<ListState>({ key, docs: null, first: new Set(), cursor: "", loading: true, error: "" });
   const ctl = useRef<AbortController | null>(null);
@@ -157,7 +159,23 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   };
 
   const trash = query.trashed;
-  const { notice, show: showNotice, close: closeNotice } = useNotice();
+  const showNotice = (n: Notice) => notify?.(n);
+  // Whether the list is still shown: an Undo clicked on another page has no list to reload.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  // Rows with a Delete or Restore in flight: a second click sends nothing.
+  const busyRef = useRef(new Set<string>());
+  const [busyRows, setBusyRows] = useState<ReadonlySet<string>>(() => new Set());
+  const markBusy = (id: string, on: boolean) => {
+    if (on) busyRef.current.add(id);
+    else busyRef.current.delete(id);
+    setBusyRows(new Set(busyRef.current));
+  };
   // A document that left the list: deleted, restored from the trash, or deleted permanently.
   const removeDoc = (id: string) =>
     setList((l) => (l.docs ? { ...l, docs: l.docs.filter((x) => x.id !== id), first: new Set([...l.first].filter((x) => x !== id)) } : l));
@@ -178,10 +196,10 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     documentsApi.restore(d.id).then(
       () => {
         showNotice({ text: t.restoredDocument(documentName(d)) });
-        refreshRef.current();
+        if (mounted.current) refreshRef.current();
         onChanged?.();
       },
-      (err: unknown) => showNotice({ text: trashErrorText(err), error: true }),
+      (err: unknown) => showNotice({ text: trashErrorText(err, "restore"), error: true }),
     );
   };
   // A document moved to the trash (from its row or its detail): out of
@@ -189,12 +207,20 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   const trashed = (d: DocumentSummary) => {
     removeDoc(d.id);
     onChanged?.();
-    showNotice({ text: t.movedToTrash(documentName(d)), action: { label: t.undo, run: () => undo(d) } });
+    showNotice({ text: t.movedToTrash(documentName(d)), action: { label: t.undo, run: () => undo(d) }, focus: true });
   };
   const trashDoc = (d: DocumentSummary) => {
+    if (busyRef.current.has(d.id)) return;
+    markBusy(d.id, true);
     documentsApi.trash(d.id).then(
-      () => trashed(d),
-      (err: unknown) => showNotice({ text: trashErrorText(err), error: true }),
+      () => {
+        markBusy(d.id, false);
+        trashed(d);
+      },
+      (err: unknown) => {
+        markBusy(d.id, false);
+        showNotice({ text: trashErrorText(err, "trash"), error: true, focus: true });
+      },
     );
   };
   // Restored from the trash: out of the trash list, or its row follows.
@@ -202,15 +228,26 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     if (trash) removeDoc(d.id);
     else replaceDoc(d);
     onChanged?.();
-    showNotice({ text: t.restoredDocument(documentName(d)) });
+    showNotice({ text: t.restoredDocument(documentName(d)), focus: true });
   };
   const restoreDoc = (d: DocumentSummary) => {
-    documentsApi.restore(d.id).then(restored, (err: unknown) => showNotice({ text: trashErrorText(err), error: true }));
+    if (busyRef.current.has(d.id)) return;
+    markBusy(d.id, true);
+    documentsApi.restore(d.id).then(
+      (back) => {
+        markBusy(d.id, false);
+        restored(back);
+      },
+      (err: unknown) => {
+        markBusy(d.id, false);
+        showNotice({ text: trashErrorText(err, "restore"), error: true, focus: true });
+      },
+    );
   };
   const purged = (d: DocumentSummary) => {
     removeDoc(d.id);
     onChanged?.();
-    showNotice({ text: t.purgedDocument(documentName(d)) });
+    showNotice({ text: t.purgedDocument(documentName(d)), focus: true });
   };
   // Deleting permanently always asks first.
   const [purging, setPurging] = useState<{ doc: DocumentSummary; busy: boolean; error: string } | null>(null);
@@ -223,7 +260,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
         setPurging(null);
         purged(d);
       },
-      (err: unknown) => setPurging({ doc: d, busy: false, error: trashErrorText(err) }),
+      (err: unknown) => setPurging({ doc: d, busy: false, error: trashErrorText(err, "purge") }),
     );
   };
 
@@ -376,6 +413,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
           update({ doc: "" });
         }}
         onRestored={restored}
+        onStale={onChanged}
         onPurged={(d) => {
           purged(d);
           update({ doc: "" });
@@ -393,6 +431,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
       {trash && docs && docs.length > 0 && (
         <EmptyTrash
           everyone={everyone}
+          notify={showNotice}
           onDone={() => {
             refresh();
             onChanged?.();
@@ -455,6 +494,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
               selecting={selecting}
               onPick={(shift) => pick(d.id, shift)}
               trash={trash}
+              busy={busyRows.has(d.id)}
               onDelete={() => trashDoc(d)}
               onRestore={() => restoreDoc(d)}
               onPurge={() => setPurging({ doc: d, busy: false, error: "" })}
@@ -476,6 +516,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
           trash={trash}
           ownerNames={ownerNames}
           purgeByMatch={!everyone}
+          notify={showNotice}
           onDone={() => {
             // The count of all matches is stale after a change: back to the checked rows.
             setMatchSel(null);
@@ -485,7 +526,6 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
         />
       )}
     </section>
-    <Toast notice={notice} close={closeNotice} />
     </>
   );
 }
@@ -695,14 +735,16 @@ interface RowProps {
   onPick: (shift: boolean) => void;
   /** The row is in the trash: its dates, Restore and Delete permanently instead of Delete. */
   trash: boolean;
+  /** A Delete or Restore of the row is in flight. */
+  busy: boolean;
   onDelete: () => void;
   onRestore: () => void;
   onPurge: () => void;
 }
 
-const rowAction = "hover:underline pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center";
+const rowAction = "hover:underline disabled:opacity-50 pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center";
 
-function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen, checked, selecting, onPick, trash, onDelete, onRestore, onPurge }: RowProps) {
+function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen, checked, selecting, onPick, trash, busy, onDelete, onRestore, onPurge }: RowProps) {
   const name = documentName(d);
   const press = useLongPress(() => {
     if (!checked) onPick(false);
@@ -759,15 +801,15 @@ function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen, checked,
           </a>
           {trash ? (
             <>
-              <button type="button" className={`${rowAction} text-accent-ink`} aria-label={t.restoreLabel(name)} onClick={onRestore}>
+              <button type="button" className={`${rowAction} text-accent-ink`} aria-label={t.restoreLabel(name)} disabled={busy} onClick={onRestore}>
                 {t.restore}
               </button>
-              <button type="button" className={`${rowAction} text-danger`} aria-label={t.purgeLabel(name)} onClick={onPurge}>
+              <button type="button" className={`${rowAction} text-danger`} aria-label={t.purgeLabel(name)} disabled={busy} onClick={onPurge}>
                 {t.purge}
               </button>
             </>
           ) : (
-            <button type="button" className={`${rowAction} text-accent-ink`} aria-label={t.deleteDocumentLabel(name)} onClick={onDelete}>
+            <button type="button" className={`${rowAction} text-accent-ink`} aria-label={t.deleteDocumentLabel(name)} disabled={busy} onClick={onDelete}>
               {t.deleteDocument}
             </button>
           )}

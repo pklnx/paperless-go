@@ -4,6 +4,7 @@ import { bulkErrorText } from "./BulkBar";
 import { lang, t } from "./i18n";
 import { Sheet } from "./Sheet";
 import { button, danger } from "./styles";
+import type { Notify } from "./Toast";
 
 // Parts of the trash (#12) shared by the list, the bulk bar and the detail.
 
@@ -17,13 +18,15 @@ export function trashDay(iso: string | null | undefined): string {
 /** Whether a document is in the trash. */
 export const inTrash = (d: Pick<DocumentSummary, "deletedAt">) => typeof d.deletedAt === "string" && d.deletedAt !== "";
 
-/** What went wrong with a single delete, restore or purge, in words. */
-export function trashErrorText(err: unknown): string {
+/** What went wrong with a single delete (trash), restore or purge, in words about that one document. */
+export function trashErrorText(err: unknown, action: "trash" | "restore" | "purge"): string {
   if (!(err instanceof ApiError)) return t.failed(err instanceof Error ? err.message : String(err));
   const code = err.body.code;
-  if (code === "in_trash") return t.bulkInTrash;
-  // Restored meanwhile, or due for purge (the server hides it then).
-  if (code === "not_in_trash" || err.status === 404) return t.notInTrashAnyMore;
+  if (code === "in_trash") return t.alreadyInTrash;
+  if (code === "not_in_trash") return t.restoredMeanwhile;
+  // A delete of a document that is gone; a restore or purge of one restored
+  // meanwhile, or due for purge (the server hides it then).
+  if (err.status === 404) return action === "trash" ? t.documentNotFound : t.notInTrashAnyMore;
   if (err.status === 503) return err.retryAfter ? t.tryAgainIn(err.retryAfter) : t.tryAgainLater;
   return t.failed(err.message);
 }
@@ -101,7 +104,7 @@ export const ownTrash: BulkMatch = { trashed: true, owner: "me" };
  * says "Empty my trash": other users' trashed documents are removed one by
  * one or by checking them, never by this button.
  */
-export function EmptyTrash({ everyone, onDone }: { everyone: boolean; onDone: () => void }) {
+export function EmptyTrash({ everyone, onDone, notify }: { everyone: boolean; onDone: () => void; notify?: Notify }) {
   const [confirm, setConfirm] = useState<{ n: number; fingerprint: string; changed: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<Message | null>(null);
@@ -133,7 +136,9 @@ export function EmptyTrash({ everyone, onDone }: { everyone: boolean; onDone: ()
     bulkApi.act({ match: ownTrash, fingerprint }, "purge").then(
       (n) => {
         setBusy(false);
-        setMsg({ kind: "ok", text: t.purgedCount(n) });
+        setMsg(null);
+        // In the shell's notice: an emptied trash takes this button away with it.
+        notify?.({ text: t.purgedCount(n), focus: true });
         onDone();
       },
       (err: unknown) => {
