@@ -5,6 +5,12 @@ import { useRef } from "react";
 /** The most documents a bulk change by ID may name (the server's store.MaxBulkIDs). */
 export const maxSelection = 500;
 
+/**
+ * The limit the list applies: maxSelection, which a test may lower to
+ * check the cap with a few rows instead of hundreds.
+ */
+export const selectionLimit = { max: maxSelection };
+
 export interface Picked {
   ids: Set<string>;
   /** Some were left out: the selection would have gone past maxSelection. */
@@ -17,7 +23,7 @@ function addCapped(ids: ReadonlySet<string>, more: readonly string[]): Picked {
   let capped = false;
   for (const id of more) {
     if (out.has(id)) continue;
-    if (out.size >= maxSelection) {
+    if (out.size >= selectionLimit.max) {
       capped = true;
       break;
     }

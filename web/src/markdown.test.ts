@@ -3,6 +3,8 @@ import { createElement } from "react";
 import { cleanup, render } from "@testing-library/react";
 import markdownSource from "./markdown.ts?raw";
 import detailSource from "./DocumentDetail.tsx?raw";
+import entitiesSource from "./htmlEntities.ts?raw";
+import { namedEntities } from "./htmlEntities";
 import { maxInlineDepth, parseInline, parseNotes, renderNotes, safeHref, type Block, type Inline, type Steps } from "./markdown";
 
 // The notes' Markdown: the app's subset (MarkdownNotes.swift), links only
@@ -130,7 +132,7 @@ describe("inline", () => {
   it("leaves unbalanced and intraword markers as text", () => {
     expect(parseInline("*a **b _c ~~d `e [f")).toEqual([text("*a **b _c ~~d `e [f")]);
     expect(parseInline("snake_case_name 2 * 3 * 4 a]b")).toEqual([text("snake_case_name 2 * 3 * 4 a]b")]);
-    expect(parseInline("\\*kein\\* \\[x\\](https://a.example)")).toEqual([text("*kein* [x](https://a.example)")]);
+    expect(parseInline("\\*kein\\* \\[x\\](https://a.example)")).toEqual([text("*kein* [x]("), { t: "link", href: "https://a.example/", c: [text("https://a.example")] }, text(")")]);
   });
 
   it("links [text](url) with the allowed schemes, in a new tab without opener or referrer", () => {
@@ -161,8 +163,7 @@ describe("inline", () => {
     expect(a.textContent).toBe("Seite");
   });
 
-  it("does not link bare URLs, and an image shows its alt text", () => {
-    expect(parseInline("https://a.example")).toEqual([text("https://a.example")]);
+  it("an image shows its alt text", () => {
     expect(parseInline("![Bild](https://a.example/x.png)")).toEqual([{ t: "plain", c: [text("Bild")] }]);
     expect(show("![Bild](https://a.example/x.png)").querySelector("img, a")).toBeNull();
   });
@@ -171,8 +172,239 @@ describe("inline", () => {
     expect(parseInline("[a [b](https://b.example) c](https://a.example)")).toEqual([
       text("[a "),
       { t: "link", href: "https://b.example/", c: [text("b")] },
-      text(" c](https://a.example)"),
+      // The rest is text, with its bare URL linked (#131).
+      text(" c]("),
+      { t: "link", href: "https://a.example/", c: [text("https://a.example")] },
+      text(")"),
     ]);
+  });
+});
+
+/** The links of inline nodes, at any depth: [href, text]. */
+function linksOf(nodes: Inline[]): [string, string][] {
+  const out: [string, string][] = [];
+  const walk = (ns: Inline[]) => {
+    for (const n of ns) {
+      if (n.t === "link") out.push([n.href, plain(n.c)]);
+      if (n.t !== "text" && n.t !== "code") walk(n.c);
+    }
+  };
+  walk(nodes);
+  return out;
+}
+const plain = (nodes: Inline[]): string => nodes.map((n) => (n.t === "text" || n.t === "code" ? n.v : plain(n.c))).join("");
+const link = (href: string, v: string): Inline => ({ t: "link", href, c: [text(v)] });
+
+describe("bare addresses (#131)", () => {
+  // The app's cases (MarkdownNotesTests.swift).
+  it("links a bare URL, an e-mail address and a tel: URL, and the text stays as written", () => {
+    const md = "Portal: https://example.com/login, Fragen an info@example.com, Tel. tel:+49301234";
+    const nodes = parseInline(md);
+    expect(nodes).toEqual([
+      text("Portal: "),
+      link("https://example.com/login", "https://example.com/login"),
+      text(", Fragen an "),
+      link("mailto:info@example.com", "info@example.com"),
+      text(", Tel. "),
+      link("tel:+49301234", "tel:+49301234"),
+    ]);
+    expect(plain(nodes)).toBe(md);
+    const a = show(md).querySelectorAll("a");
+    expect([...a].map((x) => [x.getAttribute("href"), x.textContent, x.getAttribute("target"), x.getAttribute("rel")])).toEqual([
+      ["https://example.com/login", "https://example.com/login", "_blank", "noopener noreferrer"],
+      ["mailto:info@example.com", "info@example.com", "_blank", "noopener noreferrer"],
+      ["tel:+49301234", "tel:+49301234", "_blank", "noopener noreferrer"],
+    ]);
+  });
+
+  it("links an e-mail address with an umlaut as a whole, and an IDN domain", () => {
+    const nodes = parseInline("Bitte an müller@example.com oder info@müller.de schreiben");
+    const links = linksOf(nodes);
+    expect(links.map(([, t]) => t)).toEqual(["müller@example.com", "info@müller.de"]);
+    expect(decodeURIComponent(links[0]![0])).toBe("mailto:müller@example.com");
+    expect(links[1]![0].startsWith("mailto:info@")).toBe(true);
+    expect(plain(nodes)).toBe("Bitte an müller@example.com oder info@müller.de schreiben");
+  });
+
+  it("keeps a written link's destination when its text looks like an address", () => {
+    expect(parseInline("[müller@example.com](https://example.com/kontakt)")).toEqual([link("https://example.com/kontakt", "müller@example.com")]);
+    expect(parseInline("[see https://a.example/x and *www.b.example*](https://c.example)")).toEqual([
+      { t: "link", href: "https://c.example/", c: [text("see https://a.example/x and "), { t: "em", c: [text("www.b.example")] }] },
+    ]);
+  });
+
+  it("does not link other schemes, inline code or fences", () => {
+    const md = "[Datei](file:///etc/passwd)\n[Skript](javascript:alert(1))\n[App](myapp://open/1)\nfile:///Users/test/a.pdf und myapp://open/2";
+    expect(linksOf(parseInline(md))).toEqual([]);
+    expect(linksOf(parseInline("Aufruf: `https://example.com/api` und `info@example.com`"))).toEqual([]);
+    const blocks = parseNotes("Text\n```\n**nicht fett** https://example.com a@b.example\n```");
+    expect(blocks[1]).toEqual({ kind: "code", text: "**nicht fett** https://example.com a@b.example" });
+    expect(show("```\nhttps://example.com\n```").querySelector("a")).toBeNull();
+  });
+
+  it("ends an address before trailing punctuation and unopened brackets", () => {
+    const cases: [string, string, string][] = [
+      // input, href, linked text
+      ["Siehe https://a.example/x.", "https://a.example/x", "https://a.example/x"],
+      ["(https://a.example/x)", "https://a.example/x", "https://a.example/x"],
+      ["[https://a.example/x]", "https://a.example/x", "https://a.example/x"],
+      ["{https://a.example/x}", "https://a.example/x", "https://a.example/x"],
+      ["https://de.wikipedia.org/wiki/A_(B).", "https://de.wikipedia.org/wiki/A_(B)", "https://de.wikipedia.org/wiki/A_(B)"],
+      ["(siehe https://de.wikipedia.org/wiki/A_(B))", "https://de.wikipedia.org/wiki/A_(B)", "https://de.wikipedia.org/wiki/A_(B)"],
+      ["https://a.example/?q=1&r=2!?", "https://a.example/?q=1&r=2", "https://a.example/?q=1&r=2"],
+      ["'https://a.example/x'", "https://a.example/x", "https://a.example/x"],
+      ['"https://a.example/x"', "https://a.example/x", "https://a.example/x"],
+      ["„https://a.example/x“", "https://a.example/x", "https://a.example/x"],
+      ["https://a.example/x…", "https://a.example/x", "https://a.example/x"],
+      ["https://a.example/x;", "https://a.example/x", "https://a.example/x"],
+      ["<https://a.example/x>", "https://a.example/x", "https://a.example/x"],
+      ["https://a.example/x<b>", "https://a.example/x", "https://a.example/x"],
+      ["https://a.example/x&gt;", "https://a.example/x", "https://a.example/x"],
+      ["https://a.example/~u/a_b*c", "https://a.example/~u/a_b*c", "https://a.example/~u/a_b*c"],
+      ["HTTPS://A.example/X", "https://a.example/X", "HTTPS://A.example/X"],
+      ["www.example.com/a.", "http://www.example.com/a", "www.example.com/a"],
+      ["info@example.com.", "mailto:info@example.com", "info@example.com"],
+      ["first.last+tag@sub.example.co.uk", "mailto:first.last+tag@sub.example.co.uk", "first.last+tag@sub.example.co.uk"],
+      ["mailto:info@example.com?subject=Hallo", "mailto:info@example.com?subject=Hallo", "mailto:info@example.com?subject=Hallo"],
+      ["https://a.example/ä/€", "https://a.example/%C3%A4/%E2%82%AC", "https://a.example/ä/€"],
+    ];
+    for (const [md, href, v] of cases) expect(linksOf(parseInline(md)), md).toEqual([[href, v]]);
+    // The rest stays text.
+    expect(parseInline("(https://a.example/x).")).toEqual([text("("), link("https://a.example/x", "https://a.example/x"), text(").")]);
+  });
+
+  it("works with emphasis around an address", () => {
+    expect(parseInline("*https://a.example/x*")).toEqual([{ t: "em", c: [link("https://a.example/x", "https://a.example/x")] }]);
+    expect(parseInline("**info@example.com**")).toEqual([{ t: "strong", c: [link("mailto:info@example.com", "info@example.com")] }]);
+    expect(parseInline("_www.example.com_")).toEqual([{ t: "em", c: [link("http://www.example.com/", "www.example.com")] }]);
+  });
+
+  it("does not link what only looks like an address", () => {
+    for (const md of [
+      "example.com",
+      "www.example",
+      "a@b",
+      "a@b.",
+      "a@-",
+      "a@b.c-",
+      "@example.com",
+      "xhttps://a.example",
+      "https://",
+      "https:// a.example",
+      "http://.example",
+      "tel:abc",
+      "tel:",
+      "tel:+",
+      "(http://(http://",
+      "mailto:",
+      "C:\\Pfad",
+      "10:30",
+      "snake_case_name",
+      "user@@example.com",
+    ]) {
+      expect(linksOf(parseInline(md)), md).toEqual([]);
+    }
+  });
+});
+
+describe("entities (#131)", () => {
+  it("shows named, decimal and hex entities as their character in text", () => {
+    expect(parseInline("Fa&szlig; &amp; M&uuml;ller &#228; &#xE4; &#X1F600; &copy;")).toEqual([text("Faß & Müller ä ä 😀 ©")]);
+    expect(parseInline("&ngE; &fjlig; &Tab;|")).toEqual([text("≧\u0338 fj \t|")]);
+    // Invalid code points become U+FFFD, as in CommonMark.
+    expect(parseInline("&#0; &#xD800; &#x110000;")).toEqual([text("\ufffd \ufffd \ufffd")]);
+  });
+
+  it("leaves what is not an entity as written", () => {
+    for (const md of ["&", "&amp", "& amp;", "&unknown;", "&#;", "&#x;", "&#12345678;", "&#x1234567;", "&ampx;", "&constructor;", "&hasOwnProperty;", "&toString;", "&#-1;"]) {
+      expect(parseInline(md), md).toEqual([text(md)]);
+    }
+    expect(parseInline("\\&amp;")).toEqual([text("&amp;")]);
+  });
+
+  it("decodes in link text and emphasis, never in code, URLs or destinations", () => {
+    expect(parseInline("[a &amp; b](https://a.example/?x=1&amp;y=2)")).toEqual([link("https://a.example/?x=1&amp;y=2", "a & b")]);
+    expect(parseInline("*&lt;b&gt;*")).toEqual([{ t: "em", c: [text("<b>")] }]);
+    expect(parseInline("`&amp;`")).toEqual([{ t: "code", v: "&amp;" }]);
+    expect(parseInline("https://a.example/?x=1&amp;y=2")).toEqual([link("https://a.example/?x=1&amp;y=2", "https://a.example/?x=1&amp;y=2")]);
+    expect(parseNotes("```\n&amp;\n```")).toEqual([{ kind: "code", text: "&amp;" }]);
+  });
+
+  it("an entity is text: it never makes markup, a delimiter or a link", () => {
+    expect(parseInline("&#42;a&#42;")).toEqual([text("*a*")]);
+    expect(parseInline("&lt;script&gt;alert(1)&lt;/script&gt;")).toEqual([text("<script>alert(1)</script>")]);
+    const el = show("&lt;img src=x onerror=alert(1)&gt; &#91;x&#93;&#40;javascript:alert(1)&#41;");
+    expect(el.querySelector("img, a")).toBeNull();
+    expect(el.textContent).toBe("<img src=x onerror=alert(1)> [x](javascript:alert(1))");
+  });
+
+  it("the table has the HTML names, as text", () => {
+    expect(Object.keys(namedEntities)).toHaveLength(2125);
+    for (const [name, v] of Object.entries(namedEntities)) {
+      expect(name).toMatch(/^[A-Za-z][A-Za-z0-9]{1,31}$/);
+      expect([...v].length).toBeGreaterThanOrEqual(1);
+      expect([...v].length).toBeLessThanOrEqual(2);
+    }
+    // The values agree with the browser's HTML parser (jsdom), checked
+    // through a text node so no markup is built.
+    const sample = ["amp", "lt", "gt", "quot", "apos", "nbsp", "auml", "Ouml", "szlig", "euro", "hellip", "ndash", "NotNestedLessLess", "Afr", "bne"];
+    for (const name of sample) {
+      const doc = new DOMParser().parseFromString(`<p>&${name};</p>`, "text/html");
+      expect(namedEntities[name], name).toBe(doc.querySelector("p")!.textContent);
+    }
+  });
+});
+
+describe("bare addresses: hostile input (#131)", () => {
+  it("never links another scheme written bare, or an entity-encoded one", () => {
+    for (const md of [
+      "javascript:alert(1)",
+      "javascript://example.com/%0aalert(1)",
+      "JAVASCRIPT:alert('https://a.example')",
+      "data:text/html,<script>alert(1)</script>",
+      "vbscript:msgbox(1)",
+      "file:///etc/passwd",
+      "&#106;avascript:alert(1)",
+      "&#104;ttps://evil.example",
+      "&#x68;ttp://evil.example",
+      "http&#58;//evil.example",
+      "https&colon;//evil.example",
+      "&lt;javascript:alert(1)&gt;",
+      "mailto&#58;a@b.example",
+      "ｈｔｔｐｓ://evil.example",
+      "\u200bhttps\u200b://evil.example",
+      "java\u00adscript:alert(1)",
+    ]) {
+      const nodes = parseInline(md);
+      for (const [href] of linksOf(nodes)) expect(href, md).toMatch(/^(https?|mailto|tel):/);
+      expect(linksOf(nodes).filter(([href]) => href.includes("evil") || href.startsWith("javascript")), md).toEqual([]);
+      const el = show(md);
+      for (const a of el.querySelectorAll("a")) expect(a.getAttribute("href"), md).toMatch(/^(https?|mailto|tel):/);
+    }
+  });
+
+  it("a javascript: text before a URL links only the URL", () => {
+    expect(linksOf(parseInline("javascript:alert(1)//https://a.example/x"))).toEqual([["https://a.example/x", "https://a.example/x"]]);
+  });
+
+  it("stops at invisible and control characters, and the href is what the browser follows", () => {
+    expect(linksOf(parseInline("https://a.example/x\u202e/gpj.exe"))).toEqual([["https://a.example/x", "https://a.example/x"]]);
+    expect(linksOf(parseInline("https://a.example/x\u200bevil"))).toEqual([["https://a.example/x", "https://a.example/x"]]);
+    expect(linksOf(parseInline("https://a.example/x\u00a0y"))).toEqual([["https://a.example/x", "https://a.example/x"]]);
+    expect(linksOf(parseInline("https://\u202eevil.example"))).toEqual([]);
+    // A look-alike host: the href is the host's punycode, as the browser reads it.
+    expect(linksOf(parseInline("https://аpple.example/"))).toEqual([["https://xn--pple-43d.example/", "https://аpple.example/"]]);
+    // User info: the href names the real host.
+    expect(linksOf(parseInline("https://bank.example@evil.example/"))).toEqual([["https://bank.example@evil.example/", "https://bank.example@evil.example/"]]);
+  });
+
+  it("a very long address is one link", () => {
+    const long = "https://a.example/" + "a".repeat(100_000);
+    const links = linksOf(parseInline(long));
+    expect(links).toHaveLength(1);
+    expect(links[0]![1]).toBe(long);
+    const mail = "a".repeat(50_000) + "@" + "b".repeat(50_000) + ".example";
+    expect(linksOf(parseInline(mail))).toEqual([["mailto:" + mail, mail]]);
   });
 });
 
@@ -250,6 +482,7 @@ describe("link safety", () => {
     for (const [file, src] of <[string, string][]>[
       ["markdown.ts", markdownSource],
       ["DocumentDetail.tsx", detailSource],
+      ["htmlEntities.ts", entitiesSource],
     ]) {
       expect(src.length, file).toBeGreaterThan(1000);
       expect(src, file).not.toMatch(/dangerouslySetInnerHTML|innerHTML|outerHTML|insertAdjacentHTML|createContextualFragment/);
@@ -297,6 +530,30 @@ describe("work bound", () => {
     ["quotes", repeat("> *a\n")],
     ["fences", repeat("```\n")],
     ["one line of spaces", " ".repeat(size - 1) + "x"],
+    // Bare addresses and entities (#131).
+    ["bare URLs", repeat("https://a.example/x, ")],
+    ["one bare URL", "https://a.example/" + "a".repeat(size - 18)],
+    ["URL starts without a host", repeat("http://")],
+    ["URL starts after punctuation", repeat("(http://")],
+    ["www starts", repeat("www.")],
+    ["www without a dot", repeat("www.a ")],
+    ["trailing punctuation", "https://a.example/" + ".".repeat(size - 18)],
+    ["trailing entities", "https://a.example/" + "&amp;".repeat(Math.ceil((size - 18) / 5))],
+    ["trailing semicolons", "https://a.example/" + "a;".repeat((size - 18) / 2)],
+    ["unopened brackets", repeat("https://a.example/)")],
+    ["nested brackets", "https://a.example/" + "(".repeat((size - 18) / 2) + ")".repeat((size - 18) / 2)],
+    ["e-mail addresses", repeat("a@b.example ")],
+    ["local parts without a domain", repeat("a.b_c@")],
+    ["underscores before one @", "a_".repeat(size / 2 - 15) + "@" + "b".repeat(30)],
+    ["underscores before an @ without a domain", "a_".repeat(size / 2 - 15) + "@" + "b-".repeat(15)],
+    ["at signs", repeat("@")],
+    ["long domain without a dot", "a@" + "b".repeat(size - 2)],
+    ["dots", repeat("a.")],
+    ["bare addresses inside a link's text", "[" + repeat("www.a.example ").slice(0, size - 20) + "](https://a.example)"],
+    ["bare addresses inside link texts", repeat("[a@b.example](https://a.example) ")],
+    ["entities", repeat("&amp;&#228;&#x1F600;")],
+    ["entity starts", repeat("&")],
+    ["long entity names", repeat("&" + "a".repeat(40))],
   ];
 
   it.each(inputs)("%s: at most 10 steps per character", (_, md) => {

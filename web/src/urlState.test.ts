@@ -6,7 +6,7 @@ const empty = parseState("");
 
 describe("parseState and formatState", () => {
   it("round-trip every field", () => {
-    const s: ViewState = { q: "Rechnung tag:Steuer & mehr", inbox: "1", fav: "1", tag: "t1", corr: "c1", type: "d1", sort: "date", order: "asc", all: "1", doc: "x", view: "log" };
+    const s: ViewState = { q: "Rechnung tag:Steuer & mehr", inbox: "1", fav: "1", trash: "1", tag: "t1", corr: "c1", type: "d1", sort: "date", order: "asc", all: "1", doc: "x", view: "log" };
     expect(parseState(formatState(s))).toEqual(s);
   });
   it("leave defaults out of the URL", () => {
@@ -28,6 +28,13 @@ describe("filters", () => {
     expect({ ...t, ...filterPatch(null) }).toEqual(empty);
     expect(activeFilter(empty)).toBeNull();
   });
+  it("make the trash one of them: choosing it clears the others, and another clears it", () => {
+    const s = { ...empty, ...filterPatch({ kind: "tag", id: "t1" }), ...filterPatch({ kind: "trash" }) };
+    expect(s).toEqual({ ...empty, trash: "1" });
+    expect(activeFilter(s)).toEqual({ kind: "trash" });
+    expect({ ...s, ...filterPatch({ kind: "fav" }) }).toEqual({ ...empty, fav: "1" });
+    expect(formatState(s)).toBe("?trash=1");
+  });
 });
 
 describe("documentQuery", () => {
@@ -44,6 +51,30 @@ describe("documentQuery", () => {
     // The default with a search is relevance too.
     expect(documentQuery({ ...empty, q: "x", order: "asc" }, false)).toMatchObject({ sort: "", ascending: false });
     expect(documentQuery({ ...empty, q: "x", sort: "date", order: "asc" }, false)).toMatchObject({ sort: "date", ascending: true });
+  });
+});
+
+describe("documentQuery in the trash", () => {
+  it("lists the trash newest deleted first, with the search but without the sidebar's filters", () => {
+    expect(documentQuery({ ...empty, trash: "1", tag: "t1", inbox: "1" }, true)).toEqual({
+      q: "",
+      inbox: false,
+      favorite: false,
+      tag: "",
+      correspondent: "",
+      type: "",
+      sort: "deleted",
+      ascending: false,
+      ownOnly: true,
+      trashed: true,
+    });
+    // A search ranks by relevance unless another order is chosen; deleted has one direction.
+    expect(documentQuery({ ...empty, trash: "1", q: "x" }, false)).toMatchObject({ q: "x", sort: "", trashed: true });
+    expect(documentQuery({ ...empty, trash: "1", q: "x", sort: "deleted", order: "asc" }, false)).toMatchObject({ sort: "deleted", ascending: false });
+    expect(documentQuery({ ...empty, trash: "1", sort: "date", order: "asc" }, false)).toMatchObject({ sort: "date", ascending: true });
+  });
+  it("ignores deleted outside the trash", () => {
+    expect(documentQuery({ ...empty, sort: "deleted", order: "asc" }, false)).toMatchObject({ sort: "", ascending: true, trashed: false });
   });
 });
 

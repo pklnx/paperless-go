@@ -12,6 +12,7 @@ import { MetadataPage } from "./MetadataPage";
 import { ProfilePage } from "./Profile";
 import { Sheet } from "./Sheet";
 import { Sidebar, type Loaded } from "./Sidebar";
+import { Toast, useNotice } from "./Toast";
 import { useCollapsedTags } from "./tagTree";
 import { UploadQueue } from "./uploads";
 import { UsersPage } from "./UsersPage";
@@ -56,6 +57,12 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
   // each change on the metadata page: counts and names again.
   const [edits, setEdits] = useState(0);
   const onChanged = useCallback(() => setEdits((n) => n + 1), []);
+  // A duplicate upload's trashed document restored from the upload panel: the list and counts again.
+  const [restoredUploads, setRestoredUploads] = useState(0);
+  const onUploadRestored = useCallback(() => {
+    setRestoredUploads((n) => n + 1);
+    onChanged();
+  }, [onChanged]);
   useEffect(() => {
     const ctl = new AbortController();
     documentsApi.counts(ownOnly, ctl.signal).then(setCounts, () => {
@@ -71,6 +78,41 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
     return () => ctl.abort();
   }, [ownOnly, imported, edits]);
   const collapsed = useCollapsedTags(user.name, metadata.data?.tags ?? null);
+  // Opening the trash counts again: a document may have been deleted elsewhere.
+  const inTrashView = state.trash === "1" && state.view === "";
+  useEffect(() => {
+    if (inTrashView) onChanged();
+  }, [inTrashView, onChanged]);
+  // The notices (Delete's Undo, results of changes) live here, so they
+  // outlive the list: another page opened within their time keeps them.
+  const notices = useNotice();
+  const notify = notices.show;
+  // An Undo of a delete: the list now shown loads every page again (the
+  // list that showed the notice may be gone and mounted anew since).
+  const [undone, setUndone] = useState(0);
+  const onUndone = useCallback(() => setUndone((n) => n + 1), []);
+  // The caller's own trash, for "Empty trash" (always the own trash): the
+  // sidebar's count is everyone's while an admin's switch is on.
+  const [ownTrash, setOwnTrash] = useState<number | null>(null);
+  useEffect(() => {
+    if (!everyone) {
+      setOwnTrash(counts?.trash ?? null);
+      return;
+    }
+    // Asked for only where the button is: in the trash.
+    if (!inTrashView) {
+      setOwnTrash(null);
+      return;
+    }
+    const ctl = new AbortController();
+    documentsApi.counts(true, ctl.signal).then(
+      (c) => setOwnTrash(c.trash ?? null),
+      () => {
+        if (!ctl.signal.aborted) setOwnTrash(null);
+      },
+    );
+    return () => ctl.abort();
+  }, [everyone, counts, inTrashView]);
 
   // "All documents" lists everything: no filter, no search. Another entry
   // keeps the search and replaces the filter.
@@ -118,7 +160,8 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
       <WindowDrop
         onFiles={(files) => {
           queue.add(files);
-          if (view !== "") update({ view: "", doc: "" });
+          // The uploads show on the documents' page, which the trash is not.
+          if (view !== "" || state.trash === "1") update({ view: "", doc: "", trash: "" });
         }}
       />
       <aside className="hidden w-64 shrink-0 flex-col overflow-y-auto border-r border-line bg-surface-sunken md:flex" data-testid="sidebar">
@@ -139,8 +182,22 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
         <main className="flex-1 overflow-y-auto">
           {view === "" && (
             <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6">
-              <DocumentsUpload queue={queue} maxSize={maxSize} />
-              <DocumentList state={state} update={update} query={query} user={user} metadata={metadata.data} everyone={everyone} reload={imported} onMaxUploadSize={onMaxUploadSize} onChanged={onChanged} />
+              {state.trash !== "1" && <DocumentsUpload queue={queue} maxSize={maxSize} onRestored={onUploadRestored} />}
+              <DocumentList
+                state={state}
+                update={update}
+                query={query}
+                user={user}
+                metadata={metadata.data}
+                everyone={everyone}
+                reload={imported + restoredUploads}
+                onMaxUploadSize={onMaxUploadSize}
+                onChanged={onChanged}
+                notify={notify}
+                onUndone={onUndone}
+                undone={undone}
+                ownTrash={ownTrash}
+              />
             </div>
           )}
           {view === "metadata" && <MetadataPage metadata={metadata} userId={user.id} onChanged={onChanged} open={select} />}
@@ -149,6 +206,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
           {view === "users" && <UsersPage />}
         </main>
       </div>
+      <Toast notice={notices.notice} close={notices.close} pause={notices.pause} resume={notices.resume} />
       <Sheet open={menuOpen} onClose={closeMenu} title={t.navigation}>
         {sidebar}
       </Sheet>

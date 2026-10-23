@@ -4,13 +4,15 @@ import { BulkBar, bulkErrorText, type BulkTarget } from "./BulkBar";
 import { DocumentDetail } from "./DocumentDetail";
 import { documentName, ProcessingStatus } from "./DocumentParts";
 import { EmptyState } from "./EmptyState";
-import { ArrowIcon, CloseIcon, DocumentIcon, InboxIcon, SearchIcon, StarIcon } from "./icons";
+import { ArrowIcon, CloseIcon, DocumentIcon, InboxIcon, SearchIcon, StarIcon, TrashIcon } from "./icons";
 import { lang, t } from "./i18n";
-import { clickSelect, maxSelection, pruneSelection, selectAll, useLongPress } from "./selection";
+import { clickSelect, pruneSelection, selectAll, selectionLimit, useLongPress } from "./selection";
 import { snippetParts } from "./snippet";
 import { button, input } from "./styles";
 import { chipInk } from "./tagTree";
-import { activeFilter, filterPatch, formatState, type UpdateState, type ViewState } from "./urlState";
+import type { Notice, Notify } from "./Toast";
+import { EmptyTrash, foreignOwners, PurgeConfirm, trashDay, trashErrorText } from "./Trash";
+import { activeFilter, filterPatch, formatState, parseState, type UpdateState, type ViewState } from "./urlState";
 
 /** How many documents a page of the list holds. */
 export const pageSize = 50;
@@ -55,14 +57,23 @@ interface Props {
   onMaxUploadSize: (bytes: number) => void;
   /** A document was changed in its detail, or several by a bulk change: counts and names may differ now. */
   onChanged?: () => void;
+  /** Shows a notice of the shell (Undo, results): it outlives the list. */
+  notify?: Notify;
+  /** An Undo went through: the shell counts it (undone), and the list shown then loads again. */
+  onUndone?: () => void;
+  undone?: number;
+  /** The caller's own trash count (Empty trash empties only that); null when unknown. */
+  ownTrash?: number | null;
 }
 
 /**
  * The document list: the search field, the active filter as a chip, the
  * sort, the documents with "Load more" (keyset paging), and an empty state
- * for each case.
+ * for each case. The trash (state.trash) is the same list of trashed
+ * documents, with Restore and Delete permanently instead of Delete, and
+ * "Empty trash".
  */
-export function DocumentList({ state, update, query, user, metadata, everyone, reload, onMaxUploadSize, onChanged }: Props) {
+export function DocumentList({ state, update, query, user, metadata, everyone, reload, onMaxUploadSize, onChanged, notify, onUndone, undone = 0, ownTrash = null }: Props) {
   const key = JSON.stringify(query);
   const [list, setList] = useState<ListState>({ key, docs: null, first: new Set(), cursor: "", loading: true, error: "" });
   const ctl = useRef<AbortController | null>(null);
@@ -152,6 +163,19 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     );
   };
 
+  const trash = query.trashed;
+  const showNotice = (n: Notice) => notify?.(n);
+  // Rows with a Delete or Restore in flight: a second click sends nothing.
+  const busyRef = useRef(new Set<string>());
+  const [busyRows, setBusyRows] = useState<ReadonlySet<string>>(() => new Set());
+  const markBusy = (id: string, on: boolean) => {
+    if (on) busyRef.current.add(id);
+    else busyRef.current.delete(id);
+    setBusyRows(new Set(busyRef.current));
+  };
+  // A document that left the list: deleted, restored from the trash, or deleted permanently.
+  const removeDoc = (id: string) =>
+    setList((l) => (l.docs ? { ...l, docs: l.docs.filter((x) => x.id !== id), first: new Set([...l.first].filter((x) => x !== id)) } : l));
   const replaceDoc = (d: DocumentSummary) => setList((l) => l.docs ? { ...l, docs: l.docs.map((x) => (x.id === d.id ? { ...d, snippet: x.snippet } : x)) } : l);
   // A saved document: its row follows. The inbox list drops a document
   // that left the inbox, as its next load would.
@@ -161,6 +185,100 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     onChanged?.();
   };
   const openDoc = (id: string) => update({ doc: id });
+  // A delete answered late: the detail closes only if it still shows that
+  // document (the user may have gone to another one, or closed it).
+  const closeIfOpen = (id: string) => {
+    if (parseState(window.location.search).doc === id) update({ doc: "" });
+  };
+
+  // Undo of a delete: restore, then the list as it is now (the latest
+  // refresh, for the list shown when Undo is clicked).
+  const refreshRef = useRef<() => void>(() => {});
+  const undo = (d: DocumentSummary) => {
+    documentsApi.restore(d.id).then(
+      () => {
+        showNotice({ text: t.restoredDocument(documentName(d)) });
+        // Through the shell: the list shown now may be another instance.
+        if (onUndone) onUndone();
+        else refreshRef.current();
+        onChanged?.();
+      },
+      (err: unknown) => showNotice({ text: trashErrorText(err, "restore"), error: true }),
+    );
+  };
+  // A document moved to the trash (from its row or its detail): out of
+  // the list, and a notice with Undo. No question first (#12, decision 4).
+  const trashed = (d: DocumentSummary) => {
+    removeDoc(d.id);
+    onChanged?.();
+    showNotice({ text: t.movedToTrash(documentName(d)), action: { label: t.undo, run: () => undo(d) }, focus: true });
+  };
+  const trashDoc = (d: DocumentSummary) => {
+    if (busyRef.current.has(d.id)) return;
+    markBusy(d.id, true);
+    documentsApi.trash(d.id).then(
+      () => {
+        markBusy(d.id, false);
+        trashed(d);
+      },
+      (err: unknown) => {
+        markBusy(d.id, false);
+        showNotice({ text: trashErrorText(err, "trash"), error: true, focus: true });
+      },
+    );
+  };
+  // Restored from the trash: out of the trash list, or its row follows.
+  const restored = (d: DocumentSummary) => {
+    if (trash) removeDoc(d.id);
+    else replaceDoc(d);
+    onChanged?.();
+    showNotice({ text: t.restoredDocument(documentName(d)), focus: true });
+  };
+  const restoreDoc = (d: DocumentSummary) => {
+    if (busyRef.current.has(d.id)) return;
+    markBusy(d.id, true);
+    documentsApi.restore(d.id).then(
+      (back) => {
+        markBusy(d.id, false);
+        restored(back);
+      },
+      (err: unknown) => {
+        markBusy(d.id, false);
+        showNotice({ text: trashErrorText(err, "restore"), error: true, focus: true });
+      },
+    );
+  };
+  const purged = (d: DocumentSummary) => {
+    removeDoc(d.id);
+    onChanged?.();
+    showNotice({ text: t.purgedDocument(documentName(d)), focus: true });
+  };
+  // Deleting permanently always asks first.
+  const [purging, setPurging] = useState<{ doc: DocumentSummary; busy: boolean; error: string } | null>(null);
+  // Which question is shown: an answer for one closed meanwhile (Cancel)
+  // does not open it again; its error goes to the notice.
+  const purgeAsk = useRef(0);
+  const askPurge = (d: DocumentSummary | null) => {
+    purgeAsk.current++;
+    setPurging(d && { doc: d, busy: false, error: "" });
+  };
+  const purgeDoc = () => {
+    if (!purging || purging.busy) return;
+    const d = purging.doc;
+    const mine = purgeAsk.current;
+    setPurging({ doc: d, busy: true, error: "" });
+    documentsApi.purge(d.id).then(
+      () => {
+        if (purgeAsk.current === mine) setPurging(null);
+        purged(d);
+      },
+      (err: unknown) => {
+        const text = trashErrorText(err, "purge");
+        if (purgeAsk.current === mine) setPurging({ doc: d, busy: false, error: text });
+        else showNotice({ text, error: true });
+      },
+    );
+  };
 
   // After a bulk change: every loaded page again, in place, so the
   // rows and the selection stay where they were. Only the first page of
@@ -196,6 +314,14 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
       },
     );
   };
+  refreshRef.current = refresh;
+  // An Undo since this list was shown (not the count it started with).
+  const seenUndone = useRef(undone);
+  useEffect(() => {
+    if (seenUndone.current === undone) return;
+    seenUndone.current = undone;
+    refreshRef.current();
+  }, [undone]);
 
   // The selection: checked IDs of loaded documents (at most maxSelection),
   // or, after "Select all matches", every match of the search.
@@ -233,7 +359,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     setSelected(r.ids);
     setCapped(r.capped);
   };
-  const allLoaded = order.length > 0 && (selected.size === Math.min(order.length, maxSelection));
+  const allLoaded = order.length > 0 && (selected.size === Math.min(order.length, selectionLimit.max));
   const toggleAll = () => {
     selectionGen.current++;
     setMatchSel(null);
@@ -250,7 +376,8 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     setSelectError("");
     const k = key;
     const gen = ++selectionGen.current;
-    bulkApi.count(bulkMatch(query)).then(
+    // In the trash a dry run needs an action that works there; the bar counts again for its own.
+    bulkApi.count(bulkMatch(query), trash ? "restore" : undefined).then(
       (c) => {
         // Counted for a list that is no longer shown, or the selection was
         // chosen anew since: not this selection.
@@ -275,6 +402,8 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   // How many owners the selection has: the dry run's count for all matches.
   const selectedOwners = allMatches !== null ? (matchSel?.owners ?? 0) : owners.size;
   const selecting = target !== null;
+  // An admin's checked documents of other users: the confirmations name their owners.
+  const ownerNames = "ids" in (target ?? {}) ? foreignOwners((loaded ?? []).filter((d) => selected.has(d.id)), user) : [];
 
   const filter = activeFilter(state);
   // The chip says what kind of filter it is ("Tag: Steuer"); the heading names the list.
@@ -282,28 +411,59 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     if (!filter) return ["", ""];
     if (filter.kind === "inbox") return [t.inbox, t.inbox];
     if (filter.kind === "fav") return [t.favorites, t.favorites];
+    if (filter.kind === "trash") return [t.trash, t.trash];
     const rows = filter.kind === "tag" ? metadata?.tags : filter.kind === "corr" ? metadata?.correspondents : metadata?.documentTypes;
     const name = rows?.find((r) => r.id === filter.id)?.name ?? t.unknownEntry;
     return [filter.kind === "tag" ? t.tagFilter(name) : filter.kind === "corr" ? t.correspondentFilter(name) : t.typeFilter(name), name];
   })();
-  const title = query.q ? t.searchResults : filter ? listName : t.allDocuments;
+  const title = trash ? t.trash : query.q ? t.searchResults : filter ? listName : t.allDocuments;
   const docs = list.key === key ? list.docs : null;
 
   const detail = state.doc !== "" && state.view === "";
   return (
     <>
     {detail && (
-      <DocumentDetail id={state.doc} user={user} docs={docs ?? []} inboxList={query.inbox} open={openDoc} close={() => update({ doc: "" })} onSaved={savedDoc} />
+      <DocumentDetail
+        id={state.doc}
+        user={user}
+        docs={docs ?? []}
+        inboxList={query.inbox}
+        open={openDoc}
+        close={() => update({ doc: "" })}
+        onSaved={savedDoc}
+        onTrashed={(d) => {
+          trashed(d);
+          closeIfOpen(d.id);
+        }}
+        onRestored={restored}
+        onStale={onChanged}
+        onPurged={(d) => {
+          purged(d);
+          closeIfOpen(d.id);
+        }}
+        onTrashError={(text) => showNotice({ text, error: true })}
+      />
     )}
     <section className="flex flex-col gap-3" aria-labelledby="list-title" inert={detail}>
       <SearchField q={state.q} search={(q) => update({ q, doc: "" })} />
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 id="list-title" className="min-w-0 font-semibold wrap-anywhere">
+        <h2 id="list-title" tabIndex={-1} className="min-w-0 font-semibold wrap-anywhere outline-none">
           {title}
         </h2>
         <SortControls state={state} query={query} update={update} />
       </div>
-      {filter && (
+      {/* Empty trash acts on the own trash, whatever the list shows: by its count, else by the rows. */}
+      {trash && (ownTrash !== null ? ownTrash > 0 : (docs?.length ?? 0) > 0) && (
+        <EmptyTrash
+          everyone={everyone}
+          notify={showNotice}
+          onDone={() => {
+            refresh();
+            onChanged?.();
+          }}
+        />
+      )}
+      {filter && filter.kind !== "trash" && (
         <div className="flex flex-wrap gap-2">
           <span className="flex h-8 items-center gap-1 rounded-full border border-accent-soft bg-accent-soft pl-3 text-[13px] font-medium text-accent-soft-ink pointer-coarse:h-11">
             <span className="wrap-anywhere">{filterName}</span>
@@ -334,6 +494,16 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
       )}
       {!docs && list.loading && <p className="text-sm text-ink-muted">{t.loading}</p>}
       {docs && docs.length === 0 && <Empty query={query} clearSearch={() => update({ q: "" })} showAll={() => update(filterPatch(null))} />}
+      <PurgeConfirm
+        open={purging !== null}
+        title={purging ? t.purgeTitle(documentName(purging.doc)) : ""}
+        n={1}
+        owners={purging ? foreignOwners([purging.doc], user) : []}
+        busy={purging?.busy}
+        error={purging?.error}
+        confirm={purgeDoc}
+        cancel={() => askPurge(null)}
+      />
       {docs && docs.length > 0 && (
         <ul aria-label={title} className="flex flex-col gap-2 md:gap-0 md:divide-y md:divide-line md:rounded-lg md:border md:border-line">
           {docs.map((d) => (
@@ -348,6 +518,11 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
               checked={allMatches !== null || selected.has(d.id)}
               selecting={selecting}
               onPick={(shift) => pick(d.id, shift)}
+              trash={trash}
+              busy={busyRows.has(d.id)}
+              onDelete={() => trashDoc(d)}
+              onRestore={() => restoreDoc(d)}
+              onPurge={() => askPurge(d)}
             />
           ))}
         </ul>
@@ -363,6 +538,10 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
           metadata={metadata}
           ownerId={selectedOwner}
           owners={selectedOwners}
+          trash={trash}
+          ownerNames={ownerNames}
+          purgeByMatch={!everyone}
+          notify={showNotice}
           onDone={() => {
             // The count of all matches is stale after a change: back to the checked rows.
             setMatchSel(null);
@@ -411,11 +590,14 @@ function SearchField({ q, search }: { q: string; search: (q: string) => void }) 
   );
 }
 
-/** The sort: added or document date, either direction; relevance (one direction) while searching. */
+/** The sort: added or document date, either direction; relevance (one direction) while searching; in the trash also deleted (newest first). */
 function SortControls({ state, query, update }: { state: ViewState; query: DocumentQuery; update: UpdateState }) {
   const searching = query.q !== "";
-  const sort = query.sort || (searching ? "relevance" : "added");
-  const relevance = sort === "relevance";
+  const trash = query.trashed;
+  const fallback = searching ? "relevance" : trash ? "deleted" : "added";
+  const sort = query.sort || fallback;
+  // Relevance and deleted have one direction.
+  const relevance = sort === "relevance" || sort === "deleted";
   return (
     <div className="flex items-center gap-1">
       <label className="flex items-center gap-1.5 text-sm text-ink-muted">
@@ -426,10 +608,11 @@ function SortControls({ state, query, update }: { state: ViewState; query: Docum
           onChange={(e) => {
             const v = e.target.value as ViewState["sort"];
             // The default stays out of the URL.
-            update({ sort: v === (searching ? "relevance" : "added") ? "" : v, order: v === "relevance" ? "" : state.order });
+            update({ sort: v === fallback ? "" : v, order: v === "relevance" || v === "deleted" ? "" : state.order });
           }}
         >
           {searching && <option value="relevance">{t.sortRelevance}</option>}
+          {trash && <option value="deleted">{t.sortDeleted}</option>}
           <option value="added">{t.sortAdded}</option>
           <option value="date">{t.sortDate}</option>
         </select>
@@ -439,7 +622,7 @@ function SortControls({ state, query, update }: { state: ViewState; query: Docum
         className={`${button} flex items-center gap-1 disabled:opacity-40`}
         disabled={relevance}
         aria-label={query.ascending ? t.sortOldestFirst : t.sortNewestFirst}
-        title={relevance ? t.sortRelevanceOrder : query.ascending ? t.sortOldestFirst : t.sortNewestFirst}
+        title={sort === "relevance" ? t.sortRelevanceOrder : query.ascending ? t.sortOldestFirst : t.sortNewestFirst}
         onClick={() => update({ order: query.ascending ? "" : "asc" })}
       >
         <ArrowIcon up={query.ascending} />
@@ -449,6 +632,13 @@ function SortControls({ state, query, update }: { state: ViewState; query: Docum
 }
 
 function Empty({ query, clearSearch, showAll }: { query: DocumentQuery; clearSearch: () => void; showAll: () => void }) {
+  if (query.trashed && !query.q) {
+    return (
+      <EmptyState icon={<TrashIcon />} title={t.trashEmpty}>
+        {t.trashEmptyText}
+      </EmptyState>
+    );
+  }
   const filtered = query.inbox || query.favorite || query.tag !== "" || query.correspondent !== "" || query.type !== "";
   if (query.q) {
     return (
@@ -546,7 +736,7 @@ function SelectionHeader({ allLoaded, some, count, capped, allMatches, moreMatch
           </>
         )}
       </div>
-      {capped && <p className="text-ink-muted">{t.selectionCapped(maxSelection)}</p>}
+      {capped && <p className="text-ink-muted">{t.selectionCapped(selectionLimit.max)}</p>}
       {error && (
         <p role="alert" className="text-danger">
           {error}
@@ -568,9 +758,18 @@ interface RowProps {
   /** Something is selected: on phones the checkboxes show (before, a long press starts selecting). */
   selecting: boolean;
   onPick: (shift: boolean) => void;
+  /** The row is in the trash: its dates, Restore and Delete permanently instead of Delete. */
+  trash: boolean;
+  /** A Delete or Restore of the row is in flight. */
+  busy: boolean;
+  onDelete: () => void;
+  onRestore: () => void;
+  onPurge: () => void;
 }
 
-function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen, checked, selecting, onPick }: RowProps) {
+const rowAction = "hover:underline disabled:opacity-50 pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center";
+
+function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen, checked, selecting, onPick, trash, busy, onDelete, onRestore, onPurge }: RowProps) {
   const name = documentName(d);
   const press = useLongPress(() => {
     if (!checked) onPick(false);
@@ -622,10 +821,27 @@ function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen, checked,
           {correspondent && <span className="wrap-anywhere">{correspondent}</span>}
           {type && <span className="wrap-anywhere">{type}</span>}
           {owner && <span className="wrap-anywhere">{t.ownedBy(owner)}</span>}
-          <a className="text-accent-ink hover:underline pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center" href={documentsApi.fileURL(d.id)} download>
+          <a className={`${rowAction} text-accent-ink`} href={documentsApi.fileURL(d.id)} download>
             {t.download}
           </a>
+          {trash ? (
+            <>
+              <button type="button" className={`${rowAction} text-accent-ink`} aria-label={t.restoreLabel(name)} disabled={busy} onClick={onRestore}>
+                {t.restore}
+              </button>
+              <button type="button" className={`${rowAction} text-danger`} aria-label={t.purgeLabel(name)} disabled={busy} onClick={onPurge}>
+                {t.purge}
+              </button>
+            </>
+          ) : (
+            <button type="button" className={`${rowAction} text-accent-ink`} aria-label={t.deleteDocumentLabel(name)} disabled={busy} onClick={onDelete}>
+              {t.deleteDocument}
+            </button>
+          )}
         </div>
+        {trash && (d.deletedAt || d.purgeAt) && (
+          <p className="text-sm text-ink-muted">{[d.deletedAt ? t.deletedOn(trashDay(d.deletedAt)) : "", d.purgeAt ? t.removedOn(trashDay(d.purgeAt)) : ""].filter(Boolean).join(" · ")}</p>
+        )}
         {tags.length > 0 && (
           <ul aria-label={t.tags} className="flex flex-wrap gap-1">
             {tags.map((x) => (

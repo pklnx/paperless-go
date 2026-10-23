@@ -8,6 +8,7 @@ import type { PickerOption } from "./Picker";
 import { Picker } from "./Picker";
 import { Preview } from "./DocumentPreview";
 import { button, input, primary } from "./styles";
+import { inTrash, PurgeConfirm, foreignOwners, trashDay, trashErrorText } from "./Trash";
 import { buildTagTree, type TagNode } from "./tagTree";
 import { sortByName } from "./collate";
 import { formatSize } from "./uploads";
@@ -26,6 +27,16 @@ interface Props {
   close: () => void;
   /** A change was saved: the document as it is now. */
   onSaved: (d: Doc) => void;
+  /** The document was moved to the trash (Delete): the list drops it, offers Undo and closes the detail. */
+  onTrashed: (d: Doc) => void;
+  /** The document came back from the trash: the document as it is now. */
+  onRestored: (d: Doc) => void;
+  /** The document was deleted permanently: the list drops it and closes the detail. */
+  onPurged: (d: Doc) => void;
+  /** The document turned out to be changed elsewhere (trashed): the counts load again. */
+  onStale?: () => void;
+  /** A delete or purge failed after the detail moved on: the list says so instead. */
+  onTrashError?: (text: string) => void;
 }
 
 /** The fields an error can be shown at. */
@@ -58,7 +69,7 @@ function tagOptions(nodes: TagNode[], depth = 0): PickerOption[] {
  * or next document of the list, Escape closes. Unsaved changes are asked
  * about before leaving (in the app and when the page is left).
  */
-export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved }: Props) {
+export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved, onTrashed, onRestored, onPurged, onStale, onTrashError }: Props) {
   const headingId = useId();
   const [doc, setDoc] = useState<Doc | null>(null);
   const [form, setForm] = useState<DocumentForm | null>(null);
@@ -67,6 +78,9 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   const [saved, setSaved] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<ErrorField, ReactNode>>>({});
   const [general, setGeneral] = useState("");
+  // Delete, Restore or Delete permanently in flight; the confirmation of the last.
+  const [trashBusy, setTrashBusy] = useState(false);
+  const [purgeAsk, setPurgeAsk] = useState<{ error: string } | null>(null);
   // The notes: rendered from their Markdown, or the textarea (Edit, and
   // always for empty notes when the document opens or is saved).
   const [notesEditing, setNotesEditing] = useState(false);
@@ -103,6 +117,8 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     setSaved(false);
     setSaving(false);
     setNotesEditing(false);
+    setTrashBusy(false);
+    setPurgeAsk(null);
     documentsApi.get(id, ctl.signal).then(
       (d) => {
         setDoc(d);
@@ -163,8 +179,10 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   // keys, swipe): Done may still navigate when it answers. Escape, close,
   // Back and the sidebar still go through the guard; a late answer is
   // dropped then (visit).
-  const nav = useRef({ prev, next, close, open, saving });
-  nav.current = { prev, next, close, open, saving };
+  // Nor while a delete, restore or purge runs: its answer belongs to this document.
+  const busy = saving || trashBusy;
+  const nav = useRef({ prev, next, close, open, saving: busy });
+  nav.current = { prev, next, close, open, saving: busy };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -233,11 +251,12 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     const code = err.body.code;
     if (code === "asn_taken") {
       const other = typeof err.body.documentId === "string" ? err.body.documentId : "";
+      const taken = err.body.trashed === true ? t.asnTakenTrashed : t.asnTaken;
       return {
         field: "asn",
         text: other ? (
           <>
-            {t.asnTaken}{" "}
+            {taken}{" "}
             <a
               className="text-accent-ink underline"
               href={docHref(other)}
@@ -250,7 +269,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
             </a>
           </>
         ) : (
-          t.asnTaken
+          taken
         ),
       };
     }
@@ -259,6 +278,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     if (code === "invalid_notes") return { field: "notes", text: t.invalidNotes };
     if (code === "owner_mismatch") return { text: t.ownerMismatch };
     if (code === "document_changed") return { text: t.documentChanged };
+    if (code === "in_trash") return { text: t.inTrashError };
     if (err.status === 404) return { text: t.documentNotFound };
     if (err.status === 503) return { text: t.tryAgainLater };
     return { text: t.failed(err.message) };
@@ -311,6 +331,26 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
           rebase(doc, form);
           return;
         }
+        // Moved to the trash elsewhere: load it again, so the banner
+        // shows, and keep the user's edits on top of it (as for
+        // document_changed): after Restore they can be saved.
+        if (err instanceof ApiError && err.body.code === "in_trash") {
+          setSaving(false);
+          setGeneral(t.inTrashEditsKept);
+          onStale?.();
+          documentsApi.get(id).then(
+            (fresh) => {
+              if (!current()) return;
+              const kept = rebaseForm(doc, form, fresh);
+              docRef.current = fresh;
+              formRef.current = kept;
+              setDoc(fresh);
+              setForm(kept);
+            },
+            () => {},
+          );
+          return;
+        }
         setSaving(false);
         const e = errorOf(err);
         if (e.field === "notes") setNotesEditing(true);
@@ -349,6 +389,105 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     );
   };
 
+  // Delete: to the trash at once, without a question (#12, decision 4);
+  // the list offers Undo. Unsaved changes are asked about first, as for
+  // leaving: they would be refused in the trash anyway.
+  const moveToTrash = () => {
+    if (!doc || saving || trashBusy) return;
+    if (dirtyNow() && !window.confirm(t.unsavedChanges)) return;
+    const mine = visit.current;
+    const d = doc;
+    setTrashBusy(true);
+    setGeneral("");
+    documentsApi.trash(d.id).then(
+      () => {
+        if (visit.current === mine) {
+          setTrashBusy(false);
+          // Nothing unsaved any more: the close that follows is not asked about.
+          formRef.current = formFrom(d);
+          setForm(formRef.current);
+        }
+        // The delete happened: the list drops the row and offers Undo even
+        // when the detail was left meanwhile (it closes only if still open).
+        onTrashed(d);
+      },
+      (err: unknown) => {
+        if (visit.current !== mine) {
+          onTrashError?.(trashErrorText(err, "trash"));
+          return;
+        }
+        setTrashBusy(false);
+        setGeneral(trashErrorText(err, "trash"));
+        // Trashed elsewhere meanwhile: show it as it is now (the banner).
+        if (err instanceof ApiError && err.body.code === "in_trash") {
+          onStale?.();
+          documentsApi.get(d.id).then(
+            (fresh) => {
+              if (visit.current !== mine) return;
+              const kept = formRef.current ? rebaseForm(d, formRef.current, fresh) : formFrom(fresh);
+              docRef.current = fresh;
+              formRef.current = kept;
+              setDoc(fresh);
+              setForm(kept);
+            },
+            () => {},
+          );
+        }
+      },
+    );
+  };
+  const restore = () => {
+    if (!doc || trashBusy) return;
+    const mine = visit.current;
+    setTrashBusy(true);
+    setGeneral("");
+    const before = doc;
+    documentsApi.restore(doc.id).then(
+      (d) => {
+        onRestored(d);
+        if (visit.current !== mine) return;
+        setTrashBusy(false);
+        // Edits kept from a save refused in the trash stay, ready to save.
+        const kept = formRef.current ? rebaseForm(before, formRef.current, d) : formFrom(d);
+        docRef.current = d;
+        formRef.current = kept;
+        setDoc(d);
+        setForm(kept);
+        setGeneral("");
+        if (!isDirty(d, kept)) setNotesEditing(d.notes === "");
+      },
+      (err: unknown) => {
+        if (visit.current !== mine) return;
+        setTrashBusy(false);
+        setGeneral(trashErrorText(err, "restore"));
+      },
+    );
+  };
+  const purge = () => {
+    if (!doc || trashBusy) return;
+    const mine = visit.current;
+    const d = doc;
+    setTrashBusy(true);
+    documentsApi.purge(d.id).then(
+      () => {
+        if (visit.current === mine) {
+          setTrashBusy(false);
+          setPurgeAsk(null);
+        }
+        // As for a delete: the list follows even when the detail was left.
+        onPurged(d);
+      },
+      (err: unknown) => {
+        if (visit.current !== mine) {
+          onTrashError?.(trashErrorText(err, "purge"));
+          return;
+        }
+        setTrashBusy(false);
+        setPurgeAsk({ error: trashErrorText(err, "purge") });
+      },
+    );
+  };
+
   // Inline creation: an admin creates the row for the document's owner,
   // so it can be linked (a row of another owner is refused).
   const creator = (kind: MetadataKind) => async (name: string) => {
@@ -374,6 +513,8 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
 
   const name = doc ? documentName({ title: form?.title ?? doc.title, originalFileName: doc.originalFileName }) : "";
   const foreignOwner = doc && user.admin && doc.ownerName && doc.ownerId !== user.id ? doc.ownerName : "";
+  // In the trash the form is read-only: the server refuses changes there (409 in_trash).
+  const trashed = doc !== null && inTrash(doc);
   const fieldError = (f: ErrorField) =>
     errors[f] ? (
       <p id={`${headingId}-${f}-error`} role="alert" className="text-sm text-danger">
@@ -400,12 +541,12 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
           <h2 id={headingId} ref={heading} tabIndex={-1} className="min-w-0 flex-1 truncate px-1 font-semibold outline-none">
             {doc ? name : loadError ? t.document : t.loading}
           </h2>
-          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!prev || saving} aria-label={t.previousDocument} title={t.previousDocument} onClick={() => prev && !saving && open(prev.id)}>
+          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!prev || busy} aria-label={t.previousDocument} title={t.previousDocument} onClick={() => prev && !busy && open(prev.id)}>
             <span className="-rotate-90">
               <ArrowIcon up />
             </span>
           </button>
-          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!next || saving} aria-label={t.nextDocument} title={t.nextDocument} onClick={() => next && !saving && open(next.id)}>
+          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!next || busy} aria-label={t.nextDocument} title={t.nextDocument} onClick={() => next && !busy && open(next.id)}>
             <span className="rotate-90">
               <ArrowIcon up />
             </span>
@@ -423,6 +564,21 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
             </div>
             <div className="flex flex-col gap-4 border-line p-4 md:min-h-0 md:overflow-y-auto md:border-l">
               {foreignOwner && <p className="text-sm text-ink-muted">{t.ownedBy(foreignOwner)}</p>}
+              {trashed && (
+                <div role="region" aria-label={t.trash} className="flex flex-col gap-2 rounded-lg border border-warning-line bg-warning-soft p-3 text-sm">
+                  <p>
+                    {t.trashBanner(trashDay(doc.deletedAt))} {doc.purgeAt && t.trashBannerRemoved(trashDay(doc.purgeAt))}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" className={primary} disabled={trashBusy} onClick={restore}>
+                      {t.restore}
+                    </button>
+                    <button type="button" className={button} disabled={trashBusy} onClick={() => setPurgeAsk({ error: "" })}>
+                      {t.purge}
+                    </button>
+                  </div>
+                </div>
+              )}
               <form
                 className="flex flex-col gap-3"
                 aria-label={t.editDocument}
@@ -431,7 +587,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
                   save(false);
                 }}
               >
-                <fieldset disabled={saving} className="flex min-w-0 flex-col gap-3">
+                <fieldset disabled={saving || trashed} className="flex min-w-0 flex-col gap-3">
                   <div className="flex flex-col gap-1">
                     <label htmlFor={`${headingId}-title`} className={label}>
                       {t.fieldTitle}
@@ -545,6 +701,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
                     {general}
                   </p>
                 )}
+                {!trashed && (
                 <div className="flex flex-wrap items-center gap-2">
                   <button type="submit" className={primary} disabled={saving || !dirty}>
                     {saving ? t.saving : t.save}
@@ -558,12 +715,26 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
                     </span>
                   )}
                   {dirty && !saving && <span className="text-sm text-ink-muted">{t.unsaved}</span>}
+                  <button type="button" className={`${button} ml-auto`} disabled={saving || trashBusy} aria-label={t.deleteDocumentLabel(name)} title={t.deleteDocumentLabel(name)} onClick={moveToTrash}>
+                    {t.deleteDocument}
+                  </button>
                 </div>
+                )}
               </form>
               <FileFacts doc={doc} onChange={(d) => setDoc((x) => (x ? { ...x, processing: d.processing } : x))} />
             </div>
           </div>
         )}
+        <PurgeConfirm
+          open={purgeAsk !== null && doc !== null}
+          title={t.purgeTitle(name)}
+          n={1}
+          owners={doc ? foreignOwners([doc], user) : []}
+          busy={trashBusy}
+          error={purgeAsk?.error}
+          confirm={purge}
+          cancel={() => setPurgeAsk(null)}
+        />
       </section>
     </>
   );

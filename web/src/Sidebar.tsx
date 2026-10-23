@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, type ReactNode } from "react";
 import type { DocumentCounts, Metadata, NamedRow, User } from "./api";
 import { sortByName } from "./collate";
 import type { Health } from "./health";
-import { Chevron, InboxIcon, StarIcon, DocumentIcon } from "./icons";
+import { Chevron, InboxIcon, StarIcon, DocumentIcon, TrashIcon } from "./icons";
 import { t } from "./i18n";
 import { buildTagTree, containsTag, type CollapsedTags, type TagNode } from "./tagTree";
 import { ThemeToggle } from "./ThemeToggle";
@@ -116,6 +116,7 @@ export function Sidebar({ state, select, show, user, logout, counts, metadata, c
         {entry(null, t.allDocuments, <DocumentIcon />, counts?.total)}
         {entry({ kind: "inbox" }, t.inbox, <InboxIcon />, counts?.inbox)}
         {entry({ kind: "fav" }, t.favorites, <StarIcon />, counts?.favorites)}
+        {entry({ kind: "trash" }, t.trash, <TrashIcon />, counts?.trash)}
       </div>
       {user.admin && (
         <label className="flex items-center gap-2 px-2 text-sm pointer-coarse:min-h-11">

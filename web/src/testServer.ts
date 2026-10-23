@@ -43,13 +43,21 @@ export interface Server {
   tags: Tag[];
   correspondents: NamedRow[];
   types: NamedRow[];
-  counts: { inbox: number; favorites: number; total: number };
+  counts: { inbox: number; favorites: number; total: number; trash?: number };
+  /** The answer to GET /api/documents/counts?owner=me, when it differs from counts. */
+  ownCounts?: { inbox: number; favorites: number; total: number; trash?: number };
   /** The answer to GET /api/documents for its parameters. */
   documents: (p: URLSearchParams) => Reply | Promise<Reply>;
   /** The answer to POST /api/documents/bulk for its body. */
   bulk: (body: Record<string, unknown>) => Reply | Promise<Reply>;
   /** The answer to PATCH or DELETE of a tag, correspondent or type. */
   metadata: (method: string, path: string, body: Record<string, unknown> | undefined) => Reply;
+  /**
+   * The answer to a request of one document: GET, PATCH or DELETE of
+   * /api/documents/{id}, POST of …/restore and …/purge. Status 204 answers
+   * without a body.
+   */
+  document: (method: string, path: string, body: Record<string, unknown> | undefined) => Reply | Promise<Reply>;
 }
 
 export interface Request {
@@ -80,6 +88,7 @@ export function stubServer(): { server: Server; requests: Request[] } {
     documents: () => page([]),
     bulk: () => ({ body: { updated: 0 } }),
     metadata: (method) => ({ status: method === "DELETE" ? 204 : 200, body: method === "DELETE" ? undefined : {} }),
+    document: () => ({ status: 404, body: { error: "not found" } }),
   };
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
@@ -90,13 +99,17 @@ export function stubServer(): { server: Server; requests: Request[] } {
     const reply = (r: Reply) => json(r.status ?? 200, r.body);
     if (path === "/api/session") return json(200, { user: { mustChangePassword: false, twoFactorEnabled: false, twoFactorRequired: false, ...server.user } });
     if (path === "/healthz") return new Response("ok", { status: 200 });
-    if (path === "/api/documents/counts") return json(200, server.counts);
+    if (path === "/api/documents/counts") return json(200, p.get("owner") === "me" && server.ownCounts ? server.ownCounts : server.counts);
     if (path === "/api/documents/bulk" && method === "POST") return reply(await server.bulk(body ?? {}));
     if (method === "GET" && path === "/api/tags") return json(200, { tags: server.tags });
     if (method === "GET" && path === "/api/correspondents") return json(200, { correspondents: server.correspondents });
     if (method === "GET" && path === "/api/document-types") return json(200, { documentTypes: server.types });
     if (/^\/api\/(tags|correspondents|document-types)\/[^/]+$/.test(path) && (method === "PATCH" || method === "DELETE")) return reply(server.metadata(method, path, body));
     if (path === "/api/documents" && method === "GET") return reply(await server.documents(p));
+    if (/^\/api\/documents\/[^/]+(\/(restore|purge))?$/.test(path) && path !== "/api/documents/counts") {
+      const r = await server.document(method, path, body);
+      return r.status === 204 ? new Response(null, { status: 204 }) : reply(r);
+    }
     return json(404, { error: "not found" });
   });
   return { server, requests };
