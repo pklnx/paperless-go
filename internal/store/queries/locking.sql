@@ -35,3 +35,11 @@ SELECT pg_try_advisory_lock(sqlc.arg(class)::int, 0);
 
 -- name: SweepUnlock :one
 SELECT pg_advisory_unlock(sqlc.arg(class)::int, 0);
+
+-- name: SweepLockHeld :one
+-- Whether this session still holds the sweep lock (a terminated or timed
+-- out session has lost it with its connection).
+SELECT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_locks
+    WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted
+      AND classid = sqlc.arg(class)::int::oid AND objid = 0 AND objsubid = 2);

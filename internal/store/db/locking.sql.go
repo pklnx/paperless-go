@@ -69,6 +69,22 @@ func (q *Queries) LockOwner(ctx context.Context, arg LockOwnerParams) error {
 	return err
 }
 
+const sweepLockHeld = `-- name: SweepLockHeld :one
+SELECT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_locks
+    WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted
+      AND classid = $1::int::oid AND objid = 0 AND objsubid = 2)
+`
+
+// Whether this session still holds the sweep lock (a terminated or timed
+// out session has lost it with its connection).
+func (q *Queries) SweepLockHeld(ctx context.Context, class int32) (bool, error) {
+	row := q.db.QueryRow(ctx, sweepLockHeld, class)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const sweepUnlock = `-- name: SweepUnlock :one
 SELECT pg_advisory_unlock($1::int, 0)
 `

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/pklnx/paperless-go/internal/store/db"
 )
@@ -63,14 +64,31 @@ const sweepLockClass int32 = 0x70676f73
 // in this or another process; nothing was done.
 var ErrSweepRunning = errors.New("store: another sweep is running")
 
+// ErrSweepLockLost means a queue pass found that its session no longer
+// holds the sweep lock, or that its mark on a row is gone (another pass
+// took it over): the pass stops and removes nothing more.
+var ErrSweepLockLost = errors.New("store: the sweep lost its lock")
+
+// SweepSession is the connection that holds the sweep lock during one
+// queue pass or walk (ExclusiveSweep). The pass's steps 1 and 3 run on it,
+// so a session that was terminated or timed out makes them fail, and the
+// connection is busy between the files instead of idle.
+type SweepSession struct {
+	s    *Store
+	conn *pgxpool.Conn
+	q    *db.Queries
+}
+
 // ExclusiveSweep runs fn while it holds the sweep lock, a session-level
-// advisory lock on a connection of its own: at most one queue pass or
-// walk runs at a time across processes (serve's sweeper and ./pgo sweep),
-// so no pass acts on a mark another pass already finished. When another
-// holds it, fn does not run and the error is ErrSweepRunning. The lock
-// goes with the connection if this process dies; if it cannot be released
-// the connection is closed.
-func (s *Store) ExclusiveSweep(ctx context.Context, fn func() error) error {
+// advisory lock on a connection of its own (the SweepSession fn gets): at
+// most one queue pass or walk runs at a time across processes (serve's
+// sweeper and ./pgo sweep), so no pass acts on a mark another pass
+// already finished. When another holds it, fn does not run and the error
+// is ErrSweepRunning. The lock goes with the connection if this process
+// dies or the session ends; a pass checks that it still holds it before
+// each removal (SweepSession.StillMarked). If it cannot be released the
+// connection is closed.
+func (s *Store) ExclusiveSweep(ctx context.Context, fn func(*SweepSession) error) error {
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
 		return err
@@ -95,7 +113,44 @@ func (s *Store) ExclusiveSweep(ctx context.Context, fn func() error) error {
 		}
 		conn.Release()
 	}()
-	return fn()
+	return fn(&SweepSession{s: s, conn: conn, q: q})
+}
+
+// MarkBlobRemoval is Store.MarkBlobRemoval on the session.
+func (ss *SweepSession) MarkBlobRemoval(ctx context.Context, hash string, now time.Time) (BlobMark, error) {
+	return ss.s.markBlobRemoval(ctx, ss.conn, hash, now)
+}
+
+// StillMarked returns nil if the session still holds the sweep lock and
+// hash's row still carries the mark set at markedAt, else
+// ErrSweepLockLost (or the error of a connection that is gone): the
+// check right before a removal.
+func (ss *SweepSession) StillMarked(ctx context.Context, hash string, markedAt time.Time) error {
+	held, err := ss.q.SweepLockHeld(ctx, sweepLockClass)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrSweepLockLost, err)
+	}
+	if !held {
+		return ErrSweepLockLost
+	}
+	ours, err := ss.q.BlobMarkedAt(ctx, db.BlobMarkedAtParams{Sha256: hash, MarkedAt: markedAt.Truncate(time.Microsecond)})
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrSweepLockLost, err)
+	}
+	if !ours {
+		return fmt.Errorf("%w: the mark of %s is gone", ErrSweepLockLost, hash)
+	}
+	return nil
+}
+
+// FinishBlobRemoval is Store.FinishBlobRemoval on the session.
+func (ss *SweepSession) FinishBlobRemoval(ctx context.Context, hash string, markedAt time.Time) error {
+	return finishBlobRemoval(ctx, ss.q, hash, markedAt)
+}
+
+// RequeueBlobRemoval is Store.RequeueBlobRemoval on the session.
+func (ss *SweepSession) RequeueBlobRemoval(ctx context.Context, hash string, markedAt, due time.Time) error {
+	return requeueBlobRemoval(ctx, ss.q, hash, markedAt, due)
 }
 
 // blobLockKey is the second int4 of hash's lock key: its first four
@@ -210,9 +265,21 @@ func (e *BlobRemovedError) Is(target error) bool { return target == ErrBlobRemov
 // takes it over: serve sweeps every minute (sweep.DefaultInterval).
 const markRound = time.Minute
 
+// freshMark is the age below which a mark is most likely a live pass's,
+// which finishes the file within moments: a writer then waits
+// freshMarkRetry. An older mark is probably a crashed pass's.
+const (
+	freshMark      = 10 * time.Second
+	freshMarkRetry = 5 * time.Second
+)
+
 // markRetryAfter is how long a writer that met a mark set at markedAt
-// waits at now: until the mark is stale plus one round, at least a second.
+// waits at now: freshMarkRetry for a fresh mark, else until the mark is
+// stale plus one round, at least a second.
 func markRetryAfter(markedAt, now time.Time) time.Duration {
+	if now.Sub(markedAt) < freshMark {
+		return freshMarkRetry
+	}
 	return max(markedAt.Add(MarkStale+markRound).Sub(now), time.Second)
 }
 
@@ -257,13 +324,25 @@ const (
 // the UPDATE must take its snapshot after the lock was granted, to see
 // every writer that held the shared lock (under REPEATABLE READ the
 // snapshot would be the lock statement's, taken before the wait).
+//
+// The queue pass calls it on its SweepSession; this one runs on the pool
+// (tests, and a step taken by hand).
 func (s *Store) MarkBlobRemoval(ctx context.Context, hash string, now time.Time) (BlobMark, error) {
+	return s.markBlobRemoval(ctx, s.pool, hash, now)
+}
+
+// txBeginner is the pool or a connection of it.
+type txBeginner interface {
+	BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error)
+}
+
+func (s *Store) markBlobRemoval(ctx context.Context, on txBeginner, hash string, now time.Time) (BlobMark, error) {
 	if !isSHA256(hash) {
 		return 0, invalid("sha256")
 	}
 	now = now.Truncate(time.Microsecond)
 	mark := BlobKept
-	err := s.readCommittedTx(ctx, func(q *db.Queries) error {
+	err := readCommittedTx(ctx, on, func(q *db.Queries) error {
 		if err := q.LockBlob(ctx, db.LockBlobParams{Class: blobLockClass, Key: blobLockKey(hash)}); err != nil {
 			return err
 		}
@@ -291,10 +370,10 @@ func (s *Store) MarkBlobRemoval(ctx context.Context, hash string, now time.Time)
 // sweeper's step 1 right after it took the exclusive blob lock.
 type afterBlobLockKey struct{}
 
-// readCommittedTx runs fn in a transaction at READ COMMITTED that writes
-// none of the owner tables.
-func (s *Store) readCommittedTx(ctx context.Context, fn func(*db.Queries) error) error {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+// readCommittedTx runs fn in a transaction at READ COMMITTED on on that
+// writes none of the owner tables.
+func readCommittedTx(ctx context.Context, on txBeginner, fn func(*db.Queries) error) error {
+	tx, err := on.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return err
 	}
@@ -309,7 +388,11 @@ func (s *Store) readCommittedTx(ctx context.Context, fn func(*db.Queries) error)
 // marked at markedAt (MarkBlobRemoval's now) once the file is gone. A row
 // that is not there any more, or another pass's mark, is left alone.
 func (s *Store) FinishBlobRemoval(ctx context.Context, hash string, markedAt time.Time) error {
-	_, err := s.q.FinishBlobRemoval(ctx, db.FinishBlobRemovalParams{Sha256: hash, MarkedAt: markedAt.Truncate(time.Microsecond)})
+	return finishBlobRemoval(ctx, s.q, hash, markedAt)
+}
+
+func finishBlobRemoval(ctx context.Context, q *db.Queries, hash string, markedAt time.Time) error {
+	_, err := q.FinishBlobRemoval(ctx, db.FinishBlobRemovalParams{Sha256: hash, MarkedAt: markedAt.Truncate(time.Microsecond)})
 	return err
 }
 
@@ -318,7 +401,11 @@ func (s *Store) FinishBlobRemoval(ctx context.Context, hash string, markedAt tim
 // hash are not refused meanwhile (a removal that failed after the unlink
 // makes them store the file again).
 func (s *Store) RequeueBlobRemoval(ctx context.Context, hash string, markedAt, due time.Time) error {
-	_, err := s.q.RequeueBlobRemoval(ctx, db.RequeueBlobRemovalParams{
+	return requeueBlobRemoval(ctx, s.q, hash, markedAt, due)
+}
+
+func requeueBlobRemoval(ctx context.Context, q *db.Queries, hash string, markedAt, due time.Time) error {
+	_, err := q.RequeueBlobRemoval(ctx, db.RequeueBlobRemovalParams{
 		Sha256: hash, MarkedAt: markedAt.Truncate(time.Microsecond), DueAt: due,
 	})
 	return err

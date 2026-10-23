@@ -10,6 +10,24 @@ import (
 	"time"
 )
 
+const blobMarkedAt = `-- name: BlobMarkedAt :one
+SELECT EXISTS (SELECT 1 FROM blob_removals WHERE sha256 = $1::text AND removed_at = $2::timestamptz)
+`
+
+type BlobMarkedAtParams struct {
+	Sha256   string
+	MarkedAt time.Time
+}
+
+// Whether hash's row still carries the mark set at marked_at: no other
+// pass took it over.
+func (q *Queries) BlobMarkedAt(ctx context.Context, arg BlobMarkedAtParams) (bool, error) {
+	row := q.db.QueryRow(ctx, blobMarkedAt, arg.Sha256, arg.MarkedAt)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const blobRemovalsDue = `-- name: BlobRemovalsDue :many
 SELECT sha256 FROM blob_removals
 WHERE (removed_at IS NULL AND due_at <= $1::timestamptz)

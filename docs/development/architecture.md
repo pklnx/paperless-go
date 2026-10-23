@@ -738,9 +738,11 @@ and thumbnail minutes before `CompleteJob`.
   checks that exactly the hash writers hold. A rolled-back writer (a
   duplicate) rolls its dequeue back too. `ErrBlobRemoved` writes nothing:
   an upload answers `503` ("the file is being cleaned up; try again") with
-  `Retry-After: 1` for a missing file, and, for a row the sweeper marked,
-  the time until a crashed pass's mark would be taken over (`MarkStale`
-  plus a minute's round, at most 360 s; `store.BlobRemovedError`), the
+  `Retry-After: 1` for a missing file, `5` for a mark younger than 10 s
+  (most likely a live pass, which finishes within moments), and, for an
+  older mark, the time until a crashed pass's mark would be taken over
+  (`MarkStale` plus a minute's round, at most 350 s;
+  `store.BlobRemovedError`), the
   consume folder leaves the file for the next
   scan, `import` reports the file as failed, and the worker's attempt is
   retried. The retry's `Put` publishes a fresh copy.
@@ -757,6 +759,16 @@ and thumbnail minutes before `CompleteJob`.
   `./pgo sweep`), does nothing and gets `store.ErrSweepRunning` (`serve`
   tries again at the next round, `sweep` says so and exits 1). A crash
   releases the lock with the connection; an unlock that fails closes it.
+  Steps 1 and 3 of the queue pass run on that same connection
+  (`store.SweepSession`), so it is never idle during a pass and a session
+  that was terminated or timed out makes them fail; right before each
+  `Remove` the pass checks on it that it still holds the lock and that the
+  row still carries its own mark (`StillMarked`), and stops otherwise
+  without removing anything more. Otherwise a pass whose session was lost
+  could, after another pass took its mark over and a writer named the file
+  again, remove that file (`TestQueuePassWithALostLockRemovesNothing`).
+  Each mark carries the time it was set, not the pass's start, so a mark
+  set late in a long pass never looks stale.
   Without this, two passes that both marked a hash could interleave so
   that the second removes a fresh copy that a writer stored and named after
   the first pass finished (`TestConcurrentQueuePassesKeepACommittedFile`).
@@ -1182,8 +1194,8 @@ another user's document answers `404` and an admin sees all.
   instead (see [Trash](#trash)); one due for purge answers `503` with
   `Retry-After: 60`. An upload of a file the sweeper is removing answers
   `503` "the file is being cleaned up; try again", with `Retry-After: 1`
-  when the file is gone (the retry stores it again) and up to 360 while the
-  sweeper's mark is on it (see [Blob removal](#blob-removal)).
+  when the file is gone (the retry stores it again), `5` while a fresh mark
+  of the sweeper is on it and up to 350 for an older one (see [Blob removal](#blob-removal)).
 - **`GET /api/documents`** lists and searches the scope's documents
   through `store.SearchDocuments`, without their text, with
   `maxUploadSize` for the UI. Parameters (`listQuery`):

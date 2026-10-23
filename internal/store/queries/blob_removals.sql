@@ -94,3 +94,8 @@ WHERE NOT EXISTS (
     WHERE d.original_sha256 = h OR d.archive_sha256 = h OR d.thumbnail_sha256 = h)
   AND NOT EXISTS (SELECT 1 FROM blob_removals r WHERE r.sha256 = h)
 ORDER BY 1;
+
+-- name: BlobMarkedAt :one
+-- Whether hash's row still carries the mark set at marked_at: no other
+-- pass took it over.
+SELECT EXISTS (SELECT 1 FROM blob_removals WHERE sha256 = sqlc.arg(sha256)::text AND removed_at = sqlc.arg(marked_at)::timestamptz);

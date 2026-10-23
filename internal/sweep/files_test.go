@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -750,5 +751,82 @@ func TestQueuePassRefusesAnotherInstallation(t *testing.T) {
 	}
 	if q, err := sw.QueuePass(e.ctx, false); err != nil || q != (sweep.QueueStats{Removed: 1}) {
 		t.Fatalf("unbound: %+v, %v", q, err)
+	}
+}
+
+// A pass whose session lost the sweep lock mid-pass (terminated, or an
+// idle_session_timeout) must not remove a file afterwards: the review of
+// #136 terminated pass A's lock backend after A marked H, let MarkStale
+// pass, let pass B take the mark over and finish, and let a writer store
+// and name the file again; A then resumed. A finds its session gone (or
+// its mark taken over) before its Remove and stops; the file stays.
+func TestQueuePassWithALostLockRemovesNothing(t *testing.T) {
+	e := newFileEnv(t)
+	u, err := url.Parse(e.url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	q.Set("application_name", "sweeper-a")
+	u.RawQuery = q.Encode()
+	stA, err := store.Open(e.ctx, u.String(), e.blobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stA.Close()
+	h := e.queue("lost lock")
+	a := &sweep.Sweeper{Store: stA, Blobs: e.blobs, Now: e.now, Log: slog.New(slog.NewTextHandler(e.logs, nil))}
+	sweep.SetQueueSeams(a, func(string) {
+		// A's lock backend goes away (pg_terminate_backend, as a timeout
+		// or an operator would).
+		var n int
+		if err := e.conn.QueryRow(e.ctx, `SELECT count(pg_terminate_backend(a.pid)) FROM pg_stat_activity a
+			WHERE a.application_name = 'sweeper-a' AND a.datname = current_database()`).Scan(&n); err != nil || n == 0 {
+			t.Errorf("terminate A: %d, %v", n, err)
+		}
+		e.advance(store.MarkStale)
+		// B takes the stale mark over and finishes the file.
+		if qs, err := e.sw.QueuePass(e.ctx, false); err != nil || qs != (sweep.QueueStats{Removed: 1}) {
+			t.Errorf("B: %+v, %v", qs, err)
+		}
+		// A writer stores the file again and commits its document.
+		if _, created, err := e.blobs.Put(strings.NewReader("lost lock")); err != nil || !created {
+			t.Errorf("Put: %v, %v", created, err)
+		}
+		if err := e.create(e.alice, h); err != nil {
+			t.Errorf("writer: %v", err)
+		}
+	}, nil)
+	qs, err := a.QueuePass(e.ctx, false)
+	if err == nil || qs.Removed != 0 {
+		t.Errorf("A after losing its lock: %+v, %v; want an error and nothing removed", qs, err)
+	}
+	if !e.blobs.Exists(h) {
+		t.Fatal("a committed document's file was removed by the pass that lost its lock")
+	}
+	if !strings.Contains(e.logs.String(), "lost its lock") {
+		t.Errorf("not logged:\n%s", e.logs)
+	}
+}
+
+// Each mark carries the time it was set, not the pass's start: in a pass
+// that runs long, a mark set late must not already look stale.
+func TestQueuePassMarksWithTheCurrentTime(t *testing.T) {
+	e := newFileEnv(t)
+	e.queue("first")
+	e.queue("second")
+	calls := 0
+	sweep.SetQueueSeams(e.sw, func(h string) {
+		if calls++; calls == 1 {
+			e.advance(store.MarkStale) // the pass takes long
+			return
+		}
+		removed, _, ok := e.rowState(h)
+		if !ok || removed == nil || !removed.Equal(e.now()) {
+			t.Errorf("second mark at %v, want the current time %v", removed, e.now())
+		}
+	}, nil)
+	if qs, err := e.sw.QueuePass(e.ctx, false); err != nil || qs != (sweep.QueueStats{Removed: 2}) || calls != 2 {
+		t.Fatalf("pass: %+v, %v, %d marks", qs, err, calls)
 	}
 }

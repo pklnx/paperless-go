@@ -52,10 +52,9 @@ const (
 type Store interface {
 	PurgeDueDocuments(ctx context.Context, now time.Time, retention time.Duration, limit int) (store.PurgeResult, error)
 	BlobRemovalsDue(ctx context.Context, now time.Time, limit int) ([]string, error)
-	MarkBlobRemoval(ctx context.Context, hash string, now time.Time) (store.BlobMark, error)
-	FinishBlobRemoval(ctx context.Context, hash string, markedAt time.Time) error
-	RequeueBlobRemoval(ctx context.Context, hash string, markedAt, due time.Time) error
-	ExclusiveSweep(ctx context.Context, fn func() error) error
+	// ExclusiveSweep runs fn under the sweep lock; the queue pass's steps
+	// 1 and 3 run on the session it gets.
+	ExclusiveSweep(ctx context.Context, fn func(*store.SweepSession) error) error
 	UnreferencedBlobs(ctx context.Context, hashes []string) ([]string, error)
 	WalkCandidates(ctx context.Context, hashes []string) ([]string, error)
 	QueueUnreferencedBlobs(ctx context.Context, hashes []string, due time.Time) (int64, error)
@@ -170,15 +169,15 @@ func (s *Sweeper) RunOnce(ctx context.Context) (Stats, error) {
 // pass goes on with the next hash. With dryRun it only counts.
 func (s *Sweeper) QueuePass(ctx context.Context, dryRun bool) (QueueStats, error) {
 	var st QueueStats
-	err := s.Store.ExclusiveSweep(ctx, func() error {
+	err := s.Store.ExclusiveSweep(ctx, func(ss *store.SweepSession) error {
 		var err error
-		st, err = s.queuePass(ctx, dryRun)
+		st, err = s.queuePass(ctx, ss, dryRun)
 		return err
 	})
 	return st, err
 }
 
-func (s *Sweeper) queuePass(ctx context.Context, dryRun bool) (QueueStats, error) {
+func (s *Sweeper) queuePass(ctx context.Context, ss *store.SweepSession, dryRun bool) (QueueStats, error) {
 	var st QueueStats
 	// The data directory must not belong to another installation: this
 	// database's queue names files of its own documents only.
@@ -204,7 +203,10 @@ func (s *Sweeper) queuePass(ctx context.Context, dryRun bool) (QueueStats, error
 		if err := ctx.Err(); err != nil {
 			return st, err
 		}
-		mark, err := s.Store.MarkBlobRemoval(ctx, h, now)
+		// Each mark carries the time it was set, so a long pass never
+		// leaves a fresh mark that already looks stale.
+		markedAt := s.now()
+		mark, err := ss.MarkBlobRemoval(ctx, h, markedAt)
 		if err != nil {
 			return st, err
 		}
@@ -218,10 +220,18 @@ func (s *Sweeper) queuePass(ctx context.Context, dryRun bool) (QueueStats, error
 		if s.afterMark != nil {
 			s.afterMark(h)
 		}
+		// The session must still hold the sweep lock and the row its
+		// mark: a session that was terminated or timed out may have let
+		// another pass take the mark over and finish, after which a
+		// writer may have stored and named the file again.
+		if err := ss.StillMarked(ctx, h, markedAt); err != nil {
+			log.Error("sweep: the sweep lost its lock; the pass stops and removes nothing more", "sha256", h, "err", err)
+			return st, err
+		}
 		if err := s.Blobs.Remove(h); err != nil {
 			st.Failed++
 			log.Error("sweep: removing a file failed; trying again later", "sha256", h, "retry_after", store.BlobGrace, "err", err)
-			if err := s.Store.RequeueBlobRemoval(ctx, h, now, now.Add(store.BlobGrace)); err != nil {
+			if err := ss.RequeueBlobRemoval(ctx, h, markedAt, s.now().Add(store.BlobGrace)); err != nil {
 				return st, err
 			}
 			continue
@@ -229,7 +239,7 @@ func (s *Sweeper) queuePass(ctx context.Context, dryRun bool) (QueueStats, error
 		if s.afterRemove != nil {
 			s.afterRemove(h)
 		}
-		if err := s.Store.FinishBlobRemoval(ctx, h, now); err != nil {
+		if err := ss.FinishBlobRemoval(ctx, h, markedAt); err != nil {
 			return st, err
 		}
 		st.Removed++
@@ -280,7 +290,7 @@ const maxUnexpectedLogged = 20
 // pass; while another runs it returns store.ErrSweepRunning.
 func (s *Sweeper) Walk(ctx context.Context, opts WalkOptions) (WalkStats, error) {
 	var st WalkStats
-	err := s.Store.ExclusiveSweep(ctx, func() error {
+	err := s.Store.ExclusiveSweep(ctx, func(*store.SweepSession) error {
 		var err error
 		st, err = s.walk(ctx, opts)
 		return err
