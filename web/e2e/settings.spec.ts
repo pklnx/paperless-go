@@ -1,6 +1,6 @@
 import { passwordChangeUser, plainUser, unique } from "./demo";
 import { expect, test } from "./fixtures";
-import { confirmDialog, logInThroughForm, navigation, themeToggle } from "./ui";
+import { confirmDialog, formWithButton, logInThroughForm, navigation, themeToggle } from "./ui";
 
 test.describe("as a user without a stored session", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
@@ -16,9 +16,8 @@ test.describe("as a user without a stored session", () => {
 
     await page.getByLabel("Name of the key").fill(name);
     await expect(page.getByRole("checkbox", { name: /^read:/ })).toBeChecked();
-    // The last "Current password" of the profile: the API key form's.
     // max has no 2FA: the password alone confirms the key.
-    await page.getByLabel("Current password").last().fill(plainUser.password);
+    await formWithButton(page, "Create API key").getByLabel("Current password").fill(plainUser.password);
     await page.getByRole("button", { name: "Create API key" }).click();
 
     const created = page.getByRole("status").filter({ hasText: `API key “${name}” created. Copy it now: it is shown only once.` });
@@ -41,8 +40,7 @@ test.describe("as a user without a stored session", () => {
     await page.goto("/");
     await logInThroughForm(page, passwordChangeUser.name, passwordChangeUser.password);
     await navigation(page).getByRole("button", { name: "Profile" }).click();
-    // The first "Current password" of the profile: the password form's.
-    await page.getByLabel("Current password").first().fill(passwordChangeUser.password);
+    await formWithButton(page, "Change password").getByLabel("Current password").fill(passwordChangeUser.password);
     await page.getByLabel("New password", { exact: true }).fill(next);
     await page.getByLabel("Repeat new password").fill(next);
     await page.getByRole("button", { name: "Change password" }).click();

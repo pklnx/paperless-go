@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { adminWithout2FA, generatedPasswordUser, lockedUser, timeStep, totp, twoFactorUser, type Login } from "./demo";
 import { expect, test } from "./fixtures";
-import { documentList, logInThroughForm, searchBox } from "./ui";
+import { documentList, logInThroughForm, searchBox, twoFactorRequiredNotice } from "./ui";
 
 // No session: these tests use the login page.
 test.use({ storageState: { cookies: [], origins: [] } });
@@ -61,7 +61,7 @@ test("an admin without 2FA must set it up before anything else", async ({ page, 
   await submitLogin(page, adminWithout2FA);
   const setup = page.getByRole("heading", { name: "Set up authenticator app" });
   await expect(setup).toBeVisible();
-  await expect(page.getByText("Two-factor authentication is required before you can use paperless-go.").first()).toBeVisible();
+  await expect(twoFactorRequiredNotice(page)).toBeVisible();
 
   // Neither another page nor a document opens. Any well-formed ID proves it.
   for (const path of ["/?view=log", "/?doc=00000000-0000-4000-8000-000000000001"]) {

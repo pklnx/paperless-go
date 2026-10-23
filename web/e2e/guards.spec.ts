@@ -1,38 +1,47 @@
 // Self-checks of the guards in fixtures.ts: each of these tests breaks one
 // rule and must fail, through the guard's check when the test ends.
 // test.fail() turns that expected failure into a pass; a guard that let
-// the problem through would make the test pass and so fail here.
-import { expect, test } from "./fixtures";
+// the problem through would make the test pass and so fail here. So
+// nothing else in these tests may fail: no assertions in their bodies, and
+// every wait is for something the page does whether or not a guard works.
+import { port } from "./demo";
+import { test } from "./fixtures";
 
 test("a console error fails the test", async ({ page }) => {
   test.fail();
   await page.goto("/");
-  const logged = page.waitForEvent("console", (m) => m.type() === "error");
+  const logged = page.waitForEvent("console", (m) => m.text() === "guards self-check: console error");
   await page.evaluate(() => console.error("guards self-check: console error"));
   await logged;
 });
 
 test("a request to another host is aborted and fails the test", async ({ page }) => {
   test.fail();
-  // A navigation: the page's CSP (connect-src 'self') would stop a fetch
-  // before the guard sees it, but it does not apply to navigations.
-  const error = await page.goto("https://example.com/guards-self-check").then(
-    () => null,
-    (e: unknown) => (e instanceof Error ? e.message : String(e)),
+  // Another origin that the demo serves itself, so nothing leaves the
+  // machine even when the guard is broken: 127.0.0.1 instead of localhost
+  // (the server's Host check accepts both). A navigation, because the
+  // page's CSP would stop a fetch before the guard sees it. Its error (the
+  // guard aborts it) is no failure by itself.
+  await page.goto(`http://127.0.0.1:${port}/healthz`).then(
+    () => undefined,
+    () => undefined,
   );
-  // The guard aborted it: the browser never reached the network.
-  expect(error).toContain("ERR_BLOCKED_BY_CLIENT");
 });
 
 test("an inline script blocked by the CSP fails the test", async ({ page }) => {
   test.fail();
   await page.goto("/");
-  const violation = page.waitForEvent("console", (m) => m.text().startsWith("CSP violation"));
-  await page.evaluate(() => {
-    const s = document.createElement("script");
-    s.textContent = "window.guardsSelfCheck = true;";
-    document.body.append(s);
-  });
-  await violation;
-  expect(await page.evaluate(() => "guardsSelfCheck" in window)).toBe(false);
+  // Waits in the page for the violation, or for the script having run
+  // (a CSP that lets it run): either way the body goes on, and only the
+  // guard decides.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        document.addEventListener("securitypolicyviolation", () => resolve(), { once: true });
+        window.addEventListener("guards-self-check-ran", () => resolve(), { once: true });
+        const s = document.createElement("script");
+        s.textContent = 'window.dispatchEvent(new Event("guards-self-check-ran"));';
+        document.body.append(s);
+      }),
+  );
 });

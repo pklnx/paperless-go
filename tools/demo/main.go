@@ -106,7 +106,7 @@ func run(dbURL, listen string, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	demoURL, dropDB, err := createDatabase(ctx, dbURL)
+	demoURL, dropDB, err := createDatabase(ctx, dbURL, log)
 	if err != nil {
 		return err
 	}
@@ -189,6 +189,18 @@ func run(dbURL, listen string, log *slog.Logger) error {
 	srv := web.New(st, log, web.Options{
 		Sealer: sealer, SecretKey: key, PublicURL: publicURL, Blobs: blobs, SweepWake: wakeSweeper,
 	})
+	// The address is printed only once it can be bound: web.Server binds
+	// it itself (ListenAndServe), so the demo checks it first. Taken in
+	// the moment between, ListenAndServe fails and the demo exits 1.
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		cancel()
+		return err
+	}
+	if err := ln.Close(); err != nil {
+		cancel()
+		return err
+	}
 	// The password and the TOTP secret are not printed: they are public,
 	// but a password does not go into output (CodeQL). They are in the
 	// users above and in web/e2e/demo.ts.
@@ -262,32 +274,43 @@ func processSeed(ctx context.Context, w *process.Worker) error {
 }
 
 // createDatabase creates a uniquely named database on the server of base
-// and returns its URL and a function that drops it.
-func createDatabase(ctx context.Context, base string) (string, func(), error) {
+// and returns its URL and a function that drops it. The drop opens a
+// connection of its own: one held for the whole run could have been
+// closed by the server meanwhile. A failed drop is logged.
+func createDatabase(ctx context.Context, base string, log *slog.Logger) (string, func(), error) {
+	// The URL first: nothing is created when it cannot be read.
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", nil, fmt.Errorf("read -db: %w", err)
+	}
+	suffix := make([]byte, 4)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", nil, err
+	}
+	name := "paperless_demo_" + hex.EncodeToString(suffix)
+	ident := pgx.Identifier{name}.Sanitize()
 	admin, err := pgx.Connect(ctx, base)
 	if err != nil {
 		return "", nil, err
 	}
-	suffix := make([]byte, 4)
-	if _, err := rand.Read(suffix); err != nil {
-		_ = admin.Close(ctx)
-		return "", nil, err
-	}
-	name := "paperless_demo_" + hex.EncodeToString(suffix)
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-		_ = admin.Close(ctx)
-		return "", nil, fmt.Errorf("create demo database (the user needs CREATEDB): %w", err)
-	}
-	u, err := url.Parse(base)
+	_, err = admin.Exec(ctx, "CREATE DATABASE "+ident)
+	_ = admin.Close(ctx)
 	if err != nil {
-		_ = admin.Close(ctx)
-		return "", nil, err
+		return "", nil, fmt.Errorf("create demo database (the user needs CREATEDB): %w", err)
 	}
 	u.Path = "/" + name
 	drop := func() {
-		bg := context.Background()
-		_, _ = admin.Exec(bg, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)")
-		_ = admin.Close(bg)
+		// Not the run's context: it has ended when the demo stops.
+		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		conn, err := pgx.Connect(bg, base)
+		if err == nil {
+			_, err = conn.Exec(bg, "DROP DATABASE "+ident+" WITH (FORCE)")
+			_ = conn.Close(bg)
+		}
+		if err != nil {
+			log.Error("drop the demo database; drop it by hand", "database", name, "err", err)
+		}
 	}
 	return u.String(), drop, nil
 }

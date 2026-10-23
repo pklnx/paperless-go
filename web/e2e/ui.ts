@@ -58,9 +58,10 @@ export function navigation(page: Page): Locator {
   return page.getByRole("navigation", { name: "Navigation" });
 }
 
-/** A tag's entry in the navigation (its name, then its count). */
+/** A tag's entry in the navigation: its name, then its count. */
 export function tagEntry(nav: Locator, name: string): Locator {
-  return nav.getByRole("button", { name: new RegExp(`^${name}\\b`) });
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return nav.getByRole("button", { name: new RegExp(`^${escaped}(?: \\d+)?$`) });
 }
 
 /** The phone's menu button. */
@@ -165,6 +166,25 @@ export async function confirmDialog(page: Page, action: () => Promise<void>, con
 /** The theme switch: named after the theme it switches to. */
 export function themeToggle(page: Page): Locator {
   return page.getByRole("button", { name: /^Switch to (dark|light) mode$/ });
+}
+
+/**
+ * The form whose submit button is named button. The profile's forms have no
+ * accessible name, so the button tells them apart (each has a "Current
+ * password"); #150 can name them, and then this becomes
+ * getByRole("form", { name }).
+ */
+export function formWithButton(page: Page, button: string): Locator {
+  return page.locator("form").filter({ has: page.getByRole("button", { name: button, exact: true }) });
+}
+
+/**
+ * The 2FA guard's notice that 2FA is required. The setup page shows the
+ * sentence twice (the gate and the setup's own text), so the first is
+ * taken.
+ */
+export function twoFactorRequiredNotice(page: Page): Locator {
+  return page.getByText("Two-factor authentication is required before you can use paperless-go.").first();
 }
 
 /** Logs in through the login page as a user without 2FA. */
