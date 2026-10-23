@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { seed, unique } from "./demo";
 import { expect, test } from "./fixtures";
-import { chosen, confirmDialog, detail, detailForm, documentLink, field, pdfPage, pick, pickTag } from "./ui";
+import { chosen, closeDocument, confirmDialog, detail, detailForm, documentLink, field, pdfPage, pick, pickTag } from "./ui";
 
 /** The open document's ID, from the URL. */
 const openID = (page: Page) => new URL(page.url()).searchParams.get("doc") ?? "";
@@ -17,7 +17,7 @@ test("a document opens from the list and its PDF renders in the viewer", async (
   await expect(pdfPage(page, 1)).toContainText(seed.lease.word);
   await expect(page.getByText("Page 1 / 2")).toBeVisible();
 
-  await page.getByRole("button", { name: "Close document" }).click();
+  await closeDocument(page);
   await expect(page).not.toHaveURL(/[?&]doc=/);
   await expect(detail(page, seed.lease.title)).toHaveCount(0);
 });
@@ -76,7 +76,7 @@ test("next and previous move through the list; unsaved changes are asked about",
   await page.getByRole("button", { name: "Previous document" }).click();
   await expect(field(page, "Title")).toHaveValue(seed.warranty.title);
 
-  await page.getByRole("button", { name: "Close document" }).click();
+  await closeDocument(page);
   await expect(page).not.toHaveURL(/[?&]doc=/);
   await expect(documentLink(page, seed.warranty.title)).toBeVisible();
 });

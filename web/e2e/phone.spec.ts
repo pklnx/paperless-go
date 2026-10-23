@@ -1,7 +1,7 @@
 import { devices } from "@playwright/test";
 import { seed } from "./demo";
 import { expect, test } from "./fixtures";
-import { detail, documentLink, documentList, menuButton, navigation, openNavigation } from "./ui";
+import { closeDocument, detail, documentLink, documentList, menuButton, navigation, openNavigation } from "./ui";
 
 // A phone with a touch screen: no sidebar; the navigation is a sheet
 // behind the menu button, and a document opens over the whole screen.
@@ -33,7 +33,7 @@ test("a document opens over the whole screen and Close returns to the list", asy
   await documentLink(page, seed.incomeTax.title).click();
   const doc = detail(page, seed.incomeTax.title);
   await expect(doc).toBeInViewport({ ratio: 0.9 });
-  await page.getByRole("button", { name: "Close document" }).click();
+  await closeDocument(page);
   await expect(doc).toHaveCount(0);
   await expect(documentLink(page, seed.incomeTax.title)).toBeInViewport();
 });

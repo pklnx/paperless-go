@@ -29,6 +29,8 @@ export const lockedUser = { name: "lee", password: "lee-password" } satisfies Lo
 export const plainUser = { name: "max", password: "max-password" } satisfies Login;
 /** A plain user for the password change test. */
 export const passwordChangeUser = { name: "ida", password: "ida-password" } satisfies Login;
+/** A user with 2FA whose 2FA the admin spec resets. Nothing else logs in as eli. */
+export const resetTwoFactorUser = { name: "eli", password: "eli-password" } satisfies Login;
 
 /** Seed documents of demo the tests use: the title and the word only this document has. */
 export const seed = {
@@ -45,6 +47,26 @@ export const seed = {
   gym: { title: "Gym membership", word: "nettlecrest" },
   phone: { title: "Phone contract", word: "opalridge" },
 };
+
+/**
+ * The documents the specs of bulk edit, trash and metadata change, each
+ * for one spec. They are the oldest ones, so a spec finds them by a
+ * search for their word. Same as workDocs in tools/demo/seed.go.
+ */
+export const work = {
+  /** 52 documents with one word: more than the 50 of a page. */
+  batch: { word: "bulkbatch", count: 52 },
+  /** Two documents with one word. */
+  pair: { titles: ["Bulk pair one", "Bulk pair two"], word: "bulkpair" },
+  trashUndo: { title: "Trash flow undo", word: "trashundo" },
+  trashPurge: { title: "Trash flow purge", word: "trashpurge" },
+  /** The lines of its PDF (the seed adds the reference word to the last of the first page): the same file can be uploaded again. */
+  trashAgain: { title: "Trash flow upload again", word: "trashagain", lines: ["Moved to the trash, then uploaded again", "The same file."] },
+  metadata: { title: "Metadata sample", word: "metasample" },
+};
+
+/** The names the bulk edit spec sets: seeded, so that they exist before the spec. */
+export const bulkNames = { tag: "Review", correspondent: "Meridian Bank", type: "Statement" };
 
 /** demo's documents tagged Bills (a sub-tag of Finance). */
 export const bills = [seed.electricity.title, seed.water.title, seed.internet.title];
