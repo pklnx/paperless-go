@@ -296,9 +296,6 @@ jobs:
       # The headless Chromium of the pinned Playwright, without apt unless
       # the runner image lacks one of its libraries (then with a warning).
       - run: sh ../scripts/ci-playwright-chromium-test.sh
-      # PROOF P2 (temporary, reverted before review): a library the headless
-      # Chromium links is missing, so the script must warn and use apt.
-      - run: sudo dpkg -r --force-depends libnss3
       - run: sh ../scripts/ci-playwright-chromium.sh
       # The config builds the UI, then builds and starts the demo (it embeds
       # the built UI), and stops it at the end so it drops its database.
