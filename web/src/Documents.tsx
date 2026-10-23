@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { documentsApi } from "./api";
 import { lang, t } from "./i18n";
+import { trashErrorText } from "./Trash";
 import { button, primary } from "./styles";
 import { displayName, formatSize, stateText, type UploadItem, type UploadQueue } from "./uploads";
 
@@ -68,13 +70,18 @@ export function WindowDrop({ onFiles }: { onFiles: (files: File[]) => void }) {
   );
 }
 
-/** The upload panel above the document list: choose files, and the uploads in progress. limit is the upload limit in bytes, once known. */
-export function DocumentsUpload({ queue, maxSize }: { queue: UploadQueue; maxSize?: number }) {
+/**
+ * The upload panel above the document list: choose files, and the uploads
+ * in progress. limit is the upload limit in bytes, once known. onRestored
+ * follows a Restore of a duplicate's trashed document (lists and counts
+ * change).
+ */
+export function DocumentsUpload({ queue, maxSize, onRestored }: { queue: UploadQueue; maxSize?: number; onRestored?: () => void }) {
   const items = useQueue(queue);
-  return <UploadPanel queue={queue} items={items} limit={maxSize ? formatSize(maxSize, lang) : ""} />;
+  return <UploadPanel queue={queue} items={items} limit={maxSize ? formatSize(maxSize, lang) : ""} onRestored={onRestored} />;
 }
 
-function UploadPanel({ queue, items, limit }: { queue: UploadQueue; items: UploadItem[]; limit: string }) {
+function UploadPanel({ queue, items, limit, onRestored }: { queue: UploadQueue; items: UploadItem[]; limit: string; onRestored?: () => void }) {
   const picker = useRef<HTMLInputElement>(null);
   const finished = items.some((i) => i.state.kind !== "waiting" && i.state.kind !== "uploading");
   return (
@@ -107,7 +114,17 @@ function UploadPanel({ queue, items, limit }: { queue: UploadQueue; items: Uploa
       {items.length > 0 && (
         <ul aria-label={t.uploadsLabel} className="flex flex-col gap-1">
           {items.map((i) => (
-            <UploadRow key={i.id} item={i} limit={limit} cancel={() => queue.cancel(i.id)} />
+            <UploadRow
+              key={i.id}
+              item={i}
+              limit={limit}
+              cancel={() => queue.cancel(i.id)}
+              retry={queue.canRetry(i.id) ? () => queue.retry(i.id) : undefined}
+              restored={() => {
+                queue.markRestored(i.id);
+                onRestored?.();
+              }}
+            />
           ))}
         </ul>
       )}
@@ -124,9 +141,28 @@ const stateColor: Record<UploadItem["state"]["kind"], string> = {
   cancelled: "text-ink-muted",
 };
 
-function UploadRow({ item, limit, cancel }: { item: UploadItem; limit: string; cancel: () => void }) {
+function UploadRow({ item, limit, cancel, retry, restored }: { item: UploadItem; limit: string; cancel: () => void; retry?: () => void; restored: () => void }) {
   const name = displayName(item.name) || t.untitled;
   const active = item.state.kind === "waiting" || item.state.kind === "uploading";
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const s = item.state;
+  // A duplicate of a trashed document: the server restored nothing (#12); Restore does.
+  const trashedId = s.kind === "duplicate" && s.trashed && s.existingId ? s.existingId : "";
+  const restore = () => {
+    setBusy(true);
+    setError("");
+    documentsApi.restore(trashedId).then(
+      () => {
+        setBusy(false);
+        restored();
+      },
+      (err: unknown) => {
+        setBusy(false);
+        setError(trashErrorText(err));
+      },
+    );
+  };
   return (
     <li className="flex flex-col gap-1 text-sm">
       <div className="flex flex-wrap items-baseline gap-x-3">
@@ -140,7 +176,22 @@ function UploadRow({ item, limit, cancel }: { item: UploadItem; limit: string; c
             {t.cancel}
           </button>
         )}
+        {trashedId && (
+          <button type="button" className="text-accent-ink hover:underline pointer-coarse:min-h-11" aria-label={t.uploadRestoreLabel(name)} disabled={busy} onClick={restore}>
+            {t.restore}
+          </button>
+        )}
+        {retry && (
+          <button type="button" className="text-accent-ink hover:underline pointer-coarse:min-h-11" aria-label={t.retryUpload(name)} onClick={retry}>
+            {t.tryAgain}
+          </button>
+        )}
       </div>
+      {error && (
+        <p role="alert" className="text-danger">
+          {error}
+        </p>
+      )}
       {item.state.kind === "uploading" && (
         <progress className="h-1.5 w-full" max={100} value={item.state.percent} aria-label={name} />
       )}

@@ -429,6 +429,7 @@ function DeleteForm({ entry, hasChildren, cancel, done, gone }: { entry: Row; ha
     <div className="flex flex-col gap-3">
       <p className="text-sm">{text}</p>
       {hasChildren && <p className="text-sm">{t.deleteTagChildren}</p>}
+      <p className="text-sm text-ink-muted">{t.deleteAlsoTrash}</p>
       {error && (
         <p role="alert" className="text-sm text-danger">
           {error}

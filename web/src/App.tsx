@@ -56,6 +56,12 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
   // each change on the metadata page: counts and names again.
   const [edits, setEdits] = useState(0);
   const onChanged = useCallback(() => setEdits((n) => n + 1), []);
+  // A duplicate upload's trashed document restored from the upload panel: the list and counts again.
+  const [restoredUploads, setRestoredUploads] = useState(0);
+  const onUploadRestored = useCallback(() => {
+    setRestoredUploads((n) => n + 1);
+    onChanged();
+  }, [onChanged]);
   useEffect(() => {
     const ctl = new AbortController();
     documentsApi.counts(ownOnly, ctl.signal).then(setCounts, () => {
@@ -139,8 +145,8 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
         <main className="flex-1 overflow-y-auto">
           {view === "" && (
             <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6">
-              <DocumentsUpload queue={queue} maxSize={maxSize} />
-              <DocumentList state={state} update={update} query={query} user={user} metadata={metadata.data} everyone={everyone} reload={imported} onMaxUploadSize={onMaxUploadSize} onChanged={onChanged} />
+              <DocumentsUpload queue={queue} maxSize={maxSize} onRestored={onUploadRestored} />
+              <DocumentList state={state} update={update} query={query} user={user} metadata={metadata.data} everyone={everyone} reload={imported + restoredUploads} onMaxUploadSize={onMaxUploadSize} onChanged={onChanged} />
             </div>
           )}
           {view === "metadata" && <MetadataPage metadata={metadata} userId={user.id} onChanged={onChanged} open={select} />}

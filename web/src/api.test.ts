@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, UNAUTHORIZED_EVENT, apiKeyApi, documentListQuery, emptyDocumentQuery, ownsData, passkeyApi, profileApi, retryAfter, sessionApi, unknownPasskey, usersApi, type ManagedUser } from "./api";
+import { ApiError, UNAUTHORIZED_EVENT, apiKeyApi, bulkMatch, documentListQuery, documentsApi, retryAfterHeader, emptyDocumentQuery, ownsData, passkeyApi, profileApi, retryAfter, sessionApi, unknownPasskey, usersApi, type ManagedUser } from "./api";
 
 const reply = (status: number, body?: unknown) =>
   vi
@@ -221,5 +221,42 @@ describe("documentListQuery", () => {
     expect(documentListQuery({ ...emptyDocumentQuery, sort: "date", ascending: true }, 50, "", "")).toBe("limit=50&sort=date&order=asc");
     expect(documentListQuery({ ...emptyDocumentQuery, sort: "added" }, 50, "", "")).toBe("limit=50&sort=added");
     expect(documentListQuery({ ...emptyDocumentQuery, q: "x", sort: "relevance", ascending: true }, 50, "", "")).toBe("q=x&limit=50&sort=relevance");
+  });
+  it("asks for the trash, newest deleted first and in one direction only", () => {
+    expect(documentListQuery({ ...emptyDocumentQuery, trashed: true, sort: "deleted", ascending: true, ownOnly: true }, 50, "", "")).toBe(
+      "limit=50&owner=me&trashed=true&sort=deleted",
+    );
+    expect(bulkMatch({ ...emptyDocumentQuery, trashed: true, q: "x" }, "")).toEqual({ q: "x", trashed: true });
+    expect(bulkMatch({ ...emptyDocumentQuery, q: "x" }, "")).toEqual({ q: "x" });
+  });
+});
+
+describe("the trash calls and Retry-After", () => {
+  it("send DELETE, restore and purge, and read the Retry-After of a refusal", async () => {
+    const calls: { url: string; method: string; body: unknown }[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method ?? "GET", body: init?.body });
+      if (url.endsWith("/purge")) return new Response(JSON.stringify({ error: "busy" }), { status: 503, headers: { "Retry-After": "60" } });
+      if (url.endsWith("/restore")) return new Response(JSON.stringify({ id: "a b" }), { status: 200 });
+      return new Response(null, { status: 204 });
+    });
+    await documentsApi.trash("a b");
+    expect((await documentsApi.restore("a b")).id).toBe("a b");
+    const err = await documentsApi.purge("a b").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).retryAfter).toBe(60);
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "DELETE /api/documents/a%20b",
+      "POST /api/documents/a%20b/restore",
+      "POST /api/documents/a%20b/purge",
+    ]);
+    vi.unstubAllGlobals();
+  });
+  it("reads seconds only", () => {
+    expect(retryAfterHeader("5")).toBe(5);
+    expect(retryAfterHeader(" 60 ")).toBe(60);
+    expect(retryAfterHeader(null)).toBeUndefined();
+    expect(retryAfterHeader("Wed, 21 Oct 2026 07:28:00 GMT")).toBeUndefined();
+    expect(retryAfterHeader("-1")).toBeUndefined();
   });
 });
