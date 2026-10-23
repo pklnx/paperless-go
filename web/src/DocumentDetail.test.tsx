@@ -726,6 +726,19 @@ describe("notes in Markdown (#12)", () => {
     expect(detail().queryByTestId("notes-rendered")).toBeNull();
   });
 
+  it("keeps a long code line inside the form's column: the code scrolls, the form does not widen", async () => {
+    serve(doc("d1", "A", { notes: "```\n" + "x".repeat(200) + "\n```" }));
+    await openAt("/?doc=d1");
+    const pre = rendered().querySelector("pre")!;
+    expect(pre.textContent).toBe("x".repeat(200));
+    expect(pre.className).toContain("overflow-x-auto");
+    // A fieldset is at least as wide as its content unless told otherwise.
+    for (let el: HTMLElement | null = pre; el && el.tagName !== "FORM"; el = el.parentElement) {
+      if (el.tagName === "FIELDSET") expect(el.className.split(" ")).toContain("min-w-0");
+    }
+    expect(rendered().className.split(" ")).toContain("min-w-0");
+  });
+
   it("shows the textarea again when the server refuses the notes", async () => {
     serve(doc("d1", "A", { notes: "alt" }));
     await openAt("/?doc=d1");

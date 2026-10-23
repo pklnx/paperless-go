@@ -431,7 +431,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
                   save(false);
                 }}
               >
-                <fieldset disabled={saving} className="flex flex-col gap-3">
+                <fieldset disabled={saving} className="flex min-w-0 flex-col gap-3">
                   <div className="flex flex-col gap-1">
                     <label htmlFor={`${headingId}-title`} className={label}>
                       {t.fieldTitle}
@@ -521,7 +521,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
                         </p>
                       </>
                     ) : (
-                      <div role="group" aria-labelledby={`${headingId}-notes-label`} data-testid="notes-rendered" className="flex flex-col gap-2 text-sm wrap-anywhere">
+                      <div role="group" aria-labelledby={`${headingId}-notes-label`} data-testid="notes-rendered" className="flex min-w-0 flex-col gap-2 text-sm wrap-anywhere">
                         {form.notes !== "" ? <NotesView text={form.notes} /> : <p className="text-ink-muted">{t.notesNone}</p>}
                       </div>
                     )}
