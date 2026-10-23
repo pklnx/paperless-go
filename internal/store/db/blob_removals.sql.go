@@ -188,6 +188,30 @@ func (q *Queries) MarkBlobRemoval(ctx context.Context, arg MarkBlobRemovalParams
 	return items, nil
 }
 
+const newestDocumentChange = `-- name: NewestDocumentChange :one
+SELECT (n.t IS NOT NULL)::bool AS found, COALESCE(n.t, 'epoch')::timestamptz AS newest
+FROM (SELECT GREATEST(
+    (SELECT max(created_at) FROM documents),
+    (SELECT max(modified_at) FROM documents),
+    (SELECT max(finished_at) FROM jobs)) AS t) n
+`
+
+type NewestDocumentChangeRow struct {
+	Found  bool
+	Newest time.Time
+}
+
+// The walk's reference for files newer than the database: the latest time
+// a document was created or changed or a processing job ended (which
+// stores the archive and the thumbnail without touching modified_at).
+// found is false without documents and jobs.
+func (q *Queries) NewestDocumentChange(ctx context.Context) (NewestDocumentChangeRow, error) {
+	row := q.db.QueryRow(ctx, newestDocumentChange)
+	var i NewestDocumentChangeRow
+	err := row.Scan(&i.Found, &i.Newest)
+	return i, err
+}
+
 const queueBlobRemovals = `-- name: QueueBlobRemovals :exec
 
 INSERT INTO blob_removals (sha256, due_at)

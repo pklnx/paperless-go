@@ -108,6 +108,9 @@ func (f *fakeStore) QueueUnreferencedBlobs(context.Context, []string, time.Time)
 	return 0, nil
 }
 func (f *fakeStore) HasDocuments(context.Context) (bool, error) { return true, nil }
+func (f *fakeStore) NewestDocumentChange(context.Context) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
 func (f *fakeStore) Installation(context.Context) (*store.Installation, error) {
 	return &store.Installation{ID: "00000000-0000-4000-8000-000000000001"}, nil
 }

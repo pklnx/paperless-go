@@ -84,6 +84,17 @@ ON CONFLICT (sha256) DO NOTHING;
 -- Any document at all, also in the trash: the walk's sanity stop.
 SELECT EXISTS (SELECT 1 FROM documents);
 
+-- name: NewestDocumentChange :one
+-- The walk's reference for files newer than the database: the latest time
+-- a document was created or changed or a processing job ended (which
+-- stores the archive and the thumbnail without touching modified_at).
+-- found is false without documents and jobs.
+SELECT (n.t IS NOT NULL)::bool AS found, COALESCE(n.t, 'epoch')::timestamptz AS newest
+FROM (SELECT GREATEST(
+    (SELECT max(created_at) FROM documents),
+    (SELECT max(modified_at) FROM documents),
+    (SELECT max(finished_at) FROM jobs)) AS t) n;
+
 -- name: WalkCandidates :many
 -- The walk's candidates of a batch: hashes no document names and that are
 -- not queued yet (a queued hash goes anyway, and counting it would make a

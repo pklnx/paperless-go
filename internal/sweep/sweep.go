@@ -58,6 +58,7 @@ type Store interface {
 	UnreferencedBlobs(ctx context.Context, hashes []string) ([]string, error)
 	WalkCandidates(ctx context.Context, hashes []string) ([]string, error)
 	QueueUnreferencedBlobs(ctx context.Context, hashes []string, due time.Time) (int64, error)
+	NewestDocumentChange(ctx context.Context) (time.Time, bool, error)
 	Binder
 }
 
@@ -251,17 +252,24 @@ func (s *Sweeper) queuePass(ctx context.Context, ss *store.SweepSession, dryRun 
 type WalkOptions struct {
 	// DryRun only counts: nothing is queued or removed.
 	DryRun bool
-	// Force overrides the sanity stop (an empty database, more than 10 %
-	// of the files) for this walk. The binding is never overridden.
+	// Force overrides the sanity stops (an empty database, more than 10 %
+	// of the files) for this walk and queues the files newer than the
+	// newest document change too. The binding is never overridden.
 	Force bool
 }
 
 // WalkStats is what one walk saw and did.
 type WalkStats struct {
 	// Blobs is the number of files below documents/, Candidates those no
-	// document names and that are not queued yet, Queued the rows added to blob_removals (in a dry
-	// run: 0).
+	// document names and that are not queued yet, Queued the rows added
+	// to blob_removals (in a dry run: 0).
 	Blobs, Candidates, Queued int
+	// Newer is the number of candidates written after the newest document
+	// change (store.NewestDocumentChange): unless Force, they are kept,
+	// not queued, since they most likely belong to documents this
+	// database does not have (an older dump restored with a newer data
+	// directory).
+	Newer int
 	// Temp is the number of stale temporary files removed (in a dry run:
 	// found).
 	Temp int
@@ -281,10 +289,14 @@ const maxUnexpectedLogged = 20
 // database has no documents but the data directory has files
 // (ErrEmptyDatabase) or when more than 10 % of the files and more than
 // MinRefusal would be queued (ErrTooMany): it counts all candidates (files
-// no document names and not queued yet) before it queues any. Otherwise it queues the files no document names,
-// due after store.BlobGrace (the queue pass removes them unless a writer
-// names them by then), and removes the temporary files of Put older than
-// TempAge.
+// no document names and not queued yet) before it queues any. Otherwise it
+// queues the files no document names, due after store.BlobGrace (the queue
+// pass removes them unless a writer names them by then), and removes the
+// temporary files of Put older than TempAge. Unless opts.Force it keeps
+// the candidates written after the newest document change and counts them
+// in WalkStats.Newer: a file no document names that is newer than anything
+// the database did most likely belongs to documents it does not have, as
+// after a restore of an older dump with a newer data directory.
 //
 // The walk holds the sweep lock (store.ExclusiveSweep) like the queue
 // pass; while another runs it returns store.ErrSweepRunning.
@@ -312,14 +324,29 @@ func (s *Sweeper) walk(ctx context.Context, opts WalkOptions) (WalkStats, error)
 	}
 	now := s.now()
 	log := s.log()
+	// The reference for files newer than the database is read before the
+	// files are: a document that a writer creates or the worker finishes
+	// during the walk cannot make the files of the restored-over
+	// documents count as older.
+	newest, found, err := s.Store.NewestDocumentChange(ctx)
+	if err != nil {
+		return st, err
+	}
 	var candidates, temps, batch []string
+	// The last write of each file of the batch, for the candidates.
+	modTimes := make(map[string]time.Time, WalkBatch)
+	var candidateTimes []time.Time
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
 		free, err := s.Store.WalkCandidates(ctx, batch)
-		candidates = append(candidates, free...)
+		for _, h := range free {
+			candidates = append(candidates, h)
+			candidateTimes = append(candidateTimes, modTimes[h])
+		}
 		batch = batch[:0]
+		clear(modTimes)
 		return err
 	}
 	err = s.Blobs.Walk(func(e blobstore.Entry) error {
@@ -330,6 +357,7 @@ func (s *Sweeper) walk(ctx context.Context, opts WalkOptions) (WalkStats, error)
 		case blobstore.EntryBlob:
 			st.Blobs++
 			batch = append(batch, e.SHA256)
+			modTimes[e.SHA256] = e.ModTime
 			if len(batch) == WalkBatch {
 				return flush()
 			}
@@ -352,6 +380,21 @@ func (s *Sweeper) walk(ctx context.Context, opts WalkOptions) (WalkStats, error)
 	if err != nil {
 		return st, err
 	}
+	// The candidates written before the newest document change; the
+	// others are counted in Newer (also for a refusal's report).
+	older := candidates
+	if len(candidates) > 0 {
+		older = make([]string, 0, len(candidates))
+		for i, h := range candidates {
+			// Without any document or job every candidate counts as
+			// newer; only Force (over ErrEmptyDatabase) queues them then.
+			if !found || candidateTimes[i].After(newest) {
+				st.Newer++
+				continue
+			}
+			older = append(older, h)
+		}
+	}
 	if !opts.Force {
 		has, err := s.Store.HasDocuments(ctx)
 		if err != nil {
@@ -363,6 +406,9 @@ func (s *Sweeper) walk(ctx context.Context, opts WalkOptions) (WalkStats, error)
 		case st.Candidates > MinRefusal && st.Candidates*10 > st.Blobs:
 			return st, fmt.Errorf("%w (%d of %d files); nothing was queued", ErrTooMany, st.Candidates, st.Blobs)
 		}
+	}
+	if !opts.Force {
+		candidates = older
 	}
 	if opts.DryRun {
 		st.Temp = len(temps)
@@ -447,12 +493,18 @@ func (s *Sweeper) logWalk(ctx context.Context, log *slog.Logger) bool {
 			"run sweep --bind once", "dir", s.Blobs.Root())
 	case Refused(err):
 		log.Error("sweep: the walk of the data directory refused to queue files", "dir", s.Blobs.Root(),
-			"files", w.Blobs, "unreferenced", w.Candidates, "err", err)
+			"files", w.Blobs, "unreferenced", w.Candidates, "newer", w.Newer, "err", err)
 	case err != nil:
 		log.Error("sweep: the walk of the data directory failed; trying again tomorrow", "err", err)
 	default:
 		log.Info("sweep: walked the data directory", "files", w.Blobs, "unreferenced", w.Candidates, "queued", w.Queued,
 			"temporary_removed", w.Temp, "unexpected", w.Unexpected)
+		if w.Newer > 0 {
+			log.Warn("sweep: kept files no document names that are newer than the newest document change; "+
+				"was an older database restored with a newer data directory? Put back the data directory of the same backup, "+
+				"or, if these files are not needed, queue them once with sweep --force",
+				"dir", s.Blobs.Root(), "kept", w.Newer)
+		}
 	}
 	return true
 }
