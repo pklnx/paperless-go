@@ -66,6 +66,10 @@ export function useNotice(): Notices {
     setNotice(null);
   }, []);
   const show = useCallback((n: Notice) => {
+    // A notice of the other kind shows in the other live region: the
+    // element under the pointer or focus is gone, and no leave or blur
+    // ends the pause, so it ends here (a focused new one pauses again).
+    if (shown.current && Boolean(shown.current.error) !== Boolean(n.error)) paused.current = false;
     shown.current = n;
     setNotice(n);
     if (paused.current) stop();

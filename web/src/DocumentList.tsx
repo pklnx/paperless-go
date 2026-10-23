@@ -6,7 +6,7 @@ import { documentName, ProcessingStatus } from "./DocumentParts";
 import { EmptyState } from "./EmptyState";
 import { ArrowIcon, CloseIcon, DocumentIcon, InboxIcon, SearchIcon, StarIcon, TrashIcon } from "./icons";
 import { lang, t } from "./i18n";
-import { clickSelect, maxSelection, pruneSelection, selectAll, useLongPress } from "./selection";
+import { clickSelect, pruneSelection, selectAll, selectionLimit, useLongPress } from "./selection";
 import { snippetParts } from "./snippet";
 import { button, input } from "./styles";
 import { chipInk } from "./tagTree";
@@ -359,7 +359,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     setSelected(r.ids);
     setCapped(r.capped);
   };
-  const allLoaded = order.length > 0 && (selected.size === Math.min(order.length, maxSelection));
+  const allLoaded = order.length > 0 && (selected.size === Math.min(order.length, selectionLimit.max));
   const toggleAll = () => {
     selectionGen.current++;
     setMatchSel(null);
@@ -736,7 +736,7 @@ function SelectionHeader({ allLoaded, some, count, capped, allMatches, moreMatch
           </>
         )}
       </div>
-      {capped && <p className="text-ink-muted">{t.selectionCapped(maxSelection)}</p>}
+      {capped && <p className="text-ink-muted">{t.selectionCapped(selectionLimit.max)}</p>}
       {error && (
         <p role="alert" className="text-danger">
           {error}
