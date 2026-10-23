@@ -121,10 +121,12 @@ func (g *ownerGate) acquire(ctx context.Context, owners []int64, deadline time.T
 			defer t.Stop()
 			timeout = t.C
 		}
+		// Counted before the hook, so a test that got the hook's signal
+		// sees this writer in OwnerGateWaiters.
+		g.waiting.Add(1)
 		if f, ok := ctx.Value(gateWaitKey{}).(func()); ok {
 			f()
 		}
-		g.waiting.Add(1)
 		var err error
 		select {
 		case e.token <- struct{}{}:

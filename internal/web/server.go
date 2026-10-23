@@ -399,8 +399,10 @@ func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, store.ErrBusy):
 		// Another change of the owner ran longer than ownerWait: nothing
 		// was written.
+		// It is load, not a fault: a warning, not "request failed".
+		s.log.Warn("request busy: another change of the owner is still running", "method", r.Method, "path", r.URL.Path, "err", err)
 		w.Header().Set("Retry-After", busyRetryAfter)
-		s.fail(w, r, http.StatusServiceUnavailable, "another change of these documents is still running; try again", err)
+		s.writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "another change of these documents is still running; try again"})
 	case errors.Is(err, store.ErrUnknownUser):
 		// The user was removed while the request ran; the session is gone
 		// with it.

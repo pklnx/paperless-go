@@ -243,3 +243,18 @@ func TestFailStore(t *testing.T) {
 		t.Errorf("the 500's cause is not logged: %s", logs.String())
 	}
 }
+
+// An ErrBusy 503 is load, not a fault: logged as a warning, never as
+// "request failed" at level ERROR.
+func TestFailStoreBusyLogsWarning(t *testing.T) {
+	var logs strings.Builder
+	s := New(nil, slog.New(slog.NewTextHandler(&logs, nil)), Options{})
+	rec := httptest.NewRecorder()
+	s.failStore(rec, httptest.NewRequest("PATCH", "http://localhost/api/documents/x", nil), fmt.Errorf("x: %w", store.ErrBusy))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if l := logs.String(); !strings.Contains(l, "level=WARN") || strings.Contains(l, "level=ERROR") {
+		t.Errorf("busy logged as: %s", l)
+	}
+}
