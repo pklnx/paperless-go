@@ -62,7 +62,7 @@ const (
 // another or changes what the rest of the suite looks at. They are
 // imported before all others and dated early, so that the list (newest
 // added first) shows them last: the first page is still demo's own
-// documents. web/e2e/demo.ts names them (seed.bulkPair, seed.trashUndo…);
+// documents. web/e2e/demo.ts names them (work.pair, work.trashUndo…);
 // trashAgain's lines are repeated there to build the same file.
 func workDocs() []seedDoc {
 	docs := make([]seedDoc, 0, bulkBatch+8)

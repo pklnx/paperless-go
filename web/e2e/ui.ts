@@ -104,6 +104,11 @@ export function detail(page: Page, title: string | RegExp): Locator {
   return page.getByRole("region", { name: title, exact: true });
 }
 
+/** Closes the open document (the detail's close button). */
+export async function closeDocument(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "Close document", exact: true }).click();
+}
+
 /** The detail's form. */
 export function detailForm(page: Page): Locator {
   return page.getByRole("form", { name: "Edit document" });

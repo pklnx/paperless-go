@@ -2,7 +2,7 @@ import type { Page } from "@playwright/test";
 import { work } from "./demo";
 import { expect, test } from "./fixtures";
 import { makePDF } from "./pdf";
-import { confirmDialog, detail, documentLink, documentList, documentRow, field, listEntry, navigation, notice, search, trashBanner, undoButton, uploadFiles, uploadRow } from "./ui";
+import { closeDocument, confirmDialog, detail, documentLink, documentList, documentRow, field, listEntry, navigation, notice, pdfPage, search, trashBanner, undoButton, uploadFiles, uploadRow } from "./ui";
 
 /** Finds the document by its word and moves it to the trash from its row. */
 async function deleteFromList(page: Page, title: string, word: string): Promise<void> {
@@ -47,7 +47,10 @@ test("a deleted document comes back with Undo; in the trash it is read-only unti
   await banner.getByRole("button", { name: "Restore", exact: true }).click();
   await expect(banner).toHaveCount(0);
   await expect(field(page, "Title")).toBeEnabled();
-  await page.getByRole("button", { name: "Close document" }).click();
+  await closeDocument(page);
+  // The trash keeps the search: the list is shown, or says "Nothing found",
+  // before its row is expected to be gone (a list not yet loaded has no row).
+  await expect(documentList(page, "Trash").or(page.getByText("Nothing found", { exact: true }))).toBeVisible();
   await expect(documentRow(page, title)).toHaveCount(0);
   await listEntry(navigation(page), "All documents").click();
   await search(page, word);
@@ -61,6 +64,9 @@ test("Delete permanently asks first and removes the document for good", async ({
   await openTrash(page);
   await documentLink(page, title).click();
   await expect(detail(page, title)).toBeVisible();
+  // Let the viewer load the file first: a file request that reaches the
+  // server after the purge is answered 404, which the guards report.
+  await expect(pdfPage(page, 1)).toContainText(word);
   const id = new URL(page.url()).searchParams.get("doc") ?? "";
   expect(id).not.toBe("");
 
@@ -69,8 +75,10 @@ test("Delete permanently asks first and removes the document for good", async ({
   await expect(notice(page, `“${title}” deleted permanently.`)).toBeVisible();
   await expect(detail(page, title)).toHaveCount(0);
 
-  // The server removes the rest (its files) after it is woken, in the
-  // background: poll until the document is gone, never one look.
+  // The purge hides the document at once; the sweeper removes its row and
+  // files later (internal/sweep has its own tests, this spec does not cover
+  // the sweeper). The poll and the reload only check that the server and
+  // the list no longer know the document.
   await expect
     .poll(async () => (await page.request.get(`/api/documents/${id}`, { headers: { Accept: "application/json" } })).status(), { timeout: 20_000 })
     .toBe(404);

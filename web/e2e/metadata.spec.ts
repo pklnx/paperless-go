@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { unique, work } from "./demo";
 import { expect, test } from "./fixtures";
-import { createChoice, detail, detailForm, documentLink, listEntry, metadataRow, metadataTab, navigation, pageEntry, saveDocument, search, sheet } from "./ui";
+import { closeDocument, createChoice, detail, detailForm, documentLink, field, listEntry, metadataRow, metadataTab, navigation, pageEntry, saveDocument, search, sheet } from "./ui";
 
 const metadataPage = "Tags, correspondents & types";
 
@@ -15,7 +15,7 @@ async function openSample(page: Page): Promise<void> {
 
 /** Back to the page of tags, correspondents and types from the open document. */
 async function openMetadataPage(page: Page): Promise<void> {
-  await page.getByRole("button", { name: "Close document" }).click();
+  await closeDocument(page);
   await pageEntry(page, metadataPage).click();
   await expect(page).toHaveURL(/[?&]view=metadata/);
 }
@@ -56,6 +56,9 @@ test("a tag is created with a document, put under another tag, renamed and delet
   await search(page, work.metadata.word);
   await documentLink(page, work.metadata.title).click();
   await expect(detail(page, work.metadata.title)).toBeVisible();
+  // The form is loaded (its title field holds the document's title) before
+  // the removed tag is expected to be missing from it.
+  await expect(field(page, "Title")).toHaveValue(work.metadata.title);
   await expect(detailForm(page).getByText(renamed)).toHaveCount(0);
 });
 

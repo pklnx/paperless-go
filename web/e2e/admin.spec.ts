@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { resetTwoFactorUser, seed, unique } from "./demo";
+import { origin, resetTwoFactorUser, seed, unique } from "./demo";
 import { expect, test } from "./fixtures";
 import { confirmDialog, documentRow, logEntries, logFilter, pageEntry, resetPasswordPanel, search, userRow } from "./ui";
 
@@ -66,21 +66,33 @@ test("the admin resets another user's two-factor authentication", async ({ page 
   await expect(row.getByRole("button", { name: "Reset 2FA", exact: true })).toHaveCount(0);
 });
 
-test("the log shows the logins of this run, and the action filter narrows it", async ({ page }) => {
+test("the log shows a login made in the test, and the action filter narrows it", async ({ page, playwright }) => {
   const name = unique("user");
   await openUsers(page);
-  await addUser(page, name);
+  const password = await addUser(page, name);
+
+  // A fresh login of that user, made here: the entry does not depend on
+  // what other tests logged before (the list shows the newest first).
+  // The server needs an Origin, which a browser sends and this client does not.
+  // No stored session: a login with the admin's cookie would end the admin's session.
+  const client = await playwright.request.newContext({ baseURL: origin, storageState: { cookies: [], origins: [] }, extraHTTPHeaders: { Origin: origin } });
+  try {
+    const login = await client.post("/api/session", { data: { username: name, password } });
+    expect(login.ok()).toBe(true);
+  } finally {
+    await client.dispose();
+  }
 
   await pageEntry(page, "Log").click();
   await expect(page).toHaveURL(/[?&]view=log/);
-  const logins = logEntries(page).filter({ hasText: "Logged in" });
+  const logins = logEntries(page).filter({ hasText: "Logged in" }).filter({ hasText: name });
   const added = logEntries(page).filter({ hasText: "Added user" }).filter({ hasText: name });
-  await expect(logins).not.toHaveCount(0);
+  await expect(logins).toHaveCount(1);
   await expect(added).toHaveCount(1);
 
   await logFilter(page, "Action").selectOption({ label: "Logins" });
   await expect(added).toHaveCount(0);
-  await expect(logins).not.toHaveCount(0);
+  await expect(logins).toHaveCount(1);
 
   await logFilter(page, "Action").selectOption({ label: "User management" });
   await expect(added).toHaveCount(1);
