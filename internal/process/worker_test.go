@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -406,6 +407,53 @@ func TestWorkerDeletedDocumentDropsResult(t *testing.T) {
 	e.runOnce(t, ctx, Dropped)
 	if _, err := e.st.GetDocument(ctx, e.owner, d.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("document: %v", err)
+	}
+	e.runOnce(t, ctx, NoJob)
+	e.workDirEmpty(t)
+}
+
+// A document moved to the trash while its job runs still gets the result;
+// one purged meanwhile (trash, "delete permanently", the sweeper's row
+// pass, which cascades to the job) drops it without an error or a retry,
+// and its archive and thumbnail are left to the orphan walk (#12, part 2).
+func TestWorkerTrashedAndPurgedDocument(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	trashed := e.doc(t, "%PDF trashed")
+	e.runner.handle = func(ctx context.Context, c Command) ([]byte, error) {
+		if c.Name == "pdfinfo" {
+			if err := e.st.TrashDocument(ctx, e.owner, trashed.ID); err != nil {
+				return nil, err
+			}
+		}
+		return poppler(pdf{pages: []string{longText}})(ctx, c)
+	}
+	e.runOnce(t, ctx, Done)
+	if d, err := e.st.GetDocument(ctx, e.owner, trashed.ID); err != nil || d.DeletedAt == nil || d.PageCount != 1 {
+		t.Fatalf("trashed document after its job: %+v, %v", d, err)
+	}
+
+	purged := e.doc(t, "%PDF purged")
+	e.runner.handle = func(ctx context.Context, c Command) ([]byte, error) {
+		if c.Name == "pdfinfo" {
+			if err := e.st.TrashDocument(ctx, e.owner, purged.ID); err != nil {
+				return nil, err
+			}
+			if err := e.st.PurgeDocument(ctx, e.owner, purged.ID); err != nil {
+				return nil, err
+			}
+			if res, err := e.st.PurgeDueDocuments(ctx, time.Now(), store.DefaultTrashRetention, 100); err != nil || res.Purged != 1 {
+				return nil, fmt.Errorf("purge: %+v, %w", res, err)
+			}
+		}
+		return poppler(pdf{pages: []string{longText}})(ctx, c)
+	}
+	e.runOnce(t, ctx, Dropped)
+	if _, err := e.st.GetDocument(ctx, store.Scope{All: true}, purged.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("purged document: %v", err)
+	}
+	if jobs, err := e.st.DocumentJobs(ctx, purged.ID); err != nil || len(jobs) != 0 {
+		t.Errorf("jobs of the purged document: %+v, %v", jobs, err)
 	}
 	e.runOnce(t, ctx, NoJob)
 	e.workDirEmpty(t)

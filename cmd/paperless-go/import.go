@@ -34,9 +34,12 @@ is decided from the content, not the name. Symbolic links and other special
 files are skipped. The source files are never changed, moved or deleted.
 
 One line per file says imported, duplicate (the user already has the file, with
-the existing title) or failed (with the reason), followed by a summary. The
+the existing title), restored (the user's document of the file was in the
+trash and is back) or failed (with the reason), followed by a summary. The
 exit status is 1 if any file failed, so running the command again after fixing
-the files is safe: files already imported are reported as duplicates.
+the files is safe: files already imported are reported as duplicates. A file
+whose document is being removed permanently fails; run the import again a
+minute later to import it as new.
 
 --user is required when there is more than one user; a locked user is refused.
 --dry-run checks every file (type, size, pixel limit, duplicates) and stores
@@ -56,7 +59,7 @@ With ./pgo, DIR is a folder on the host: ./pgo import DIR.`,
 }
 
 // importTally counts the outcomes of an import run.
-type importTally struct{ imported, duplicates, failed int }
+type importTally struct{ imported, duplicates, restored, failed int }
 
 func runImport(cmd *cobra.Command, path, userName string, dryRun bool) error {
 	root, err := filepath.EvalSymlinks(path)
@@ -82,6 +85,7 @@ func runImport(cmd *cobra.Command, path, userName string, dryRun bool) error {
 	imp := &importer{
 		ctx: cmd.Context(), out: cmd.OutOrStdout(), st: a.store, owner: owner,
 		dryRun: dryRun, maxSize: a.cfg.MaxUploadSize,
+		entry: func(action string) *store.AuditEntry { return cliEntry(cmd, action) },
 	}
 	if !dryRun {
 		blobs, err := blobstore.New(a.cfg.DataDir)
@@ -95,13 +99,13 @@ func runImport(cmd *cobra.Command, path, userName string, dryRun bool) error {
 
 	walkErr := imp.walk(root, path)
 	t := imp.tally
-	verb := "imported"
+	verb, restored := "imported", "restored"
 	if dryRun {
-		verb = "would import"
+		verb, restored = "would import", "would restore"
 	}
-	fmt.Fprintf(imp.out, "%s: %d, duplicates: %d, failed: %d\n", verb, t.imported, t.duplicates, t.failed)
+	fmt.Fprintf(imp.out, "%s: %d, duplicates: %d, %s: %d, failed: %d\n", verb, t.imported, t.duplicates, restored, t.restored, t.failed)
 
-	if !dryRun && t.imported > 0 {
+	if !dryRun && t.imported+t.restored > 0 {
 		// One summary entry per run, written after the documents (the
 		// documents are written one by one, each in its own transaction).
 		// An interrupted run still records what it imported, so the entry
@@ -111,6 +115,7 @@ func runImport(cmd *cobra.Command, path, userName string, dryRun bool) error {
 		e.Detail("path", path)
 		e.Detail("imported", t.imported)
 		e.Detail("duplicates", t.duplicates)
+		e.Detail("restored", t.restored)
 		e.Detail("failed", t.failed)
 		if walkErr != nil {
 			e.Detail("interrupted", true)
@@ -125,7 +130,7 @@ func runImport(cmd *cobra.Command, path, userName string, dryRun bool) error {
 		return walkErr
 	}
 	if t.failed > 0 {
-		return &exitError{code: 1, msg: fmt.Sprintf("%d of %d files failed", t.failed, t.imported+t.duplicates+t.failed)}
+		return &exitError{code: 1, msg: fmt.Sprintf("%d of %d files failed", t.failed, t.imported+t.duplicates+t.restored+t.failed)}
 	}
 	return nil
 }
@@ -178,7 +183,12 @@ type importer struct {
 	dryRun  bool
 	maxSize int64
 	tally   importTally
+	// entry starts an audit entry by the operator (cliEntry).
+	entry func(action string) *store.AuditEntry
 }
+
+// errPurgePending is the reason of a file whose document is due for purge.
+var errPurgePending = errors.New("the existing document is being removed permanently; import the file again in a minute")
 
 // walk imports every regular file below root (or root itself, if it is
 // one) in lexical order. Symbolic links and special files are skipped.
@@ -231,15 +241,39 @@ func (m *importer) file(p, rel, name string) {
 	}
 	res, err := m.im.Import(m.ctx, ingest.Request{OwnerID: m.owner.ID, FileName: name, Body: f})
 	switch {
+	case errors.Is(err, store.ErrPurgePending):
+		m.fail(rel, errPurgePending)
 	case err != nil:
 		m.fail(rel, err)
 	case res.Outcome == ingest.Imported:
 		m.tally.imported++
 		fmt.Fprintf(m.out, "%s: imported\n", rel)
+	case res.Outcome == ingest.Duplicate && res.Existing.Trashed:
+		m.restore(rel, res.Existing)
 	case res.Outcome == ingest.Duplicate:
 		m.duplicate(rel, res.Existing.Title)
 	default:
 		m.fail(rel, refusalText(res.Refusal))
+	}
+}
+
+// restore brings back the user's trashed document of a file, with a
+// document.restore entry by the operator (via import): the operator
+// imports the file to keep it, and nobody here sees a Restore button.
+func (m *importer) restore(rel string, doc store.DocumentRef) {
+	e := m.entry("document.restore")
+	e.SetTarget(store.TargetDocument, doc.ID, doc.Title)
+	e.Detail("via", "import")
+	_, err := m.st.RestoreDocument(store.WithAudit(m.ctx, e), store.Scope{UserID: m.owner.ID}, doc.ID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// Due for purge since the duplicate check.
+		m.fail(rel, errPurgePending)
+	case err != nil:
+		m.fail(rel, err)
+	default:
+		m.tally.restored++
+		fmt.Fprintf(m.out, "%s: restored %q from the trash\n", rel, doc.Title)
 	}
 }
 
@@ -282,6 +316,11 @@ func (m *importer) check(f *os.File, rel string) {
 	}
 	ref, err := m.st.FindDocumentByOriginal(m.ctx, m.owner.ID, hex.EncodeToString(h.Sum(nil)))
 	switch {
+	case err == nil && ref.Due:
+		m.fail(rel, errPurgePending)
+	case err == nil && ref.Trashed:
+		m.tally.restored++
+		fmt.Fprintf(m.out, "%s: would restore %q from the trash\n", rel, ref.Title)
 	case err == nil:
 		m.duplicate(rel, ref.Title)
 	case errors.Is(err, store.ErrNotFound):

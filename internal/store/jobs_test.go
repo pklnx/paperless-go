@@ -178,11 +178,15 @@ func TestMigrationRequeuesOCRJobs(t *testing.T) {
 		t.Helper()
 		exec(`INSERT INTO jobs (document_id, state, attempts, last_error, finished_at) VALUES ($1, $2, 1, $3, now())`, doc, state, lastError)
 	}
+	// Inserted directly: the store's queries need the current schema.
 	doc := func(name string) string {
 		t.Helper()
-		d := mustDoc(t, st, alice, newDoc(name))
-		exec(`DELETE FROM jobs WHERE document_id = $1`, d.ID)
-		return d.ID
+		var id string
+		if err := conn.QueryRow(ctx, `INSERT INTO documents (owner_id, title, source, original_sha256, original_size, original_mime)
+			VALUES ($1, $2, 'file', $3, 1, 'application/pdf') RETURNING id::text`, alice.UserID, name, hashOf(name)).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
 	}
 	scan := doc("scan")
 	job(scan, store.JobFailed, ocrLater)

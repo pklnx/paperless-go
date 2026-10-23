@@ -18,51 +18,62 @@ FROM documents d
 WHERE
       -- filters:begin (keep all copies equal; TestSearchFilterCopies checks)
       ($1::bigint IS NULL OR d.owner_id = $1)
-      AND ($2::tsquery IS NULL OR (d.search_text || d.search_links) @@ $2::tsquery)
+      -- The live documents, or with trashed the trash: trashed documents
+      -- not yet due for purge (store.trashDue). Two branches, so the
+      -- constant trashed folds one of them away and each list keeps its
+      -- index (documents_trash_idx for the trash).
+      AND ((NOT $2::boolean AND d.deleted_at IS NULL)
+           OR ($2::boolean AND d.deleted_at IS NOT NULL
+               AND coalesce(d.purge_at, d.deleted_at + $3::bigint * interval '1 microsecond')
+                   > $4::timestamptz))
+      AND ($5::tsquery IS NULL OR (d.search_text || d.search_links) @@ $5::tsquery)
       -- Tags: a tag of each of the tag_group_count groups (tag_groups[i]
       -- is the group of tag_ids[i]), and none of not_tag_ids.
-      AND ($3::int = 0 OR $3::int = (
-           SELECT count(DISTINCT ($4::int[])[g.n]) FROM document_tags dt
-           JOIN unnest($5::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
+      AND ($6::int = 0 OR $6::int = (
+           SELECT count(DISTINCT ($7::int[])[g.n]) FROM document_tags dt
+           JOIN unnest($8::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
            WHERE dt.document_id = d.id))
-      AND (coalesce(cardinality($6::uuid[]), 0) = 0 OR NOT EXISTS (
+      AND (coalesce(cardinality($9::uuid[]), 0) = 0 OR NOT EXISTS (
            SELECT 1 FROM document_tags dt
-           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($6::uuid[])))
-      AND ($7::uuid[] IS NULL OR d.correspondent_id = ANY ($7::uuid[]))
-      AND (coalesce(cardinality($8::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
-           OR NOT d.correspondent_id = ANY ($8::uuid[]))
-      AND ($9::uuid[] IS NULL OR d.document_type_id = ANY ($9::uuid[]))
-      AND (coalesce(cardinality($10::uuid[]), 0) = 0 OR d.document_type_id IS NULL
-           OR NOT d.document_type_id = ANY ($10::uuid[]))
-      AND ($11::int[] IS NULL OR d.archive_serial_number = ANY ($11::int[]))
-      AND (coalesce(cardinality($12::int[]), 0) = 0 OR d.archive_serial_number IS NULL
-           OR NOT d.archive_serial_number = ANY ($12::int[]))
+           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($9::uuid[])))
+      AND ($10::uuid[] IS NULL OR d.correspondent_id = ANY ($10::uuid[]))
+      AND (coalesce(cardinality($11::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
+           OR NOT d.correspondent_id = ANY ($11::uuid[]))
+      AND ($12::uuid[] IS NULL OR d.document_type_id = ANY ($12::uuid[]))
+      AND (coalesce(cardinality($13::uuid[]), 0) = 0 OR d.document_type_id IS NULL
+           OR NOT d.document_type_id = ANY ($13::uuid[]))
+      AND ($14::int[] IS NULL OR d.archive_serial_number = ANY ($14::int[]))
+      AND (coalesce(cardinality($15::int[]), 0) = 0 OR d.archive_serial_number IS NULL
+           OR NOT d.archive_serial_number = ANY ($15::int[]))
       -- Dates: within [from, to), and outside each excluded range
       -- [not_*_from[i], not_*_to[i]).
-      AND ($13::timestamptz IS NULL OR d.document_date >= $13::timestamptz)
-      AND ($14::timestamptz IS NULL OR d.document_date < $14::timestamptz)
-      AND (coalesce(cardinality($15::timestamptz[]), 0) = 0 OR NOT EXISTS (
-           SELECT 1 FROM unnest($15::timestamptz[]) WITH ORDINALITY AS r (lo, n)
-           WHERE d.document_date >= r.lo AND d.document_date < ($16::timestamptz[])[r.n]))
-      AND ($17::timestamptz IS NULL OR d.created_at >= $17::timestamptz)
-      AND ($18::timestamptz IS NULL OR d.created_at < $18::timestamptz)
-      AND (coalesce(cardinality($19::timestamptz[]), 0) = 0 OR NOT EXISTS (
-           SELECT 1 FROM unnest($19::timestamptz[]) WITH ORDINALITY AS r (lo, n)
-           WHERE d.created_at >= r.lo AND d.created_at < ($20::timestamptz[])[r.n]))
-      AND ($21::boolean IS NULL OR d.is_inbox = $21::boolean)
-      AND ($22::boolean IS NULL OR d.is_favorite = $22::boolean)
+      AND ($16::timestamptz IS NULL OR d.document_date >= $16::timestamptz)
+      AND ($17::timestamptz IS NULL OR d.document_date < $17::timestamptz)
+      AND (coalesce(cardinality($18::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($18::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.document_date >= r.lo AND d.document_date < ($19::timestamptz[])[r.n]))
+      AND ($20::timestamptz IS NULL OR d.created_at >= $20::timestamptz)
+      AND ($21::timestamptz IS NULL OR d.created_at < $21::timestamptz)
+      AND (coalesce(cardinality($22::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($22::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.created_at >= r.lo AND d.created_at < ($23::timestamptz[])[r.n]))
+      AND ($24::boolean IS NULL OR d.is_inbox = $24::boolean)
+      AND ($25::boolean IS NULL OR d.is_favorite = $25::boolean)
       -- filters:end
       -- Outside the filter block on purpose (TestSearchFilterCopies): the
       -- recheck after the lock passes the locked ids, so it returns at
       -- most those and the limit cannot cut any off; the match and the
       -- dry run pass NULL.
-      AND ($23::uuid[] IS NULL OR d.id = ANY ($23::uuid[]))
+      AND ($26::uuid[] IS NULL OR d.id = ANY ($26::uuid[]))
 ORDER BY d.id
-LIMIT $24
+LIMIT $27
 `
 
 type MatchDocumentIDsParams struct {
 	Owner             *int64
+	Trashed           bool
+	RetentionUs       int64
+	Now               time.Time
 	Query             interface{}
 	TagGroupCount     int32
 	TagGroups         []int32
@@ -101,6 +112,9 @@ type MatchDocumentIDsRow struct {
 func (q *Queries) MatchDocumentIDs(ctx context.Context, arg MatchDocumentIDsParams) ([]MatchDocumentIDsRow, error) {
 	rows, err := q.db.Query(ctx, matchDocumentIDs,
 		arg.Owner,
+		arg.Trashed,
+		arg.RetentionUs,
+		arg.Now,
 		arg.Query,
 		arg.TagGroupCount,
 		arg.TagGroups,
@@ -148,6 +162,7 @@ SELECT x.id, x.owner_id, x.title, x.document_date, x.created_at, x.modified_at, 
        x.is_inbox, x.archive_serial_number, x.page_count, ''::text AS extracted_text, x.text_source, x.source,
        x.original_file_name, x.original_sha256, x.original_size, x.original_mime, x.archive_sha256,
        x.archive_size, x.correspondent_id, x.document_type_id, x.thumbnail_sha256, x.processing_note,
+       x.deleted_at, x.purge_at,
        COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
                  WHERE dt.document_id = x.id), '{}')::uuid[] AS tag_ids,
        0::real AS rank, si.h::text AS snippet
@@ -157,63 +172,71 @@ FROM (
     WHERE
       -- filters:begin (keep all copies equal; TestSearchFilterCopies checks)
       ($1::bigint IS NULL OR d.owner_id = $1)
-      AND ($2::tsquery IS NULL OR (d.search_text || d.search_links) @@ $2::tsquery)
+      -- The live documents, or with trashed the trash: trashed documents
+      -- not yet due for purge (store.trashDue). Two branches, so the
+      -- constant trashed folds one of them away and each list keeps its
+      -- index (documents_trash_idx for the trash).
+      AND ((NOT $2::boolean AND d.deleted_at IS NULL)
+           OR ($2::boolean AND d.deleted_at IS NOT NULL
+               AND coalesce(d.purge_at, d.deleted_at + $3::bigint * interval '1 microsecond')
+                   > $4::timestamptz))
+      AND ($5::tsquery IS NULL OR (d.search_text || d.search_links) @@ $5::tsquery)
       -- Tags: a tag of each of the tag_group_count groups (tag_groups[i]
       -- is the group of tag_ids[i]), and none of not_tag_ids.
-      AND ($3::int = 0 OR $3::int = (
-           SELECT count(DISTINCT ($4::int[])[g.n]) FROM document_tags dt
-           JOIN unnest($5::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
+      AND ($6::int = 0 OR $6::int = (
+           SELECT count(DISTINCT ($7::int[])[g.n]) FROM document_tags dt
+           JOIN unnest($8::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
            WHERE dt.document_id = d.id))
-      AND (coalesce(cardinality($6::uuid[]), 0) = 0 OR NOT EXISTS (
+      AND (coalesce(cardinality($9::uuid[]), 0) = 0 OR NOT EXISTS (
            SELECT 1 FROM document_tags dt
-           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($6::uuid[])))
-      AND ($7::uuid[] IS NULL OR d.correspondent_id = ANY ($7::uuid[]))
-      AND (coalesce(cardinality($8::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
-           OR NOT d.correspondent_id = ANY ($8::uuid[]))
-      AND ($9::uuid[] IS NULL OR d.document_type_id = ANY ($9::uuid[]))
-      AND (coalesce(cardinality($10::uuid[]), 0) = 0 OR d.document_type_id IS NULL
-           OR NOT d.document_type_id = ANY ($10::uuid[]))
-      AND ($11::int[] IS NULL OR d.archive_serial_number = ANY ($11::int[]))
-      AND (coalesce(cardinality($12::int[]), 0) = 0 OR d.archive_serial_number IS NULL
-           OR NOT d.archive_serial_number = ANY ($12::int[]))
+           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($9::uuid[])))
+      AND ($10::uuid[] IS NULL OR d.correspondent_id = ANY ($10::uuid[]))
+      AND (coalesce(cardinality($11::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
+           OR NOT d.correspondent_id = ANY ($11::uuid[]))
+      AND ($12::uuid[] IS NULL OR d.document_type_id = ANY ($12::uuid[]))
+      AND (coalesce(cardinality($13::uuid[]), 0) = 0 OR d.document_type_id IS NULL
+           OR NOT d.document_type_id = ANY ($13::uuid[]))
+      AND ($14::int[] IS NULL OR d.archive_serial_number = ANY ($14::int[]))
+      AND (coalesce(cardinality($15::int[]), 0) = 0 OR d.archive_serial_number IS NULL
+           OR NOT d.archive_serial_number = ANY ($15::int[]))
       -- Dates: within [from, to), and outside each excluded range
       -- [not_*_from[i], not_*_to[i]).
-      AND ($13::timestamptz IS NULL OR d.document_date >= $13::timestamptz)
-      AND ($14::timestamptz IS NULL OR d.document_date < $14::timestamptz)
-      AND (coalesce(cardinality($15::timestamptz[]), 0) = 0 OR NOT EXISTS (
-           SELECT 1 FROM unnest($15::timestamptz[]) WITH ORDINALITY AS r (lo, n)
-           WHERE d.document_date >= r.lo AND d.document_date < ($16::timestamptz[])[r.n]))
-      AND ($17::timestamptz IS NULL OR d.created_at >= $17::timestamptz)
-      AND ($18::timestamptz IS NULL OR d.created_at < $18::timestamptz)
-      AND (coalesce(cardinality($19::timestamptz[]), 0) = 0 OR NOT EXISTS (
-           SELECT 1 FROM unnest($19::timestamptz[]) WITH ORDINALITY AS r (lo, n)
-           WHERE d.created_at >= r.lo AND d.created_at < ($20::timestamptz[])[r.n]))
-      AND ($21::boolean IS NULL OR d.is_inbox = $21::boolean)
-      AND ($22::boolean IS NULL OR d.is_favorite = $22::boolean)
+      AND ($16::timestamptz IS NULL OR d.document_date >= $16::timestamptz)
+      AND ($17::timestamptz IS NULL OR d.document_date < $17::timestamptz)
+      AND (coalesce(cardinality($18::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($18::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.document_date >= r.lo AND d.document_date < ($19::timestamptz[])[r.n]))
+      AND ($20::timestamptz IS NULL OR d.created_at >= $20::timestamptz)
+      AND ($21::timestamptz IS NULL OR d.created_at < $21::timestamptz)
+      AND (coalesce(cardinality($22::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($22::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.created_at >= r.lo AND d.created_at < ($23::timestamptz[])[r.n]))
+      AND ($24::boolean IS NULL OR d.is_inbox = $24::boolean)
+      AND ($25::boolean IS NULL OR d.is_favorite = $25::boolean)
       -- filters:end
-      AND ($23::timestamptz IS NULL
-           OR d.created_at >= $23::timestamptz
-              AND (d.created_at > $23::timestamptz
-                   OR d.id < $24::uuid))
+      AND ($26::timestamptz IS NULL
+           OR d.created_at >= $26::timestamptz
+              AND (d.created_at > $26::timestamptz
+                   OR d.id < $27::uuid))
     ORDER BY d.created_at, d.id DESC
-    LIMIT $25
+    LIMIT $28
 ) p
 JOIN documents x ON x.id = p.id
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN $2::tsquery IS NULL THEN ''
-           ELSE ts_headline('pg_catalog.german', left(x.extracted_text, 100000), $2::tsquery,
+    SELECT CASE WHEN $5::tsquery IS NULL THEN ''
+           ELSE ts_headline('pg_catalog.german', left(x.extracted_text, 100000), $5::tsquery,
                 'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
            END AS h
     OFFSET 0) de
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN $2::tsquery IS NULL OR strpos(de.h, chr(57344)) > 0 THEN de.h
-           ELSE ts_headline('pg_catalog.english', left(x.extracted_text, 100000), $2::tsquery,
+    SELECT CASE WHEN $5::tsquery IS NULL OR strpos(de.h, chr(57344)) > 0 THEN de.h
+           ELSE ts_headline('pg_catalog.english', left(x.extracted_text, 100000), $5::tsquery,
                 'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
            END AS h
     OFFSET 0) en
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN $2::tsquery IS NULL OR strpos(en.h, chr(57344)) > 0 THEN en.h
-           ELSE ts_headline('public.paperless_simple', left(x.extracted_text, 100000), $2::tsquery,
+    SELECT CASE WHEN $5::tsquery IS NULL OR strpos(en.h, chr(57344)) > 0 THEN en.h
+           ELSE ts_headline('public.paperless_simple', left(x.extracted_text, 100000), $5::tsquery,
                 'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
            END AS h
     OFFSET 0) si
@@ -222,6 +245,9 @@ ORDER BY x.created_at, x.id DESC
 
 type SearchDocumentsAddedAscParams struct {
 	Owner             *int64
+	Trashed           bool
+	RetentionUs       int64
+	Now               time.Time
 	Query             interface{}
 	TagGroupCount     int32
 	TagGroups         []int32
@@ -273,6 +299,8 @@ type SearchDocumentsAddedAscRow struct {
 	DocumentTypeID      pgtype.UUID
 	ThumbnailSha256     *string
 	ProcessingNote      string
+	DeletedAt           *time.Time
+	PurgeAt             *time.Time
 	TagIds              []pgtype.UUID
 	Rank                float32
 	Snippet             string
@@ -287,6 +315,9 @@ type SearchDocumentsAddedAscRow struct {
 func (q *Queries) SearchDocumentsAddedAsc(ctx context.Context, arg SearchDocumentsAddedAscParams) ([]SearchDocumentsAddedAscRow, error) {
 	rows, err := q.db.Query(ctx, searchDocumentsAddedAsc,
 		arg.Owner,
+		arg.Trashed,
+		arg.RetentionUs,
+		arg.Now,
 		arg.Query,
 		arg.TagGroupCount,
 		arg.TagGroups,
@@ -344,6 +375,8 @@ func (q *Queries) SearchDocumentsAddedAsc(ctx context.Context, arg SearchDocumen
 			&i.DocumentTypeID,
 			&i.ThumbnailSha256,
 			&i.ProcessingNote,
+			&i.DeletedAt,
+			&i.PurgeAt,
 			&i.TagIds,
 			&i.Rank,
 			&i.Snippet,
@@ -363,6 +396,7 @@ SELECT x.id, x.owner_id, x.title, x.document_date, x.created_at, x.modified_at, 
        x.is_inbox, x.archive_serial_number, x.page_count, ''::text AS extracted_text, x.text_source, x.source,
        x.original_file_name, x.original_sha256, x.original_size, x.original_mime, x.archive_sha256,
        x.archive_size, x.correspondent_id, x.document_type_id, x.thumbnail_sha256, x.processing_note,
+       x.deleted_at, x.purge_at,
        COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
                  WHERE dt.document_id = x.id), '{}')::uuid[] AS tag_ids,
        0::real AS rank, si.h::text AS snippet
@@ -372,63 +406,71 @@ FROM (
     WHERE
       -- filters:begin (keep all copies equal; TestSearchFilterCopies checks)
       ($1::bigint IS NULL OR d.owner_id = $1)
-      AND ($2::tsquery IS NULL OR (d.search_text || d.search_links) @@ $2::tsquery)
+      -- The live documents, or with trashed the trash: trashed documents
+      -- not yet due for purge (store.trashDue). Two branches, so the
+      -- constant trashed folds one of them away and each list keeps its
+      -- index (documents_trash_idx for the trash).
+      AND ((NOT $2::boolean AND d.deleted_at IS NULL)
+           OR ($2::boolean AND d.deleted_at IS NOT NULL
+               AND coalesce(d.purge_at, d.deleted_at + $3::bigint * interval '1 microsecond')
+                   > $4::timestamptz))
+      AND ($5::tsquery IS NULL OR (d.search_text || d.search_links) @@ $5::tsquery)
       -- Tags: a tag of each of the tag_group_count groups (tag_groups[i]
       -- is the group of tag_ids[i]), and none of not_tag_ids.
-      AND ($3::int = 0 OR $3::int = (
-           SELECT count(DISTINCT ($4::int[])[g.n]) FROM document_tags dt
-           JOIN unnest($5::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
+      AND ($6::int = 0 OR $6::int = (
+           SELECT count(DISTINCT ($7::int[])[g.n]) FROM document_tags dt
+           JOIN unnest($8::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
            WHERE dt.document_id = d.id))
-      AND (coalesce(cardinality($6::uuid[]), 0) = 0 OR NOT EXISTS (
+      AND (coalesce(cardinality($9::uuid[]), 0) = 0 OR NOT EXISTS (
            SELECT 1 FROM document_tags dt
-           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($6::uuid[])))
-      AND ($7::uuid[] IS NULL OR d.correspondent_id = ANY ($7::uuid[]))
-      AND (coalesce(cardinality($8::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
-           OR NOT d.correspondent_id = ANY ($8::uuid[]))
-      AND ($9::uuid[] IS NULL OR d.document_type_id = ANY ($9::uuid[]))
-      AND (coalesce(cardinality($10::uuid[]), 0) = 0 OR d.document_type_id IS NULL
-           OR NOT d.document_type_id = ANY ($10::uuid[]))
-      AND ($11::int[] IS NULL OR d.archive_serial_number = ANY ($11::int[]))
-      AND (coalesce(cardinality($12::int[]), 0) = 0 OR d.archive_serial_number IS NULL
-           OR NOT d.archive_serial_number = ANY ($12::int[]))
+           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($9::uuid[])))
+      AND ($10::uuid[] IS NULL OR d.correspondent_id = ANY ($10::uuid[]))
+      AND (coalesce(cardinality($11::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
+           OR NOT d.correspondent_id = ANY ($11::uuid[]))
+      AND ($12::uuid[] IS NULL OR d.document_type_id = ANY ($12::uuid[]))
+      AND (coalesce(cardinality($13::uuid[]), 0) = 0 OR d.document_type_id IS NULL
+           OR NOT d.document_type_id = ANY ($13::uuid[]))
+      AND ($14::int[] IS NULL OR d.archive_serial_number = ANY ($14::int[]))
+      AND (coalesce(cardinality($15::int[]), 0) = 0 OR d.archive_serial_number IS NULL
+           OR NOT d.archive_serial_number = ANY ($15::int[]))
       -- Dates: within [from, to), and outside each excluded range
       -- [not_*_from[i], not_*_to[i]).
-      AND ($13::timestamptz IS NULL OR d.document_date >= $13::timestamptz)
-      AND ($14::timestamptz IS NULL OR d.document_date < $14::timestamptz)
-      AND (coalesce(cardinality($15::timestamptz[]), 0) = 0 OR NOT EXISTS (
-           SELECT 1 FROM unnest($15::timestamptz[]) WITH ORDINALITY AS r (lo, n)
-           WHERE d.document_date >= r.lo AND d.document_date < ($16::timestamptz[])[r.n]))
-      AND ($17::timestamptz IS NULL OR d.created_at >= $17::timestamptz)
-      AND ($18::timestamptz IS NULL OR d.created_at < $18::timestamptz)
-      AND (coalesce(cardinality($19::timestamptz[]), 0) = 0 OR NOT EXISTS (
-           SELECT 1 FROM unnest($19::timestamptz[]) WITH ORDINALITY AS r (lo, n)
-           WHERE d.created_at >= r.lo AND d.created_at < ($20::timestamptz[])[r.n]))
-      AND ($21::boolean IS NULL OR d.is_inbox = $21::boolean)
-      AND ($22::boolean IS NULL OR d.is_favorite = $22::boolean)
+      AND ($16::timestamptz IS NULL OR d.document_date >= $16::timestamptz)
+      AND ($17::timestamptz IS NULL OR d.document_date < $17::timestamptz)
+      AND (coalesce(cardinality($18::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($18::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.document_date >= r.lo AND d.document_date < ($19::timestamptz[])[r.n]))
+      AND ($20::timestamptz IS NULL OR d.created_at >= $20::timestamptz)
+      AND ($21::timestamptz IS NULL OR d.created_at < $21::timestamptz)
+      AND (coalesce(cardinality($22::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($22::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.created_at >= r.lo AND d.created_at < ($23::timestamptz[])[r.n]))
+      AND ($24::boolean IS NULL OR d.is_inbox = $24::boolean)
+      AND ($25::boolean IS NULL OR d.is_favorite = $25::boolean)
       -- filters:end
-      AND ($23::timestamptz IS NULL
-           OR d.created_at <= $23::timestamptz
-              AND (d.created_at < $23::timestamptz
-                   OR d.id > $24::uuid))
+      AND ($26::timestamptz IS NULL
+           OR d.created_at <= $26::timestamptz
+              AND (d.created_at < $26::timestamptz
+                   OR d.id > $27::uuid))
     ORDER BY d.created_at DESC, d.id
-    LIMIT $25
+    LIMIT $28
 ) p
 JOIN documents x ON x.id = p.id
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN $2::tsquery IS NULL THEN ''
-           ELSE ts_headline('pg_catalog.german', left(x.extracted_text, 100000), $2::tsquery,
+    SELECT CASE WHEN $5::tsquery IS NULL THEN ''
+           ELSE ts_headline('pg_catalog.german', left(x.extracted_text, 100000), $5::tsquery,
                 'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
            END AS h
     OFFSET 0) de
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN $2::tsquery IS NULL OR strpos(de.h, chr(57344)) > 0 THEN de.h
-           ELSE ts_headline('pg_catalog.english', left(x.extracted_text, 100000), $2::tsquery,
+    SELECT CASE WHEN $5::tsquery IS NULL OR strpos(de.h, chr(57344)) > 0 THEN de.h
+           ELSE ts_headline('pg_catalog.english', left(x.extracted_text, 100000), $5::tsquery,
                 'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
            END AS h
     OFFSET 0) en
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN $2::tsquery IS NULL OR strpos(en.h, chr(57344)) > 0 THEN en.h
-           ELSE ts_headline('public.paperless_simple', left(x.extracted_text, 100000), $2::tsquery,
+    SELECT CASE WHEN $5::tsquery IS NULL OR strpos(en.h, chr(57344)) > 0 THEN en.h
+           ELSE ts_headline('public.paperless_simple', left(x.extracted_text, 100000), $5::tsquery,
                 'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
            END AS h
     OFFSET 0) si
@@ -437,6 +479,9 @@ ORDER BY x.created_at DESC, x.id
 
 type SearchDocumentsAddedDescParams struct {
 	Owner             *int64
+	Trashed           bool
+	RetentionUs       int64
+	Now               time.Time
 	Query             interface{}
 	TagGroupCount     int32
 	TagGroups         []int32
@@ -488,6 +533,8 @@ type SearchDocumentsAddedDescRow struct {
 	DocumentTypeID      pgtype.UUID
 	ThumbnailSha256     *string
 	ProcessingNote      string
+	DeletedAt           *time.Time
+	PurgeAt             *time.Time
 	TagIds              []pgtype.UUID
 	Rank                float32
 	Snippet             string
@@ -502,6 +549,9 @@ type SearchDocumentsAddedDescRow struct {
 func (q *Queries) SearchDocumentsAddedDesc(ctx context.Context, arg SearchDocumentsAddedDescParams) ([]SearchDocumentsAddedDescRow, error) {
 	rows, err := q.db.Query(ctx, searchDocumentsAddedDesc,
 		arg.Owner,
+		arg.Trashed,
+		arg.RetentionUs,
+		arg.Now,
 		arg.Query,
 		arg.TagGroupCount,
 		arg.TagGroups,
@@ -559,6 +609,8 @@ func (q *Queries) SearchDocumentsAddedDesc(ctx context.Context, arg SearchDocume
 			&i.DocumentTypeID,
 			&i.ThumbnailSha256,
 			&i.ProcessingNote,
+			&i.DeletedAt,
+			&i.PurgeAt,
 			&i.TagIds,
 			&i.Rank,
 			&i.Snippet,
@@ -578,6 +630,7 @@ SELECT x.id, x.owner_id, x.title, x.document_date, x.created_at, x.modified_at, 
        x.is_inbox, x.archive_serial_number, x.page_count, ''::text AS extracted_text, x.text_source, x.source,
        x.original_file_name, x.original_sha256, x.original_size, x.original_mime, x.archive_sha256,
        x.archive_size, x.correspondent_id, x.document_type_id, x.thumbnail_sha256, x.processing_note,
+       x.deleted_at, x.purge_at,
        COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
                  WHERE dt.document_id = x.id), '{}')::uuid[] AS tag_ids,
        0::real AS rank, si.h::text AS snippet
@@ -587,63 +640,71 @@ FROM (
     WHERE
       -- filters:begin (keep all copies equal; TestSearchFilterCopies checks)
       ($1::bigint IS NULL OR d.owner_id = $1)
-      AND ($2::tsquery IS NULL OR (d.search_text || d.search_links) @@ $2::tsquery)
+      -- The live documents, or with trashed the trash: trashed documents
+      -- not yet due for purge (store.trashDue). Two branches, so the
+      -- constant trashed folds one of them away and each list keeps its
+      -- index (documents_trash_idx for the trash).
+      AND ((NOT $2::boolean AND d.deleted_at IS NULL)
+           OR ($2::boolean AND d.deleted_at IS NOT NULL
+               AND coalesce(d.purge_at, d.deleted_at + $3::bigint * interval '1 microsecond')
+                   > $4::timestamptz))
+      AND ($5::tsquery IS NULL OR (d.search_text || d.search_links) @@ $5::tsquery)
       -- Tags: a tag of each of the tag_group_count groups (tag_groups[i]
       -- is the group of tag_ids[i]), and none of not_tag_ids.
-      AND ($3::int = 0 OR $3::int = (
-           SELECT count(DISTINCT ($4::int[])[g.n]) FROM document_tags dt
-           JOIN unnest($5::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
+      AND ($6::int = 0 OR $6::int = (
+           SELECT count(DISTINCT ($7::int[])[g.n]) FROM document_tags dt
+           JOIN unnest($8::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
            WHERE dt.document_id = d.id))
-      AND (coalesce(cardinality($6::uuid[]), 0) = 0 OR NOT EXISTS (
+      AND (coalesce(cardinality($9::uuid[]), 0) = 0 OR NOT EXISTS (
            SELECT 1 FROM document_tags dt
-           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($6::uuid[])))
-      AND ($7::uuid[] IS NULL OR d.correspondent_id = ANY ($7::uuid[]))
-      AND (coalesce(cardinality($8::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
-           OR NOT d.correspondent_id = ANY ($8::uuid[]))
-      AND ($9::uuid[] IS NULL OR d.document_type_id = ANY ($9::uuid[]))
-      AND (coalesce(cardinality($10::uuid[]), 0) = 0 OR d.document_type_id IS NULL
-           OR NOT d.document_type_id = ANY ($10::uuid[]))
-      AND ($11::int[] IS NULL OR d.archive_serial_number = ANY ($11::int[]))
-      AND (coalesce(cardinality($12::int[]), 0) = 0 OR d.archive_serial_number IS NULL
-           OR NOT d.archive_serial_number = ANY ($12::int[]))
+           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($9::uuid[])))
+      AND ($10::uuid[] IS NULL OR d.correspondent_id = ANY ($10::uuid[]))
+      AND (coalesce(cardinality($11::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
+           OR NOT d.correspondent_id = ANY ($11::uuid[]))
+      AND ($12::uuid[] IS NULL OR d.document_type_id = ANY ($12::uuid[]))
+      AND (coalesce(cardinality($13::uuid[]), 0) = 0 OR d.document_type_id IS NULL
+           OR NOT d.document_type_id = ANY ($13::uuid[]))
+      AND ($14::int[] IS NULL OR d.archive_serial_number = ANY ($14::int[]))
+      AND (coalesce(cardinality($15::int[]), 0) = 0 OR d.archive_serial_number IS NULL
+           OR NOT d.archive_serial_number = ANY ($15::int[]))
       -- Dates: within [from, to), and outside each excluded range
       -- [not_*_from[i], not_*_to[i]).
-      AND ($13::timestamptz IS NULL OR d.document_date >= $13::timestamptz)
-      AND ($14::timestamptz IS NULL OR d.document_date < $14::timestamptz)
-      AND (coalesce(cardinality($15::timestamptz[]), 0) = 0 OR NOT EXISTS (
-           SELECT 1 FROM unnest($15::timestamptz[]) WITH ORDINALITY AS r (lo, n)
-           WHERE d.document_date >= r.lo AND d.document_date < ($16::timestamptz[])[r.n]))
-      AND ($17::timestamptz IS NULL OR d.created_at >= $17::timestamptz)
-      AND ($18::timestamptz IS NULL OR d.created_at < $18::timestamptz)
-      AND (coalesce(cardinality($19::timestamptz[]), 0) = 0 OR NOT EXISTS (
-           SELECT 1 FROM unnest($19::timestamptz[]) WITH ORDINALITY AS r (lo, n)
-           WHERE d.created_at >= r.lo AND d.created_at < ($20::timestamptz[])[r.n]))
-      AND ($21::boolean IS NULL OR d.is_inbox = $21::boolean)
-      AND ($22::boolean IS NULL OR d.is_favorite = $22::boolean)
+      AND ($16::timestamptz IS NULL OR d.document_date >= $16::timestamptz)
+      AND ($17::timestamptz IS NULL OR d.document_date < $17::timestamptz)
+      AND (coalesce(cardinality($18::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($18::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.document_date >= r.lo AND d.document_date < ($19::timestamptz[])[r.n]))
+      AND ($20::timestamptz IS NULL OR d.created_at >= $20::timestamptz)
+      AND ($21::timestamptz IS NULL OR d.created_at < $21::timestamptz)
+      AND (coalesce(cardinality($22::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($22::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.created_at >= r.lo AND d.created_at < ($23::timestamptz[])[r.n]))
+      AND ($24::boolean IS NULL OR d.is_inbox = $24::boolean)
+      AND ($25::boolean IS NULL OR d.is_favorite = $25::boolean)
       -- filters:end
-      AND ($23::timestamptz IS NULL
-           OR d.document_date >= $23::timestamptz
-              AND (d.document_date > $23::timestamptz
-                   OR d.id < $24::uuid))
+      AND ($26::timestamptz IS NULL
+           OR d.document_date >= $26::timestamptz
+              AND (d.document_date > $26::timestamptz
+                   OR d.id < $27::uuid))
     ORDER BY d.document_date, d.id DESC
-    LIMIT $25
+    LIMIT $28
 ) p
 JOIN documents x ON x.id = p.id
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN $2::tsquery IS NULL THEN ''
-           ELSE ts_headline('pg_catalog.german', left(x.extracted_text, 100000), $2::tsquery,
+    SELECT CASE WHEN $5::tsquery IS NULL THEN ''
+           ELSE ts_headline('pg_catalog.german', left(x.extracted_text, 100000), $5::tsquery,
                 'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
            END AS h
     OFFSET 0) de
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN $2::tsquery IS NULL OR strpos(de.h, chr(57344)) > 0 THEN de.h
-           ELSE ts_headline('pg_catalog.english', left(x.extracted_text, 100000), $2::tsquery,
+    SELECT CASE WHEN $5::tsquery IS NULL OR strpos(de.h, chr(57344)) > 0 THEN de.h
+           ELSE ts_headline('pg_catalog.english', left(x.extracted_text, 100000), $5::tsquery,
                 'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
            END AS h
     OFFSET 0) en
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN $2::tsquery IS NULL OR strpos(en.h, chr(57344)) > 0 THEN en.h
-           ELSE ts_headline('public.paperless_simple', left(x.extracted_text, 100000), $2::tsquery,
+    SELECT CASE WHEN $5::tsquery IS NULL OR strpos(en.h, chr(57344)) > 0 THEN en.h
+           ELSE ts_headline('public.paperless_simple', left(x.extracted_text, 100000), $5::tsquery,
                 'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
            END AS h
     OFFSET 0) si
@@ -652,6 +713,9 @@ ORDER BY x.document_date, x.id DESC
 
 type SearchDocumentsDateAscParams struct {
 	Owner             *int64
+	Trashed           bool
+	RetentionUs       int64
+	Now               time.Time
 	Query             interface{}
 	TagGroupCount     int32
 	TagGroups         []int32
@@ -703,6 +767,8 @@ type SearchDocumentsDateAscRow struct {
 	DocumentTypeID      pgtype.UUID
 	ThumbnailSha256     *string
 	ProcessingNote      string
+	DeletedAt           *time.Time
+	PurgeAt             *time.Time
 	TagIds              []pgtype.UUID
 	Rank                float32
 	Snippet             string
@@ -717,6 +783,9 @@ type SearchDocumentsDateAscRow struct {
 func (q *Queries) SearchDocumentsDateAsc(ctx context.Context, arg SearchDocumentsDateAscParams) ([]SearchDocumentsDateAscRow, error) {
 	rows, err := q.db.Query(ctx, searchDocumentsDateAsc,
 		arg.Owner,
+		arg.Trashed,
+		arg.RetentionUs,
+		arg.Now,
 		arg.Query,
 		arg.TagGroupCount,
 		arg.TagGroups,
@@ -774,6 +843,8 @@ func (q *Queries) SearchDocumentsDateAsc(ctx context.Context, arg SearchDocument
 			&i.DocumentTypeID,
 			&i.ThumbnailSha256,
 			&i.ProcessingNote,
+			&i.DeletedAt,
+			&i.PurgeAt,
 			&i.TagIds,
 			&i.Rank,
 			&i.Snippet,
@@ -793,6 +864,7 @@ SELECT x.id, x.owner_id, x.title, x.document_date, x.created_at, x.modified_at, 
        x.is_inbox, x.archive_serial_number, x.page_count, ''::text AS extracted_text, x.text_source, x.source,
        x.original_file_name, x.original_sha256, x.original_size, x.original_mime, x.archive_sha256,
        x.archive_size, x.correspondent_id, x.document_type_id, x.thumbnail_sha256, x.processing_note,
+       x.deleted_at, x.purge_at,
        COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
                  WHERE dt.document_id = x.id), '{}')::uuid[] AS tag_ids,
        0::real AS rank, si.h::text AS snippet
@@ -802,63 +874,71 @@ FROM (
     WHERE
       -- filters:begin (keep all copies equal; TestSearchFilterCopies checks)
       ($1::bigint IS NULL OR d.owner_id = $1)
-      AND ($2::tsquery IS NULL OR (d.search_text || d.search_links) @@ $2::tsquery)
+      -- The live documents, or with trashed the trash: trashed documents
+      -- not yet due for purge (store.trashDue). Two branches, so the
+      -- constant trashed folds one of them away and each list keeps its
+      -- index (documents_trash_idx for the trash).
+      AND ((NOT $2::boolean AND d.deleted_at IS NULL)
+           OR ($2::boolean AND d.deleted_at IS NOT NULL
+               AND coalesce(d.purge_at, d.deleted_at + $3::bigint * interval '1 microsecond')
+                   > $4::timestamptz))
+      AND ($5::tsquery IS NULL OR (d.search_text || d.search_links) @@ $5::tsquery)
       -- Tags: a tag of each of the tag_group_count groups (tag_groups[i]
       -- is the group of tag_ids[i]), and none of not_tag_ids.
-      AND ($3::int = 0 OR $3::int = (
-           SELECT count(DISTINCT ($4::int[])[g.n]) FROM document_tags dt
-           JOIN unnest($5::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
+      AND ($6::int = 0 OR $6::int = (
+           SELECT count(DISTINCT ($7::int[])[g.n]) FROM document_tags dt
+           JOIN unnest($8::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
            WHERE dt.document_id = d.id))
-      AND (coalesce(cardinality($6::uuid[]), 0) = 0 OR NOT EXISTS (
+      AND (coalesce(cardinality($9::uuid[]), 0) = 0 OR NOT EXISTS (
            SELECT 1 FROM document_tags dt
-           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($6::uuid[])))
-      AND ($7::uuid[] IS NULL OR d.correspondent_id = ANY ($7::uuid[]))
-      AND (coalesce(cardinality($8::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
-           OR NOT d.correspondent_id = ANY ($8::uuid[]))
-      AND ($9::uuid[] IS NULL OR d.document_type_id = ANY ($9::uuid[]))
-      AND (coalesce(cardinality($10::uuid[]), 0) = 0 OR d.document_type_id IS NULL
-           OR NOT d.document_type_id = ANY ($10::uuid[]))
-      AND ($11::int[] IS NULL OR d.archive_serial_number = ANY ($11::int[]))
-      AND (coalesce(cardinality($12::int[]), 0) = 0 OR d.archive_serial_number IS NULL
-           OR NOT d.archive_serial_number = ANY ($12::int[]))
+           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($9::uuid[])))
+      AND ($10::uuid[] IS NULL OR d.correspondent_id = ANY ($10::uuid[]))
+      AND (coalesce(cardinality($11::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
+           OR NOT d.correspondent_id = ANY ($11::uuid[]))
+      AND ($12::uuid[] IS NULL OR d.document_type_id = ANY ($12::uuid[]))
+      AND (coalesce(cardinality($13::uuid[]), 0) = 0 OR d.document_type_id IS NULL
+           OR NOT d.document_type_id = ANY ($13::uuid[]))
+      AND ($14::int[] IS NULL OR d.archive_serial_number = ANY ($14::int[]))
+      AND (coalesce(cardinality($15::int[]), 0) = 0 OR d.archive_serial_number IS NULL
+           OR NOT d.archive_serial_number = ANY ($15::int[]))
       -- Dates: within [from, to), and outside each excluded range
       -- [not_*_from[i], not_*_to[i]).
-      AND ($13::timestamptz IS NULL OR d.document_date >= $13::timestamptz)
-      AND ($14::timestamptz IS NULL OR d.document_date < $14::timestamptz)
-      AND (coalesce(cardinality($15::timestamptz[]), 0) = 0 OR NOT EXISTS (
-           SELECT 1 FROM unnest($15::timestamptz[]) WITH ORDINALITY AS r (lo, n)
-           WHERE d.document_date >= r.lo AND d.document_date < ($16::timestamptz[])[r.n]))
-      AND ($17::timestamptz IS NULL OR d.created_at >= $17::timestamptz)
-      AND ($18::timestamptz IS NULL OR d.created_at < $18::timestamptz)
-      AND (coalesce(cardinality($19::timestamptz[]), 0) = 0 OR NOT EXISTS (
-           SELECT 1 FROM unnest($19::timestamptz[]) WITH ORDINALITY AS r (lo, n)
-           WHERE d.created_at >= r.lo AND d.created_at < ($20::timestamptz[])[r.n]))
-      AND ($21::boolean IS NULL OR d.is_inbox = $21::boolean)
-      AND ($22::boolean IS NULL OR d.is_favorite = $22::boolean)
+      AND ($16::timestamptz IS NULL OR d.document_date >= $16::timestamptz)
+      AND ($17::timestamptz IS NULL OR d.document_date < $17::timestamptz)
+      AND (coalesce(cardinality($18::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($18::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.document_date >= r.lo AND d.document_date < ($19::timestamptz[])[r.n]))
+      AND ($20::timestamptz IS NULL OR d.created_at >= $20::timestamptz)
+      AND ($21::timestamptz IS NULL OR d.created_at < $21::timestamptz)
+      AND (coalesce(cardinality($22::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($22::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.created_at >= r.lo AND d.created_at < ($23::timestamptz[])[r.n]))
+      AND ($24::boolean IS NULL OR d.is_inbox = $24::boolean)
+      AND ($25::boolean IS NULL OR d.is_favorite = $25::boolean)
       -- filters:end
-      AND ($23::timestamptz IS NULL
-           OR d.document_date <= $23::timestamptz
-              AND (d.document_date < $23::timestamptz
-                   OR d.id > $24::uuid))
+      AND ($26::timestamptz IS NULL
+           OR d.document_date <= $26::timestamptz
+              AND (d.document_date < $26::timestamptz
+                   OR d.id > $27::uuid))
     ORDER BY d.document_date DESC, d.id
-    LIMIT $25
+    LIMIT $28
 ) p
 JOIN documents x ON x.id = p.id
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN $2::tsquery IS NULL THEN ''
-           ELSE ts_headline('pg_catalog.german', left(x.extracted_text, 100000), $2::tsquery,
+    SELECT CASE WHEN $5::tsquery IS NULL THEN ''
+           ELSE ts_headline('pg_catalog.german', left(x.extracted_text, 100000), $5::tsquery,
                 'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
            END AS h
     OFFSET 0) de
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN $2::tsquery IS NULL OR strpos(de.h, chr(57344)) > 0 THEN de.h
-           ELSE ts_headline('pg_catalog.english', left(x.extracted_text, 100000), $2::tsquery,
+    SELECT CASE WHEN $5::tsquery IS NULL OR strpos(de.h, chr(57344)) > 0 THEN de.h
+           ELSE ts_headline('pg_catalog.english', left(x.extracted_text, 100000), $5::tsquery,
                 'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
            END AS h
     OFFSET 0) en
 CROSS JOIN LATERAL (
-    SELECT CASE WHEN $2::tsquery IS NULL OR strpos(en.h, chr(57344)) > 0 THEN en.h
-           ELSE ts_headline('public.paperless_simple', left(x.extracted_text, 100000), $2::tsquery,
+    SELECT CASE WHEN $5::tsquery IS NULL OR strpos(en.h, chr(57344)) > 0 THEN en.h
+           ELSE ts_headline('public.paperless_simple', left(x.extracted_text, 100000), $5::tsquery,
                 'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
            END AS h
     OFFSET 0) si
@@ -867,6 +947,9 @@ ORDER BY x.document_date DESC, x.id
 
 type SearchDocumentsDateDescParams struct {
 	Owner             *int64
+	Trashed           bool
+	RetentionUs       int64
+	Now               time.Time
 	Query             interface{}
 	TagGroupCount     int32
 	TagGroups         []int32
@@ -918,6 +1001,8 @@ type SearchDocumentsDateDescRow struct {
 	DocumentTypeID      pgtype.UUID
 	ThumbnailSha256     *string
 	ProcessingNote      string
+	DeletedAt           *time.Time
+	PurgeAt             *time.Time
 	TagIds              []pgtype.UUID
 	Rank                float32
 	Snippet             string
@@ -932,6 +1017,9 @@ type SearchDocumentsDateDescRow struct {
 func (q *Queries) SearchDocumentsDateDesc(ctx context.Context, arg SearchDocumentsDateDescParams) ([]SearchDocumentsDateDescRow, error) {
 	rows, err := q.db.Query(ctx, searchDocumentsDateDesc,
 		arg.Owner,
+		arg.Trashed,
+		arg.RetentionUs,
+		arg.Now,
 		arg.Query,
 		arg.TagGroupCount,
 		arg.TagGroups,
@@ -989,6 +1077,243 @@ func (q *Queries) SearchDocumentsDateDesc(ctx context.Context, arg SearchDocumen
 			&i.DocumentTypeID,
 			&i.ThumbnailSha256,
 			&i.ProcessingNote,
+			&i.DeletedAt,
+			&i.PurgeAt,
+			&i.TagIds,
+			&i.Rank,
+			&i.Snippet,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchDocumentsDeletedDesc = `-- name: SearchDocumentsDeletedDesc :many
+SELECT x.id, x.owner_id, x.title, x.document_date, x.created_at, x.modified_at, x.notes, x.is_favorite,
+       x.is_inbox, x.archive_serial_number, x.page_count, ''::text AS extracted_text, x.text_source, x.source,
+       x.original_file_name, x.original_sha256, x.original_size, x.original_mime, x.archive_sha256,
+       x.archive_size, x.correspondent_id, x.document_type_id, x.thumbnail_sha256, x.processing_note,
+       x.deleted_at, x.purge_at,
+       COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
+                 WHERE dt.document_id = x.id), '{}')::uuid[] AS tag_ids,
+       0::real AS rank, si.h::text AS snippet
+FROM (
+    SELECT d.id
+    FROM documents d
+    WHERE
+      -- filters:begin (keep all copies equal; TestSearchFilterCopies checks)
+      ($1::bigint IS NULL OR d.owner_id = $1)
+      -- The live documents, or with trashed the trash: trashed documents
+      -- not yet due for purge (store.trashDue). Two branches, so the
+      -- constant trashed folds one of them away and each list keeps its
+      -- index (documents_trash_idx for the trash).
+      AND ((NOT $2::boolean AND d.deleted_at IS NULL)
+           OR ($2::boolean AND d.deleted_at IS NOT NULL
+               AND coalesce(d.purge_at, d.deleted_at + $3::bigint * interval '1 microsecond')
+                   > $4::timestamptz))
+      AND ($5::tsquery IS NULL OR (d.search_text || d.search_links) @@ $5::tsquery)
+      -- Tags: a tag of each of the tag_group_count groups (tag_groups[i]
+      -- is the group of tag_ids[i]), and none of not_tag_ids.
+      AND ($6::int = 0 OR $6::int = (
+           SELECT count(DISTINCT ($7::int[])[g.n]) FROM document_tags dt
+           JOIN unnest($8::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
+           WHERE dt.document_id = d.id))
+      AND (coalesce(cardinality($9::uuid[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM document_tags dt
+           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($9::uuid[])))
+      AND ($10::uuid[] IS NULL OR d.correspondent_id = ANY ($10::uuid[]))
+      AND (coalesce(cardinality($11::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
+           OR NOT d.correspondent_id = ANY ($11::uuid[]))
+      AND ($12::uuid[] IS NULL OR d.document_type_id = ANY ($12::uuid[]))
+      AND (coalesce(cardinality($13::uuid[]), 0) = 0 OR d.document_type_id IS NULL
+           OR NOT d.document_type_id = ANY ($13::uuid[]))
+      AND ($14::int[] IS NULL OR d.archive_serial_number = ANY ($14::int[]))
+      AND (coalesce(cardinality($15::int[]), 0) = 0 OR d.archive_serial_number IS NULL
+           OR NOT d.archive_serial_number = ANY ($15::int[]))
+      -- Dates: within [from, to), and outside each excluded range
+      -- [not_*_from[i], not_*_to[i]).
+      AND ($16::timestamptz IS NULL OR d.document_date >= $16::timestamptz)
+      AND ($17::timestamptz IS NULL OR d.document_date < $17::timestamptz)
+      AND (coalesce(cardinality($18::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($18::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.document_date >= r.lo AND d.document_date < ($19::timestamptz[])[r.n]))
+      AND ($20::timestamptz IS NULL OR d.created_at >= $20::timestamptz)
+      AND ($21::timestamptz IS NULL OR d.created_at < $21::timestamptz)
+      AND (coalesce(cardinality($22::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($22::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.created_at >= r.lo AND d.created_at < ($23::timestamptz[])[r.n]))
+      AND ($24::boolean IS NULL OR d.is_inbox = $24::boolean)
+      AND ($25::boolean IS NULL OR d.is_favorite = $25::boolean)
+      -- filters:end
+      AND ($26::timestamptz IS NULL
+           OR d.deleted_at <= $26::timestamptz
+              AND (d.deleted_at < $26::timestamptz
+                   OR d.id > $27::uuid))
+    ORDER BY d.deleted_at DESC, d.id
+    LIMIT $28
+) p
+JOIN documents x ON x.id = p.id
+CROSS JOIN LATERAL (
+    SELECT CASE WHEN $5::tsquery IS NULL THEN ''
+           ELSE ts_headline('pg_catalog.german', left(x.extracted_text, 100000), $5::tsquery,
+                'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
+           END AS h
+    OFFSET 0) de
+CROSS JOIN LATERAL (
+    SELECT CASE WHEN $5::tsquery IS NULL OR strpos(de.h, chr(57344)) > 0 THEN de.h
+           ELSE ts_headline('pg_catalog.english', left(x.extracted_text, 100000), $5::tsquery,
+                'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
+           END AS h
+    OFFSET 0) en
+CROSS JOIN LATERAL (
+    SELECT CASE WHEN $5::tsquery IS NULL OR strpos(en.h, chr(57344)) > 0 THEN en.h
+           ELSE ts_headline('public.paperless_simple', left(x.extracted_text, 100000), $5::tsquery,
+                'MaxFragments=2, MaxWords=25, MinWords=10, StartSel=' || chr(57344) || ', StopSel=' || chr(57345))
+           END AS h
+    OFFSET 0) si
+ORDER BY x.deleted_at DESC, x.id
+`
+
+type SearchDocumentsDeletedDescParams struct {
+	Owner             *int64
+	Trashed           bool
+	RetentionUs       int64
+	Now               time.Time
+	Query             interface{}
+	TagGroupCount     int32
+	TagGroups         []int32
+	TagIds            []pgtype.UUID
+	NotTagIds         []pgtype.UUID
+	Correspondents    []pgtype.UUID
+	NotCorrespondents []pgtype.UUID
+	Types             []pgtype.UUID
+	NotTypes          []pgtype.UUID
+	Asns              []int32
+	NotAsns           []int32
+	DateFrom          *time.Time
+	DateTo            *time.Time
+	NotDateFrom       []time.Time
+	NotDateTo         []time.Time
+	AddedFrom         *time.Time
+	AddedTo           *time.Time
+	NotAddedFrom      []time.Time
+	NotAddedTo        []time.Time
+	Inbox             *bool
+	Favorite          *bool
+	CursorAt          *time.Time
+	CursorID          pgtype.UUID
+	Lim               int32
+}
+
+type SearchDocumentsDeletedDescRow struct {
+	ID                  pgtype.UUID
+	OwnerID             int64
+	Title               string
+	DocumentDate        time.Time
+	CreatedAt           time.Time
+	ModifiedAt          time.Time
+	Notes               string
+	IsFavorite          bool
+	IsInbox             bool
+	ArchiveSerialNumber *int32
+	PageCount           int32
+	ExtractedText       string
+	TextSource          string
+	Source              string
+	OriginalFileName    string
+	OriginalSha256      string
+	OriginalSize        int64
+	OriginalMime        string
+	ArchiveSha256       *string
+	ArchiveSize         *int64
+	CorrespondentID     pgtype.UUID
+	DocumentTypeID      pgtype.UUID
+	ThumbnailSha256     *string
+	ProcessingNote      string
+	DeletedAt           *time.Time
+	PurgeAt             *time.Time
+	TagIds              []pgtype.UUID
+	Rank                float32
+	Snippet             string
+}
+
+// The trash only (store.SearchDocuments refuses it otherwise): the most
+// recently deleted first, then by id, on documents_trash_idx.
+// snippet:begin (keep all copies equal; TestSearchFilterCopies checks)
+// A snippet in the first configuration that marks a match: german, then
+// english (other stems), then paperless_simple (accents). Only for the
+// page's rows, and only with a full-text condition.
+// snippet:end
+func (q *Queries) SearchDocumentsDeletedDesc(ctx context.Context, arg SearchDocumentsDeletedDescParams) ([]SearchDocumentsDeletedDescRow, error) {
+	rows, err := q.db.Query(ctx, searchDocumentsDeletedDesc,
+		arg.Owner,
+		arg.Trashed,
+		arg.RetentionUs,
+		arg.Now,
+		arg.Query,
+		arg.TagGroupCount,
+		arg.TagGroups,
+		arg.TagIds,
+		arg.NotTagIds,
+		arg.Correspondents,
+		arg.NotCorrespondents,
+		arg.Types,
+		arg.NotTypes,
+		arg.Asns,
+		arg.NotAsns,
+		arg.DateFrom,
+		arg.DateTo,
+		arg.NotDateFrom,
+		arg.NotDateTo,
+		arg.AddedFrom,
+		arg.AddedTo,
+		arg.NotAddedFrom,
+		arg.NotAddedTo,
+		arg.Inbox,
+		arg.Favorite,
+		arg.CursorAt,
+		arg.CursorID,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchDocumentsDeletedDescRow
+	for rows.Next() {
+		var i SearchDocumentsDeletedDescRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OwnerID,
+			&i.Title,
+			&i.DocumentDate,
+			&i.CreatedAt,
+			&i.ModifiedAt,
+			&i.Notes,
+			&i.IsFavorite,
+			&i.IsInbox,
+			&i.ArchiveSerialNumber,
+			&i.PageCount,
+			&i.ExtractedText,
+			&i.TextSource,
+			&i.Source,
+			&i.OriginalFileName,
+			&i.OriginalSha256,
+			&i.OriginalSize,
+			&i.OriginalMime,
+			&i.ArchiveSha256,
+			&i.ArchiveSize,
+			&i.CorrespondentID,
+			&i.DocumentTypeID,
+			&i.ThumbnailSha256,
+			&i.ProcessingNote,
+			&i.DeletedAt,
+			&i.PurgeAt,
 			&i.TagIds,
 			&i.Rank,
 			&i.Snippet,
@@ -1008,6 +1333,7 @@ SELECT x.id, x.owner_id, x.title, x.document_date, x.created_at, x.modified_at, 
        x.is_inbox, x.archive_serial_number, x.page_count, ''::text AS extracted_text, x.text_source, x.source,
        x.original_file_name, x.original_sha256, x.original_size, x.original_mime, x.archive_sha256,
        x.archive_size, x.correspondent_id, x.document_type_id, x.thumbnail_sha256, x.processing_note,
+       x.deleted_at, x.purge_at,
        COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
                  WHERE dt.document_id = x.id), '{}')::uuid[] AS tag_ids,
        p.rank::real AS rank, si.h::text AS snippet
@@ -1019,47 +1345,55 @@ FROM (
         WHERE
       -- filters:begin (keep all copies equal; TestSearchFilterCopies checks)
       ($2::bigint IS NULL OR d.owner_id = $2)
+      -- The live documents, or with trashed the trash: trashed documents
+      -- not yet due for purge (store.trashDue). Two branches, so the
+      -- constant trashed folds one of them away and each list keeps its
+      -- index (documents_trash_idx for the trash).
+      AND ((NOT $3::boolean AND d.deleted_at IS NULL)
+           OR ($3::boolean AND d.deleted_at IS NOT NULL
+               AND coalesce(d.purge_at, d.deleted_at + $4::bigint * interval '1 microsecond')
+                   > $5::timestamptz))
       AND ($1::tsquery IS NULL OR (d.search_text || d.search_links) @@ $1::tsquery)
       -- Tags: a tag of each of the tag_group_count groups (tag_groups[i]
       -- is the group of tag_ids[i]), and none of not_tag_ids.
-      AND ($3::int = 0 OR $3::int = (
-           SELECT count(DISTINCT ($4::int[])[g.n]) FROM document_tags dt
-           JOIN unnest($5::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
+      AND ($6::int = 0 OR $6::int = (
+           SELECT count(DISTINCT ($7::int[])[g.n]) FROM document_tags dt
+           JOIN unnest($8::uuid[]) WITH ORDINALITY AS g (id, n) ON g.id = dt.tag_id
            WHERE dt.document_id = d.id))
-      AND (coalesce(cardinality($6::uuid[]), 0) = 0 OR NOT EXISTS (
+      AND (coalesce(cardinality($9::uuid[]), 0) = 0 OR NOT EXISTS (
            SELECT 1 FROM document_tags dt
-           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($6::uuid[])))
-      AND ($7::uuid[] IS NULL OR d.correspondent_id = ANY ($7::uuid[]))
-      AND (coalesce(cardinality($8::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
-           OR NOT d.correspondent_id = ANY ($8::uuid[]))
-      AND ($9::uuid[] IS NULL OR d.document_type_id = ANY ($9::uuid[]))
-      AND (coalesce(cardinality($10::uuid[]), 0) = 0 OR d.document_type_id IS NULL
-           OR NOT d.document_type_id = ANY ($10::uuid[]))
-      AND ($11::int[] IS NULL OR d.archive_serial_number = ANY ($11::int[]))
-      AND (coalesce(cardinality($12::int[]), 0) = 0 OR d.archive_serial_number IS NULL
-           OR NOT d.archive_serial_number = ANY ($12::int[]))
+           WHERE dt.document_id = d.id AND dt.tag_id = ANY ($9::uuid[])))
+      AND ($10::uuid[] IS NULL OR d.correspondent_id = ANY ($10::uuid[]))
+      AND (coalesce(cardinality($11::uuid[]), 0) = 0 OR d.correspondent_id IS NULL
+           OR NOT d.correspondent_id = ANY ($11::uuid[]))
+      AND ($12::uuid[] IS NULL OR d.document_type_id = ANY ($12::uuid[]))
+      AND (coalesce(cardinality($13::uuid[]), 0) = 0 OR d.document_type_id IS NULL
+           OR NOT d.document_type_id = ANY ($13::uuid[]))
+      AND ($14::int[] IS NULL OR d.archive_serial_number = ANY ($14::int[]))
+      AND (coalesce(cardinality($15::int[]), 0) = 0 OR d.archive_serial_number IS NULL
+           OR NOT d.archive_serial_number = ANY ($15::int[]))
       -- Dates: within [from, to), and outside each excluded range
       -- [not_*_from[i], not_*_to[i]).
-      AND ($13::timestamptz IS NULL OR d.document_date >= $13::timestamptz)
-      AND ($14::timestamptz IS NULL OR d.document_date < $14::timestamptz)
-      AND (coalesce(cardinality($15::timestamptz[]), 0) = 0 OR NOT EXISTS (
-           SELECT 1 FROM unnest($15::timestamptz[]) WITH ORDINALITY AS r (lo, n)
-           WHERE d.document_date >= r.lo AND d.document_date < ($16::timestamptz[])[r.n]))
-      AND ($17::timestamptz IS NULL OR d.created_at >= $17::timestamptz)
-      AND ($18::timestamptz IS NULL OR d.created_at < $18::timestamptz)
-      AND (coalesce(cardinality($19::timestamptz[]), 0) = 0 OR NOT EXISTS (
-           SELECT 1 FROM unnest($19::timestamptz[]) WITH ORDINALITY AS r (lo, n)
-           WHERE d.created_at >= r.lo AND d.created_at < ($20::timestamptz[])[r.n]))
-      AND ($21::boolean IS NULL OR d.is_inbox = $21::boolean)
-      AND ($22::boolean IS NULL OR d.is_favorite = $22::boolean)
+      AND ($16::timestamptz IS NULL OR d.document_date >= $16::timestamptz)
+      AND ($17::timestamptz IS NULL OR d.document_date < $17::timestamptz)
+      AND (coalesce(cardinality($18::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($18::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.document_date >= r.lo AND d.document_date < ($19::timestamptz[])[r.n]))
+      AND ($20::timestamptz IS NULL OR d.created_at >= $20::timestamptz)
+      AND ($21::timestamptz IS NULL OR d.created_at < $21::timestamptz)
+      AND (coalesce(cardinality($22::timestamptz[]), 0) = 0 OR NOT EXISTS (
+           SELECT 1 FROM unnest($22::timestamptz[]) WITH ORDINALITY AS r (lo, n)
+           WHERE d.created_at >= r.lo AND d.created_at < ($23::timestamptz[])[r.n]))
+      AND ($24::boolean IS NULL OR d.is_inbox = $24::boolean)
+      AND ($25::boolean IS NULL OR d.is_favorite = $25::boolean)
       -- filters:end
         OFFSET 0
     ) r
-    WHERE $23::real IS NULL
-       OR r.rank < $23::real
-       OR r.rank = $23::real AND r.id > $24::uuid
+    WHERE $26::real IS NULL
+       OR r.rank < $26::real
+       OR r.rank = $26::real AND r.id > $27::uuid
     ORDER BY r.rank DESC, r.id
-    LIMIT $25
+    LIMIT $28
 ) p
 JOIN documents x ON x.id = p.id
 CROSS JOIN LATERAL (
@@ -1086,6 +1420,9 @@ ORDER BY p.rank DESC, x.id
 type SearchDocumentsRelevanceParams struct {
 	Query             interface{}
 	Owner             *int64
+	Trashed           bool
+	RetentionUs       int64
+	Now               time.Time
 	TagGroupCount     int32
 	TagGroups         []int32
 	TagIds            []pgtype.UUID
@@ -1136,6 +1473,8 @@ type SearchDocumentsRelevanceRow struct {
 	DocumentTypeID      pgtype.UUID
 	ThumbnailSha256     *string
 	ProcessingNote      string
+	DeletedAt           *time.Time
+	PurgeAt             *time.Time
 	TagIds              []pgtype.UUID
 	Rank                float32
 	Snippet             string
@@ -1154,6 +1493,9 @@ func (q *Queries) SearchDocumentsRelevance(ctx context.Context, arg SearchDocume
 	rows, err := q.db.Query(ctx, searchDocumentsRelevance,
 		arg.Query,
 		arg.Owner,
+		arg.Trashed,
+		arg.RetentionUs,
+		arg.Now,
 		arg.TagGroupCount,
 		arg.TagGroups,
 		arg.TagIds,
@@ -1210,6 +1552,8 @@ func (q *Queries) SearchDocumentsRelevance(ctx context.Context, arg SearchDocume
 			&i.DocumentTypeID,
 			&i.ThumbnailSha256,
 			&i.ProcessingNote,
+			&i.DeletedAt,
+			&i.PurgeAt,
 			&i.TagIds,
 			&i.Rank,
 			&i.Snippet,

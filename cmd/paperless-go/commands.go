@@ -16,6 +16,7 @@ import (
 	"github.com/pklnx/paperless-go/internal/consume"
 	"github.com/pklnx/paperless-go/internal/crypto"
 	"github.com/pklnx/paperless-go/internal/store"
+	"github.com/pklnx/paperless-go/internal/sweep"
 	"github.com/pklnx/paperless-go/internal/web"
 )
 
@@ -33,6 +34,8 @@ func openApp(ctx context.Context) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Every command decides "due for purge" with the configured retention.
+	st.TrashRetention = cfg.TrashRetention
 	ensureAuditPartitions(ctx, st)
 	return &app{cfg: cfg, store: st}, nil
 }
@@ -204,7 +207,12 @@ With ` + config.EnvConsumeDir + ` set, it imports the files put into the
 consume folder: consume/<user>/ for each user (created by the server), checked
 every 10 seconds. A file is imported once it has not changed for two scans,
 then deleted (also a duplicate); a file that cannot be imported moves to
-consume/<user>/failed/ with a .error.txt file that says why.`,
+consume/<user>/failed/ with a .error.txt file that says why. A file whose
+document is in the user's trash restores that document.
+
+Deleted documents stay in the trash for ` + config.EnvTrashRetention + ` (default
+720h, 30 days); every minute, and right after "delete permanently", the
+server removes the documents whose time is up.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			a, err := openApp(cmd.Context())
@@ -255,10 +263,15 @@ consume/<user>/failed/ with a .error.txt file that says why.`,
 				log.Info("watching the consume folder", "dir", a.cfg.ConsumeDir, "every", consume.DefaultInterval)
 				worker.Go(func() { consumer.Run(ctx, ticker.C) })
 			}
+			sweeper, wake, wakeSweeper := newSweeper(a, log)
+			sweepTicker := time.NewTicker(sweep.DefaultInterval)
+			defer sweepTicker.Stop()
+			log.Info("sweeping the trash", "retention", a.cfg.TrashRetention, "every", sweep.DefaultInterval)
+			worker.Go(func() { sweeper.Run(ctx, sweepTicker.C, wake) })
 			srv := web.New(a.store, log, web.Options{
 				AllowedHosts: a.cfg.AllowedHosts, TrustedProxies: a.cfg.TrustedProxies,
 				Sealer: sealer, SecretKey: a.cfg.SecretKey, Require2FA: a.cfg.Require2FA, PublicURL: a.cfg.PublicURL,
-				Blobs: blobs, MaxUploadSize: a.cfg.MaxUploadSize,
+				Blobs: blobs, MaxUploadSize: a.cfg.MaxUploadSize, SweepWake: wakeSweeper,
 			})
 			log.Info("listening", "addr", listen, "version", version)
 			err = srv.ListenAndServe(ctx, listen)
@@ -271,6 +284,13 @@ consume/<user>/failed/ with a .error.txt file that says why.`,
 	}
 	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:8080", "address to listen on")
 	return cmd
+}
+
+// newSweeper sets up the trash's sweeper with the store's clock and
+// retention, and the channel and function that wake it.
+func newSweeper(a *app, log *slog.Logger) (*sweep.Sweeper, <-chan struct{}, func()) {
+	wake, wakeFn := sweep.Wake()
+	return &sweep.Sweeper{Store: a.store, Log: log, Now: a.store.Now, Retention: a.store.TrashRetention}, wake, wakeFn
 }
 
 // warnWithoutUsers logs how to create the first admin while no user

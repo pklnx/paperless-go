@@ -171,8 +171,8 @@ func TestConsumeAuditOneEntryPerUserAndScan(t *testing.T) {
 	e.now = e.now.Add(DefaultSettle)
 	e.mustScan()
 	e.wantEntries(
-		"document.consume 1/alice duplicates=1 failed=0 imported=1",
-		"document.consume 2/bob duplicates=0 failed=1 imported=1",
+		"document.consume 1/alice duplicates=1 failed=0 imported=1 restored=0",
+		"document.consume 2/bob duplicates=0 failed=1 imported=1 restored=0",
 	)
 	// Empty folders write nothing.
 	e.now = e.now.Add(DefaultSettle)
@@ -208,7 +208,7 @@ func TestConsumeAuditTransientError(t *testing.T) {
 	if err := e.scan(context.Background()); err == nil {
 		t.Fatal("scan: no error, want the transient one")
 	}
-	e.wantEntries("document.consume 1/alice duplicates=0 failed=0 imported=1 interrupted=true")
+	e.wantEntries("document.consume 1/alice duplicates=0 failed=0 imported=1 interrupted=true restored=0")
 	if _, err := os.Lstat(b); err != nil {
 		t.Fatalf("b.pdf: %v, want it left in place", err)
 	}
@@ -228,7 +228,7 @@ func TestConsumeAuditCancelledScan(t *testing.T) {
 	if err := e.scan(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("scan: %v, want context.Canceled", err)
 	}
-	e.wantEntries("document.consume 1/alice duplicates=0 failed=0 imported=1 interrupted=true")
+	e.wantEntries("document.consume 1/alice duplicates=0 failed=0 imported=1 interrupted=true restored=0")
 	if e.audit.cancelled != 0 {
 		t.Fatalf("%d writes with a cancelled context", e.audit.cancelled)
 	}
@@ -245,7 +245,7 @@ func TestConsumeAuditUnknownUser(t *testing.T) {
 	e.write("alice/a.pdf", "a")
 	e.write("alice/b.pdf", "b")
 	e.settle()
-	e.wantEntries("document.consume 1/alice duplicates=0 failed=0 imported=1")
+	e.wantEntries("document.consume 1/alice duplicates=0 failed=0 imported=1 restored=0")
 }
 
 // An entry that cannot be written is logged once and kept: its counts go
@@ -269,7 +269,7 @@ func TestConsumeAuditWriteFailsThenWorks(t *testing.T) {
 	}
 	e.now = e.now.Add(DefaultSettle)
 	e.mustScan()
-	e.wantEntries("document.consume 1/alice duplicates=0 failed=0 imported=2")
+	e.wantEntries("document.consume 1/alice duplicates=0 failed=0 imported=2 restored=0")
 	if !strings.Contains(e.logs.String(), "audit log written again") {
 		t.Errorf("no recovery logged:\n%s", e.logs)
 	}
@@ -280,8 +280,8 @@ func TestConsumeAuditWriteFailsThenWorks(t *testing.T) {
 	e.settle()
 	e.mustScan()
 	e.wantEntries(
-		"document.consume 1/alice duplicates=0 failed=0 imported=2",
-		"document.consume 2/bob duplicates=0 failed=0 imported=1",
+		"document.consume 1/alice duplicates=0 failed=0 imported=2 restored=0",
+		"document.consume 2/bob duplicates=0 failed=0 imported=1 restored=0",
 	)
 	if len(e.c.pending) != 0 {
 		t.Fatalf("pending: %v", e.c.pending)
@@ -298,7 +298,7 @@ func TestConsumeAuditCountsOutcomes(t *testing.T) {
 	e.write("alice/dup.pdf", "dup")
 	e.write("bob/new.pdf", "new")
 	e.settle()
-	e.wantEntries("document.consume 2/bob duplicates=0 failed=0 imported=1")
+	e.wantEntries("document.consume 2/bob duplicates=0 failed=0 imported=1 restored=0")
 
 	// After HoldTime both are tried again, now both as duplicates.
 	e.im.results["new.pdf"] = duplicate
@@ -307,7 +307,7 @@ func TestConsumeAuditCountsOutcomes(t *testing.T) {
 	if len(e.im.calls) != 4 {
 		t.Fatalf("imports %q, want each file twice", e.im.calls)
 	}
-	e.wantEntries("document.consume 2/bob duplicates=0 failed=0 imported=1")
+	e.wantEntries("document.consume 2/bob duplicates=0 failed=0 imported=1 restored=0")
 
 	// A refused file that cannot be moved is not counted either.
 	e.im.results["notes.txt"] = refused
@@ -316,7 +316,7 @@ func TestConsumeAuditCountsOutcomes(t *testing.T) {
 	e.settle()
 	e.now = e.now.Add(HoldTime)
 	e.mustScan()
-	e.wantEntries("document.consume 2/bob duplicates=0 failed=0 imported=1")
+	e.wantEntries("document.consume 2/bob duplicates=0 failed=0 imported=1 restored=0")
 }
 
 // Without Audit nothing is kept or written.

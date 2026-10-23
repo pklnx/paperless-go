@@ -126,9 +126,12 @@ func decodeCursor(s string, sort search.Sort, asc bool) (searchCursor, pgtype.UU
 // orders.
 type searchArgs = db.SearchDocumentsAddedDescParams
 
-// SearchDocuments returns one page of the scope's documents that match q,
-// without their extracted text. Without free text or filters it lists the
-// newest documents. Free text comes with snippets.
+// SearchDocuments returns one page of the scope's live documents that
+// match q, or with q.Trashed of its trash (trashed documents not yet due
+// for purge), without their extracted text. Without free text or filters
+// it lists the newest documents, the trash the most recently deleted
+// (search.SortDeleted, which only the trash offers). Free text comes with
+// snippets.
 //
 // The sort is q.Sort, by default relevance with free text that is not
 // only negated, and newest added otherwise; relevance falls back to newest
@@ -146,11 +149,13 @@ func (s *Store) SearchDocuments(ctx context.Context, sc Scope, q search.Query) (
 		limit = search.DefaultLimit
 	}
 	limit = min(limit, search.MaxLimit)
-	if _, ok := search.ParseSort(string(q.Sort)); !ok || q.Sort == search.SortRelevance && q.Ascending {
+	if _, ok := search.ParseSort(string(q.Sort)); !ok || q.Sort == search.SortRelevance && q.Ascending ||
+		q.Sort == search.SortDeleted && (q.Ascending || !q.Trashed) {
 		return nil, ErrInvalidSort
 	}
 
-	args := searchArgs{Owner: sc.owner(), Lim: clampInt32(limit + 1)}
+	now, ret := s.trashClock()
+	args := searchArgs{Owner: sc.owner(), Trashed: q.Trashed, Now: now, RetentionUs: ret.Microseconds(), Lim: clampInt32(limit + 1)}
 	if q.HasText() {
 		tsq, err := s.searchTsquery(ctx, sc, q.Text)
 		if err != nil {
@@ -166,11 +171,14 @@ func (s *Store) SearchDocuments(ctx context.Context, sc Scope, q search.Query) (
 	// the index) only to sort by id is slow (searchbench: 4-5 s against
 	// 45 ms by added on 100 000 documents). Such a search lists the
 	// newest first, like one without words.
+	// The trash lists the most recently deleted first instead.
 	positive := slices.ContainsFunc(q.Text, func(t search.Text) bool { return !t.Negated })
 	sort := q.Sort
 	switch {
 	case sort == "" && args.Query != nil && positive && !q.Ascending:
 		sort = search.SortRelevance
+	case (sort == "" || sort == search.SortRelevance && args.Query == nil) && q.Trashed && !q.Ascending:
+		sort = search.SortDeleted
 	case sort == "" || sort == search.SortRelevance && args.Query == nil:
 		sort = search.SortAdded
 	}
@@ -215,7 +223,8 @@ func (s *Store) SearchDocuments(ctx context.Context, sc Scope, q search.Query) (
 			}
 			var err error
 			r, err = db.New(s.searchDB(g)).SearchDocumentsRelevance(ctx, db.SearchDocumentsRelevanceParams{
-				Query: args.Query, Owner: args.Owner, TagGroupCount: args.TagGroupCount, TagGroups: args.TagGroups,
+				Query: args.Query, Owner: args.Owner, Trashed: args.Trashed, RetentionUs: args.RetentionUs, Now: args.Now,
+				TagGroupCount: args.TagGroupCount, TagGroups: args.TagGroups,
 				TagIds: args.TagIds, NotTagIds: args.NotTagIds, Correspondents: args.Correspondents,
 				NotCorrespondents: args.NotCorrespondents, Types: args.Types, NotTypes: args.NotTypes, Asns: args.Asns,
 				NotAsns: args.NotAsns, DateFrom: args.DateFrom, DateTo: args.DateTo, NotDateFrom: args.NotDateFrom,
@@ -233,6 +242,13 @@ func (s *Store) SearchDocuments(ctx context.Context, sc Scope, q search.Query) (
 		}
 	case sort == search.SortAdded && !q.Ascending:
 		if rows, err = s.sq.SearchDocumentsAddedDesc(ctx, args); err != nil {
+			return nil, err
+		}
+	case sort == search.SortDeleted:
+		r, err := s.sq.SearchDocumentsDeletedDesc(ctx, db.SearchDocumentsDeletedDescParams(args))
+		if err := convertRows(&rows, r, err, func(x db.SearchDocumentsDeletedDescRow) db.SearchDocumentsAddedDescRow {
+			return db.SearchDocumentsAddedDescRow(x)
+		}); err != nil {
 			return nil, err
 		}
 	case sort == search.SortAdded:
@@ -271,6 +287,12 @@ func (s *Store) SearchDocuments(ctx context.Context, sc Scope, q search.Query) (
 			case search.SortAdded:
 				at := last.CreatedAt.UnixMicro()
 				c.At = &at
+			case search.SortDeleted:
+				var at int64
+				if last.DeletedAt != nil { // always, in the trash
+					at = last.DeletedAt.UnixMicro()
+				}
+				c.At = &at
 			default:
 				at := last.DocumentDate.UnixMicro()
 				c.At = &at
@@ -286,8 +308,8 @@ func (s *Store) SearchDocuments(ctx context.Context, sc Scope, q search.Query) (
 			OriginalSha256: r.OriginalSha256, OriginalSize: r.OriginalSize, OriginalMime: r.OriginalMime,
 			ArchiveSha256: r.ArchiveSha256, ArchiveSize: r.ArchiveSize, CorrespondentID: r.CorrespondentID,
 			DocumentTypeID: r.DocumentTypeID, ThumbnailSha256: r.ThumbnailSha256, ProcessingNote: r.ProcessingNote,
-			TagIds: r.TagIds,
-		}), Snippet: r.Snippet})
+			DeletedAt: r.DeletedAt, PurgeAt: r.PurgeAt, TagIds: r.TagIds,
+		}, ret), Snippet: r.Snippet})
 	}
 	return page, nil
 }

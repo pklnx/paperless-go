@@ -43,7 +43,17 @@ describe("messages", () => {
     for (const l of languages) {
       const m = messagesFor(l);
       for (const g of auditGroups) expect(m.logGroup(g), `${l}.${g}`).not.toBe(g);
-      for (const a of ["document.update", "document.bulk_update"]) expect(m.auditAction(a), `${l}.${a}`).not.toBe(a);
+      for (const a of [
+        "document.update",
+        "document.bulk_update",
+        "document.delete",
+        "document.restore",
+        "document.purge",
+        "document.bulk_delete",
+        "document.bulk_restore",
+        "document.bulk_purge",
+      ])
+        expect(m.auditAction(a), `${l}.${a}`).not.toBe(a);
     }
   });
   it("names each language in itself", () => {

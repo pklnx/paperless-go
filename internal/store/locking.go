@@ -117,7 +117,8 @@ var writerQueries = map[string]bool{
 	// documents.sql
 	"CreateDocument": true, "LockDocument": true, "ClearDocumentTags": true, "AddDocumentTags": true,
 	"DeleteDocument": true, "PatchDocument": true, "LockDocuments": true, "BulkRemoveDocumentTags": true,
-	"BulkAddDocumentTags": true, "BulkUpdateDocuments": true,
+	"BulkAddDocumentTags": true, "BulkUpdateDocuments": true, "TrashDocuments": true, "RestoreDocuments": true,
+	"PurgeDocuments": true, "DeleteDueDocuments": true,
 	// metadata.sql
 	"CreateCorrespondent": true, "UpdateCorrespondent": true, "DeleteCorrespondent": true, "LockCorrespondent": true,
 	"CreateDocumentType": true, "UpdateDocumentType": true, "DeleteDocumentType": true, "LockDocumentType": true,

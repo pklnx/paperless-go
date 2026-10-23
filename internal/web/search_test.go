@@ -271,9 +271,9 @@ func TestListDocumentsUnchanged(t *testing.T) {
 		t.Errorf("answer: %v", out)
 	}
 	want := []string{
-		"archiveSerialNumber", "archiveSize", "correspondentId", "createdAt", "documentDate", "documentTypeId", "hasArchive", "id",
-		"isFavorite", "isInbox", "modifiedAt", "notes", "originalFileName", "originalMime", "originalSize", "ownerId",
-		"pageCount", "processing", "processingNote", "source", "tagIds", "thumbnailUrl", "title",
+		"archiveSerialNumber", "archiveSize", "correspondentId", "createdAt", "deletedAt", "documentDate", "documentTypeId",
+		"hasArchive", "id", "isFavorite", "isInbox", "modifiedAt", "notes", "originalFileName", "originalMime", "originalSize",
+		"ownerId", "pageCount", "processing", "processingNote", "purgeAt", "source", "tagIds", "thumbnailUrl", "title",
 	}
 	for _, d := range listed(t, out) {
 		var keys []string

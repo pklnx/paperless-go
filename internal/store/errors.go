@@ -68,6 +68,20 @@ var (
 	// ErrUnknownUser means the owner of a new row does not exist (any
 	// more), for example because the user was deleted meanwhile.
 	ErrUnknownUser = errors.New("store: unknown user")
+
+	// ErrInTrash means a change or a move to the trash met a document
+	// that is in the trash.
+	ErrInTrash = errors.New("store: the document is in the trash")
+
+	// ErrNotInTrash means a restore or a purge met a document that is not
+	// in the trash: permanent deletion is always two steps.
+	ErrNotInTrash = errors.New("store: the document is not in the trash")
+
+	// ErrPurgePending means the owner's document with this file is due
+	// for purge: it is hidden and the sweeper deletes it shortly. The file
+	// is neither a duplicate nor new yet; the same call can be tried again
+	// in a minute, when it imports the file as a new document.
+	ErrPurgePending = errors.New("store: the document with this file is being removed permanently")
 )
 
 // ValidationError is a refused value. errors.Is(err, ErrInvalid) holds.

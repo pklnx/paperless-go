@@ -38,6 +38,18 @@ type Store struct {
 	// gate keeps writers of one owner that wait for each other off the
 	// pool (ownergate.go). The worker and the handlers share it.
 	gate *ownerGate
+
+	// Now is the clock of every trash decision (documents_trash.go): the
+	// time a document is trashed or its purge is asked for, and whether
+	// a trashed document is due for purge. nil is time.Now. Tests set it
+	// before the store is used.
+	Now func() time.Time
+	// TrashRetention is how long a trashed document stays before it is
+	// due for purge (PAPERLESS_GO_TRASH_RETENTION); Open sets
+	// DefaultTrashRetention. It is read at every decision, so a shorter
+	// one applies to documents already in the trash. Set it before the
+	// store is used.
+	TrashRetention time.Duration
 }
 
 // Open connects to the database.
@@ -51,7 +63,10 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		return nil, fmt.Errorf("connect to database: %w", err)
 	}
 	g := guardedDB{d: pool}
-	s := &Store{pool: pool, g: g, q: db.New(g), gate: newOwnerGate(), searchDB: func(d guardedDB) db.DBTX { return unnamedStatements{d} }}
+	s := &Store{
+		pool: pool, g: g, q: db.New(g), gate: newOwnerGate(), searchDB: func(d guardedDB) db.DBTX { return unnamedStatements{d} },
+		TrashRetention: DefaultTrashRetention,
+	}
 	s.sq = db.New(s.searchDB(g))
 	return s, nil
 }
