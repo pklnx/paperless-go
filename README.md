@@ -18,12 +18,13 @@ export in the app's archive folder format.
 
 ## Status
 
-Early development. This version is the foundation: one Go binary with the
-command line and the web server, PostgreSQL with migrations, the embedded web
-UI shell, Docker Compose, CI, releases and login with user name, password,
-two-factor login (TOTP), passkeys and API keys, uploads and OCR. Search
-and the full document UI follow step by step; see the
-[roadmap](https://pklnx.github.io/paperless-go/development/roadmap).
+Early development. The first release has one Go binary with the command
+line and the web server, PostgreSQL with migrations, Docker Compose, login
+with user name, password, two-factor login (TOTP), passkeys and API keys,
+uploads, OCR, full-text search, the document list and detail views, bulk
+changes, notes, saved views and a trash. Archive import and export,
+automatic assignment, external OCR and classification, and deadlines follow;
+see the [roadmap](https://pklnx.github.io/paperless-go/development/roadmap).
 
 ## Planned features
 
@@ -40,12 +41,6 @@ and the full document UI follow step by step; see the
 - **Docker Compose** setup with images for amd64 and arm64 (Apple Silicon).
 
 ## Quick start
-
-> **No release yet.** Until the first release is published, there is no
-> bundle to download and no image on `ghcr.io`. Install from source instead:
-> `git clone https://github.com/pklnx/paperless-go.git && cd paperless-go`,
-> then continue with `cp .env.example .env` below; `./pgo` builds the image
-> locally. See [From source](https://pklnx.github.io/paperless-go/guide/getting-started#install).
 
 Download the Docker Compose bundle of the latest release, check it and
 extract it. The first `./pgo` command pulls the images from `ghcr.io`
