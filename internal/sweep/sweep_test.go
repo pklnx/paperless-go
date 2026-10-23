@@ -98,7 +98,11 @@ func (f *fakeStore) BlobRemovalsDue(context.Context, time.Time, int) ([]string, 
 func (f *fakeStore) MarkBlobRemoval(context.Context, string, time.Time) (store.BlobMark, error) {
 	return store.BlobKept, nil
 }
-func (f *fakeStore) FinishBlobRemoval(context.Context, string) error { return nil }
+func (f *fakeStore) FinishBlobRemoval(context.Context, string, time.Time) error { return nil }
+func (f *fakeStore) RequeueBlobRemoval(context.Context, string, time.Time, time.Time) error {
+	return nil
+}
+func (f *fakeStore) ExclusiveSweep(_ context.Context, fn func() error) error { return fn() }
 func (f *fakeStore) UnreferencedBlobs(context.Context, []string) ([]string, error) {
 	return nil, nil
 }

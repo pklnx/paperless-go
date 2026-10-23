@@ -12,20 +12,22 @@ import (
 
 const blobRemovalsDue = `-- name: BlobRemovalsDue :many
 SELECT sha256 FROM blob_removals
-WHERE due_at <= $1::timestamptz OR removed_at IS NOT NULL
+WHERE (removed_at IS NULL AND due_at <= $1::timestamptz)
+   OR removed_at <= $2::timestamptz
 ORDER BY due_at, sha256
-LIMIT $2
+LIMIT $3
 `
 
 type BlobRemovalsDueParams struct {
-	Now time.Time
-	Lim int32
+	Now         time.Time
+	StaleBefore time.Time
+	Lim         int32
 }
 
-// The queue pass's candidates: due rows, and rows an earlier run marked
-// and did not finish.
+// The queue pass's candidates: due unmarked rows, and rows an earlier run
+// marked before stale_before and did not finish (it crashed).
 func (q *Queries) BlobRemovalsDue(ctx context.Context, arg BlobRemovalsDueParams) ([]string, error) {
-	rows, err := q.db.Query(ctx, blobRemovalsDue, arg.Now, arg.Lim)
+	rows, err := q.db.Query(ctx, blobRemovalsDue, arg.Now, arg.StaleBefore, arg.Lim)
 	if err != nil {
 		return nil, err
 	}
@@ -97,12 +99,17 @@ func (q *Queries) DropReferencedBlobRemoval(ctx context.Context, sha256 string) 
 }
 
 const finishBlobRemoval = `-- name: FinishBlobRemoval :execrows
-DELETE FROM blob_removals WHERE sha256 = $1::text AND removed_at IS NOT NULL
+DELETE FROM blob_removals WHERE sha256 = $1::text AND removed_at = $2::timestamptz
 `
 
-// Step 3, after the file was removed: the marked row goes.
-func (q *Queries) FinishBlobRemoval(ctx context.Context, sha256 string) (int64, error) {
-	result, err := q.db.Exec(ctx, finishBlobRemoval, sha256)
+type FinishBlobRemovalParams struct {
+	Sha256   string
+	MarkedAt time.Time
+}
+
+// Step 3, after the file was removed: the row this pass marked goes.
+func (q *Queries) FinishBlobRemoval(ctx context.Context, arg FinishBlobRemovalParams) (int64, error) {
+	result, err := q.db.Exec(ctx, finishBlobRemoval, arg.Sha256, arg.MarkedAt)
 	if err != nil {
 		return 0, err
 	}
@@ -122,9 +129,10 @@ func (q *Queries) HasDocuments(ctx context.Context) (bool, error) {
 }
 
 const markBlobRemoval = `-- name: MarkBlobRemoval :many
-UPDATE blob_removals SET removed_at = coalesce(removed_at, $1::timestamptz)
+UPDATE blob_removals SET removed_at = $1::timestamptz
 WHERE sha256 = $2::text
-  AND (due_at <= $1::timestamptz OR removed_at IS NOT NULL)
+  AND ((removed_at IS NULL AND due_at <= $1::timestamptz)
+       OR removed_at <= $3::timestamptz)
   AND NOT EXISTS (
       SELECT 1 FROM documents d
       WHERE d.original_sha256 = $2::text OR d.archive_sha256 = $2::text
@@ -133,15 +141,17 @@ RETURNING sha256
 `
 
 type MarkBlobRemovalParams struct {
-	Now    time.Time
-	Sha256 string
+	Now         time.Time
+	Sha256      string
+	StaleBefore time.Time
 }
 
 // Step 1 of the queue pass, under the hash's exclusive blob lock: marks a
-// due (or already marked) row whose file no document names. Zero or one
-// row.
+// due unmarked row, or takes over a row marked before stale_before (a
+// crashed run), whose file no document names. A fresh mark of another
+// pass is never taken over. Zero or one row.
 func (q *Queries) MarkBlobRemoval(ctx context.Context, arg MarkBlobRemovalParams) ([]string, error) {
-	rows, err := q.db.Query(ctx, markBlobRemoval, arg.Now, arg.Sha256)
+	rows, err := q.db.Query(ctx, markBlobRemoval, arg.Now, arg.Sha256, arg.StaleBefore)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +211,27 @@ type QueueUnreferencedBlobsParams struct {
 // a hash already queued keeps its row.
 func (q *Queries) QueueUnreferencedBlobs(ctx context.Context, arg QueueUnreferencedBlobsParams) (int64, error) {
 	result, err := q.db.Exec(ctx, queueUnreferencedBlobs, arg.DueAt, arg.Hashes)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const requeueBlobRemoval = `-- name: RequeueBlobRemoval :execrows
+UPDATE blob_removals SET removed_at = NULL, due_at = $1::timestamptz
+WHERE sha256 = $2::text AND removed_at = $3::timestamptz
+`
+
+type RequeueBlobRemovalParams struct {
+	DueAt    time.Time
+	Sha256   string
+	MarkedAt time.Time
+}
+
+// After a failed removal: the row this pass marked is unmarked and due
+// again at due_at, so writers of the hash are not refused meanwhile.
+func (q *Queries) RequeueBlobRemoval(ctx context.Context, arg RequeueBlobRemovalParams) (int64, error) {
+	result, err := q.db.Exec(ctx, requeueBlobRemoval, arg.DueAt, arg.Sha256, arg.MarkedAt)
 	if err != nil {
 		return 0, err
 	}

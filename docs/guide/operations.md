@@ -128,6 +128,11 @@ reinstall that kept the data directory.
 ./pgo sweep --bind      # bind the data directory to this installation (see the upgrade note)
 ```
 
+Only one sweep runs at a time: `./pgo sweep` while `serve`'s sweeper is
+busy (for a moment every minute) says "another sweep is running" and exits
+with status 1; run it again. A file that cannot be removed (a read-only or
+failing disk) is logged as an error and tried again an hour later.
+
 An upload of a file whose last document was just purged can meet its file
 being removed: it answers `503` with `Retry-After: 1`, and the retry stores
 the file again. The consume folder and `./pgo import` treat it the same way

@@ -89,7 +89,9 @@ later pass. The walk queues the files no document names and removes
 temporary files older than a day. It refuses, queues nothing and exits with
 status 1 when the data directory is not bound to this installation, when
 the database has no documents but the data directory has files, or when it
-would queue more than 10 % of the files (and more than 100).
+would queue more than 10 % of the files (and more than 100). Only one sweep
+runs at a time: while another one runs (`serve`'s sweeper, for a moment
+every minute), it does nothing, says so and exits with status 1.
 
 | Flag | Does |
 |---|---|

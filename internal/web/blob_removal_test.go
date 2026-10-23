@@ -68,18 +68,21 @@ func TestUploadWhileTheFileIsMarked(t *testing.T) {
 	ctx := context.Background()
 	data := pdf("purged and uploaded again")
 	h := uploadAndPurge(t, f, data)
-	if m, err := f.st.MarkBlobRemoval(ctx, h, sw.Now()); err != nil || m != store.BlobMarked {
+	marked := sw.Now()
+	if m, err := f.st.MarkBlobRemoval(ctx, h, marked); err != nil || m != store.BlobMarked {
 		t.Fatalf("mark: %v, %v", m, err)
 	}
 	uploadRemoved(t, f, data)
 	if has, err := f.st.HasDocuments(ctx); err != nil || has {
 		t.Fatalf("documents after the refused upload: %v, %v", has, err)
 	}
-	if q, err := sw.QueuePass(ctx, false); err != nil || q.Removed != 1 {
-		t.Fatalf("sweep: %+v, %v", q, err)
+	// The sweeper's steps 2 and 3.
+	if err := f.blobs.Remove(h); err != nil {
+		t.Fatal(err)
 	}
-	if f.blobs.Exists(h) {
-		t.Fatal("the file stayed")
+	uploadRemoved(t, f, data) // between step 2 and 3 as well
+	if err := f.st.FinishBlobRemoval(ctx, h, marked); err != nil {
+		t.Fatal(err)
 	}
 	f.uploadOK("again.pdf", data)
 	if !f.blobs.Exists(h) {

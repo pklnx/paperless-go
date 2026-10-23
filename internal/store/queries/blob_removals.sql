@@ -18,20 +18,23 @@ DELETE FROM blob_removals WHERE sha256 = ANY(sqlc.arg(hashes)::text[])
 RETURNING sha256, removed_at;
 
 -- name: BlobRemovalsDue :many
--- The queue pass's candidates: due rows, and rows an earlier run marked
--- and did not finish.
+-- The queue pass's candidates: due unmarked rows, and rows an earlier run
+-- marked before stale_before and did not finish (it crashed).
 SELECT sha256 FROM blob_removals
-WHERE due_at <= sqlc.arg(now)::timestamptz OR removed_at IS NOT NULL
+WHERE (removed_at IS NULL AND due_at <= sqlc.arg(now)::timestamptz)
+   OR removed_at <= sqlc.arg(stale_before)::timestamptz
 ORDER BY due_at, sha256
 LIMIT sqlc.arg(lim);
 
 -- name: MarkBlobRemoval :many
 -- Step 1 of the queue pass, under the hash's exclusive blob lock: marks a
--- due (or already marked) row whose file no document names. Zero or one
--- row.
-UPDATE blob_removals SET removed_at = coalesce(removed_at, sqlc.arg(now)::timestamptz)
+-- due unmarked row, or takes over a row marked before stale_before (a
+-- crashed run), whose file no document names. A fresh mark of another
+-- pass is never taken over. Zero or one row.
+UPDATE blob_removals SET removed_at = sqlc.arg(now)::timestamptz
 WHERE sha256 = sqlc.arg(sha256)::text
-  AND (due_at <= sqlc.arg(now)::timestamptz OR removed_at IS NOT NULL)
+  AND ((removed_at IS NULL AND due_at <= sqlc.arg(now)::timestamptz)
+       OR removed_at <= sqlc.arg(stale_before)::timestamptz)
   AND NOT EXISTS (
       SELECT 1 FROM documents d
       WHERE d.original_sha256 = sqlc.arg(sha256)::text OR d.archive_sha256 = sqlc.arg(sha256)::text
@@ -49,8 +52,14 @@ WHERE sha256 = sqlc.arg(sha256)::text
          OR d.thumbnail_sha256 = sqlc.arg(sha256)::text);
 
 -- name: FinishBlobRemoval :execrows
--- Step 3, after the file was removed: the marked row goes.
-DELETE FROM blob_removals WHERE sha256 = sqlc.arg(sha256)::text AND removed_at IS NOT NULL;
+-- Step 3, after the file was removed: the row this pass marked goes.
+DELETE FROM blob_removals WHERE sha256 = sqlc.arg(sha256)::text AND removed_at = sqlc.arg(marked_at)::timestamptz;
+
+-- name: RequeueBlobRemoval :execrows
+-- After a failed removal: the row this pass marked is unmarked and due
+-- again at due_at, so writers of the hash are not refused meanwhile.
+UPDATE blob_removals SET removed_at = NULL, due_at = sqlc.arg(due_at)::timestamptz
+WHERE sha256 = sqlc.arg(sha256)::text AND removed_at = sqlc.arg(marked_at)::timestamptz;
 
 -- name: UnreferencedBlobs :many
 -- The hashes of a batch that no document names (the walk; a dry run of the

@@ -53,7 +53,9 @@ type Store interface {
 	PurgeDueDocuments(ctx context.Context, now time.Time, retention time.Duration, limit int) (store.PurgeResult, error)
 	BlobRemovalsDue(ctx context.Context, now time.Time, limit int) ([]string, error)
 	MarkBlobRemoval(ctx context.Context, hash string, now time.Time) (store.BlobMark, error)
-	FinishBlobRemoval(ctx context.Context, hash string) error
+	FinishBlobRemoval(ctx context.Context, hash string, markedAt time.Time) error
+	RequeueBlobRemoval(ctx context.Context, hash string, markedAt, due time.Time) error
+	ExclusiveSweep(ctx context.Context, fn func() error) error
 	UnreferencedBlobs(ctx context.Context, hashes []string) ([]string, error)
 	WalkCandidates(ctx context.Context, hashes []string) ([]string, error)
 	QueueUnreferencedBlobs(ctx context.Context, hashes []string, due time.Time) (int64, error)
@@ -101,8 +103,8 @@ type QueueStats struct {
 	// InUse are the due hashes a document names again: their rows went
 	// and the files stay.
 	InUse int
-	// Failed removals: the row stays marked and the next pass tries
-	// again.
+	// Failed removals: the row is unmarked and due again after
+	// store.BlobGrace, so uploads of the file are not refused meanwhile.
 	Failed int
 }
 
@@ -153,11 +155,24 @@ func (s *Sweeper) RunOnce(ctx context.Context) (Stats, error) {
 // no document names, per hash in three steps: mark the row under the
 // hash's exclusive blob lock (store.MarkBlobRemoval; a hash in use loses
 // its row instead), remove the file without a lock held, delete the row.
-// A crash or error after the first step leaves the row marked, and the
-// next pass takes it again; Remove of a file already gone is fine. A
-// failed removal is logged and the pass goes on with the next hash. With
-// dryRun it only counts.
+// The whole pass holds the sweep lock (store.ExclusiveSweep): while
+// another pass or walk runs, in this or another process, it does nothing
+// and returns store.ErrSweepRunning. A crash after the first step leaves
+// the row marked, and a pass after store.MarkStale takes it again; Remove
+// of a file already gone is fine. A failed removal is logged at error
+// level, its row unmarked and due again after store.BlobGrace, and the
+// pass goes on with the next hash. With dryRun it only counts.
 func (s *Sweeper) QueuePass(ctx context.Context, dryRun bool) (QueueStats, error) {
+	var st QueueStats
+	err := s.Store.ExclusiveSweep(ctx, func() error {
+		var err error
+		st, err = s.queuePass(ctx, dryRun)
+		return err
+	})
+	return st, err
+}
+
+func (s *Sweeper) queuePass(ctx context.Context, dryRun bool) (QueueStats, error) {
 	var st QueueStats
 	now := s.now()
 	hashes, err := s.Store.BlobRemovalsDue(ctx, now, QueueBatch)
@@ -190,13 +205,16 @@ func (s *Sweeper) QueuePass(ctx context.Context, dryRun bool) (QueueStats, error
 		}
 		if err := s.Blobs.Remove(h); err != nil {
 			st.Failed++
-			log.Error("sweep: removing a file failed; trying again at the next round", "sha256", h, "err", err)
+			log.Error("sweep: removing a file failed; trying again later", "sha256", h, "retry_after", store.BlobGrace, "err", err)
+			if err := s.Store.RequeueBlobRemoval(ctx, h, now, now.Add(store.BlobGrace)); err != nil {
+				return st, err
+			}
 			continue
 		}
 		if s.afterRemove != nil {
 			s.afterRemove(h)
 		}
-		if err := s.Store.FinishBlobRemoval(ctx, h); err != nil {
+		if err := s.Store.FinishBlobRemoval(ctx, h, now); err != nil {
 			return st, err
 		}
 		st.Removed++
@@ -242,7 +260,20 @@ const maxUnexpectedLogged = 20
 // due after store.BlobGrace (the queue pass removes them unless a writer
 // names them by then), and removes the temporary files of Put older than
 // TempAge.
+//
+// The walk holds the sweep lock (store.ExclusiveSweep) like the queue
+// pass; while another runs it returns store.ErrSweepRunning.
 func (s *Sweeper) Walk(ctx context.Context, opts WalkOptions) (WalkStats, error) {
+	var st WalkStats
+	err := s.Store.ExclusiveSweep(ctx, func() error {
+		var err error
+		st, err = s.walk(ctx, opts)
+		return err
+	})
+	return st, err
+}
+
+func (s *Sweeper) walk(ctx context.Context, opts WalkOptions) (WalkStats, error) {
 	var st WalkStats
 	inst, err := s.Store.Installation(ctx)
 	if err != nil {
@@ -347,6 +378,8 @@ func (s *Sweeper) Run(ctx context.Context, tick <-chan time.Time, wake <-chan st
 		switch {
 		case ctx.Err() != nil:
 			return
+		case errors.Is(err, store.ErrSweepRunning):
+			log.Debug("sweep: another sweep is running; the queue pass waits for the next round")
 		case err != nil:
 			log.Error("sweep: the round failed; trying again at the next round", "purged", st.Purged,
 				"removed", st.Queue.Removed, "err", err)
@@ -357,9 +390,8 @@ func (s *Sweeper) Run(ctx context.Context, tick <-chan time.Time, wake <-chan st
 		if q := st.Queue; q.Removed+q.InUse+q.Failed > 0 {
 			log.Info("sweep: removed files", "removed", q.Removed, "in_use", q.InUse, "failed", q.Failed)
 		}
-		if now := s.now(); !now.Before(nextWalk) {
+		if now := s.now(); !now.Before(nextWalk) && s.logWalk(ctx, log) {
 			nextWalk = now.Add(WalkInterval)
-			s.walk(ctx, log)
 		}
 		select {
 		case <-ctx.Done():
@@ -370,10 +402,14 @@ func (s *Sweeper) Run(ctx context.Context, tick <-chan time.Time, wake <-chan st
 	}
 }
 
-// walk runs the daily walk and logs what it did.
-func (s *Sweeper) walk(ctx context.Context, log *slog.Logger) {
+// logWalk runs the daily walk and logs what it did. It reports false when
+// another sweep ran, so the walk is tried again at the next round.
+func (s *Sweeper) logWalk(ctx context.Context, log *slog.Logger) bool {
 	w, err := s.Walk(ctx, WalkOptions{})
 	switch {
+	case errors.Is(err, store.ErrSweepRunning):
+		log.Debug("sweep: another sweep is running; the walk waits for the next round")
+		return false
 	case ctx.Err() != nil:
 	case errors.Is(err, ErrUnbound):
 		log.Warn("sweep: the data directory is not bound to this installation, so files no document names are not removed; "+
@@ -387,6 +423,7 @@ func (s *Sweeper) walk(ctx context.Context, log *slog.Logger) {
 		log.Info("sweep: walked the data directory", "files", w.Blobs, "unreferenced", w.Candidates, "queued", w.Queued,
 			"temporary_removed", w.Temp, "unexpected", w.Unexpected)
 	}
+	return true
 }
 
 // Wake returns a channel for Run and the function that wakes it without

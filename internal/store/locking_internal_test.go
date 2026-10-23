@@ -130,21 +130,25 @@ func TestWritesOwnerTables(t *testing.T) {
 // db.New only on the guard, the pool's Exec, Query and QueryRow only in
 // collation.go (catalog reads and REINDEX, which write no owner table),
 // connections of their own (pgx.Connect, pgx.ConnectConfig, Acquire) only
-// for LISTEN, and the owner lock only through the owner gate (ownerTx).
+// for LISTEN and the sweep lock (ExclusiveSweep, on the guard), and the
+// owner lock only through the owner gate (ownerTx). The queue pass's step
+// 1 (readCommittedTx) begins its own READ COMMITTED transaction, on the
+// guard too.
 func TestTransactionsOnlyThroughTheGuard(t *testing.T) {
 	allowed := map[string][]string{
-		"Begin":             {"audit.go:inTxWith"},
-		"BeginTx":           {"locking.go:readTx"},
-		"BeginFunc":         {"collation.go:reindex"},
-		"BeginTxFunc":       nil,
-		"WithTx":            nil,
-		"db.New":            {"store.go:Open", "audit.go:inTxWith", "documents_edit.go:match", "search.go:SearchDocuments"},
+		"Begin":       {"audit.go:inTxWith"},
+		"BeginTx":     {"locking.go:readTx", "blob_removals.go:readCommittedTx"},
+		"BeginFunc":   {"collation.go:reindex"},
+		"BeginTxFunc": nil,
+		"WithTx":      nil,
+		"db.New": {"store.go:Open", "audit.go:inTxWith", "documents_edit.go:match", "search.go:SearchDocuments",
+			"blob_removals.go:ExclusiveSweep", "blob_removals.go:readCommittedTx"},
 		"pool.Exec":         {"collation.go:*"},
 		"pool.Query":        {"collation.go:*"},
 		"pool.QueryRow":     {"collation.go:*"},
 		"pgx.Connect":       nil,
 		"pgx.ConnectConfig": {"jobs.go:ListenJobs"},
-		"Acquire":           nil,
+		"Acquire":           {"blob_removals.go:ExclusiveSweep"},
 		"lockOwners":        {"ownergate.go:ownerTx"},
 	}
 	files, err := filepath.Glob("*.go")

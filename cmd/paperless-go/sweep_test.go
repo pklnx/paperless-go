@@ -212,6 +212,14 @@ func TestSweepCommand(t *testing.T) {
 	if err != nil || !strings.Contains(out, "queue: removed: 1") || blobs.Exists(orphan.SHA256) || !blobs.Exists(kept.SHA256) {
 		t.Fatalf("sweep after the grace: %q, %v", out, err)
 	}
+	// While another sweep holds the sweep lock (store.ExclusiveSweep's
+	// class "pgos"), the command does nothing and says so.
+	if _, err := conn.Exec(context.Background(), `SELECT pg_advisory_lock(1885826931, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(t, url, "sweep"); !errors.Is(err, errSweepRunning) {
+		t.Fatalf("sweep while another runs: %q, %v", out, err)
+	}
 }
 
 // serve warns at start while the data directory is unbound, and logs an
@@ -272,14 +280,15 @@ func TestImportFileBeingCleanedUp(t *testing.T) {
 	if _, err := st.PurgeDueDocuments(ctx, time.Now(), store.DefaultTrashRetention, 100); err != nil {
 		t.Fatal(err)
 	}
-	if m, err := st.MarkBlobRemoval(ctx, docs[0].OriginalSHA256, time.Now().Add(2*store.BlobGrace)); err != nil || m != store.BlobMarked {
+	marked := time.Now().Add(2 * store.BlobGrace)
+	if m, err := st.MarkBlobRemoval(ctx, docs[0].OriginalSHA256, marked); err != nil || m != store.BlobMarked {
 		t.Fatalf("mark: %v, %v", m, err)
 	}
 	out, err := run(t, url, "import", src, "--user", "alice")
 	if err == nil || !strings.Contains(out, "a.pdf: failed: the stored copy of this file was being cleaned up") {
 		t.Fatalf("import while cleaned up: %q, %v", out, err)
 	}
-	if err := st.FinishBlobRemoval(ctx, docs[0].OriginalSHA256); err != nil {
+	if err := st.FinishBlobRemoval(ctx, docs[0].OriginalSHA256, marked); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := run(t, url, "import", src, "--user", "alice"); err != nil || !strings.Contains(out, "a.pdf: imported") {

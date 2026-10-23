@@ -31,6 +31,7 @@ type fileEnv struct {
 	blobs *blobstore.Store
 	conn  *pgx.Conn
 	sw    *sweep.Sweeper
+	url   string
 	logs  *syncBuf
 	clock atomic.Pointer[time.Time]
 	alice store.Scope
@@ -48,7 +49,7 @@ func newFileEnv(t *testing.T) *fileEnv {
 	}
 	t.Cleanup(func() { _ = conn.Close(ctx) })
 	e := &fileEnv{
-		t: t, ctx: ctx, st: st, blobs: blobs, conn: conn, logs: &syncBuf{},
+		t: t, ctx: ctx, st: st, blobs: blobs, conn: conn, url: url, logs: &syncBuf{},
 		alice: store.Scope{UserID: storetest.User(t, st, "alice", false).ID},
 		bob:   store.Scope{UserID: storetest.User(t, st, "bob", false).ID},
 	}
@@ -190,54 +191,110 @@ func TestPurgeRemovesFilesAfterTheGrace(t *testing.T) {
 	}
 }
 
-// failingRemove fails the first Remove of each hash with err, or cancels
-// a context right after a Remove.
+// failingRemove fails Remove of a hash as often as fails says.
 type failingRemove struct {
 	*blobstore.Store
-	failed map[string]bool
+	fails map[string]int
 }
 
 func (f *failingRemove) Remove(hash string) error {
-	if !f.failed[hash] {
-		f.failed[hash] = true
+	if f.fails[hash] > 0 {
+		f.fails[hash]--
 		return errors.New("disk on fire")
 	}
 	return f.Store.Remove(hash)
 }
 
-// Crash seams: a removal that fails after step 1 leaves the row marked
-// (writers of the hash fail meanwhile) and the next pass finishes it; a
-// pass stopped after step 2 leaves the marked row of a removed file, and
-// the next pass deletes it (Remove of a file already gone is fine).
+// rowState is a queue row's removed_at and due_at (ok false: no row).
+func (e *fileEnv) rowState(hash string) (removed *time.Time, due time.Time, ok bool) {
+	e.t.Helper()
+	err := e.conn.QueryRow(e.ctx, `SELECT removed_at, due_at FROM blob_removals WHERE sha256 = $1`, hash).Scan(&removed, &due)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, time.Time{}, false
+	}
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return removed, due, true
+}
+
+// queue stores content and queues it due now.
+func (e *fileEnv) queue(content string) string {
+	e.t.Helper()
+	h := e.put(content)
+	if n, err := e.st.QueueUnreferencedBlobs(e.ctx, []string{h}, e.now()); err != nil || n != 1 {
+		e.t.Fatalf("queue: %d, %v", n, err)
+	}
+	return h
+}
+
+func (e *fileEnv) create(sc store.Scope, hash string) error {
+	_, err := e.st.CreateDocument(e.ctx, sc, store.NewDocument{Title: "x", Source: store.SourceFile, OriginalSHA256: hash,
+		OriginalMIME: "application/pdf"})
+	return err
+}
+
+// A failed removal unmarks the row and makes it due again after the
+// grace, logged at error level: uploads of the file are not refused
+// meanwhile, and a later pass retries.
+func TestQueuePassFailedRemovalRequeues(t *testing.T) {
+	e := newFileEnv(t)
+	stuck, retried := e.queue("stuck"), e.queue("retried")
+	e.sw.Blobs = &failingRemove{Store: e.blobs, fails: map[string]int{stuck: 1, retried: 1}}
+	if q, err := e.sw.QueuePass(e.ctx, false); err != nil || q != (sweep.QueueStats{Failed: 2}) {
+		t.Fatalf("failing removes: %+v, %v", q, err)
+	}
+	if !strings.Contains(e.logs.String(), "level=ERROR") || !strings.Contains(e.logs.String(), "disk on fire") {
+		t.Errorf("not logged as an error:\n%s", e.logs)
+	}
+	for _, h := range []string{stuck, retried} {
+		removed, due, ok := e.rowState(h)
+		if !ok || removed != nil || !due.Equal(e.now().Add(store.BlobGrace)) || !e.blobs.Exists(h) {
+			t.Fatalf("after the failed removal: row %v, removed %v, due %v, file %v", ok, removed, due, e.blobs.Exists(h))
+		}
+	}
+	if q, err := e.sw.QueuePass(e.ctx, false); err != nil || q != (sweep.QueueStats{}) {
+		t.Fatalf("pass before the backoff: %+v, %v", q, err)
+	}
+	// An upload of the file is not refused: it takes the row away.
+	if err := e.create(e.alice, stuck); err != nil {
+		t.Fatalf("a writer after the failed removal: %v", err)
+	}
+	e.advance(store.BlobGrace)
+	if q, err := e.sw.QueuePass(e.ctx, false); err != nil || q != (sweep.QueueStats{Removed: 1}) {
+		t.Fatalf("pass after the backoff: %+v, %v", q, err)
+	}
+	if !e.blobs.Exists(stuck) || e.blobs.Exists(retried) || e.queued() != 0 {
+		t.Errorf("stuck %v, retried %v, %d rows", e.blobs.Exists(stuck), e.blobs.Exists(retried), e.queued())
+	}
+}
+
+// Crash seams: a pass that died after step 1 leaves the row marked
+// (writers of the hash fail meanwhile), and one that died after step 2 a
+// marked row whose file is gone. A pass takes such a mark over only once
+// it is store.MarkStale old (a younger one could be another pass's), then
+// finishes it; Remove of a file already gone is fine.
 func TestQueuePassCrashSeams(t *testing.T) {
 	e := newFileEnv(t)
-	h := e.put("crash one")
-	if _, err := e.st.QueueUnreferencedBlobs(e.ctx, []string{h}, e.now()); err != nil {
-		t.Fatal(err)
+	h := e.queue("crash one")
+	if m, err := e.st.MarkBlobRemoval(e.ctx, h, e.now()); err != nil || m != store.BlobMarked {
+		t.Fatalf("step 1 of the crashed pass: %v, %v", m, err)
 	}
-	e.sw.Blobs = &failingRemove{Store: e.blobs, failed: map[string]bool{}}
-	if q, err := e.sw.QueuePass(e.ctx, false); err != nil || q != (sweep.QueueStats{Failed: 1}) {
-		t.Fatalf("failing remove: %+v, %v", q, err)
-	}
-	if !e.blobs.Exists(h) || e.queued() != 1 || !strings.Contains(e.logs.String(), "disk on fire") {
-		t.Fatalf("after the failed remove: file %v, %d rows, log %s", e.blobs.Exists(h), e.queued(), e.logs)
-	}
-	in := store.NewDocument{Title: "x", Source: store.SourceFile, OriginalSHA256: h, OriginalMIME: "application/pdf"}
-	if _, err := e.st.CreateDocument(e.ctx, e.alice, in); !errors.Is(err, store.ErrBlobRemoved) {
+	if err := e.create(e.alice, h); !errors.Is(err, store.ErrBlobRemoved) {
 		t.Fatalf("a writer while the row is marked: %v", err)
 	}
+	if q, err := e.sw.QueuePass(e.ctx, false); err != nil || q != (sweep.QueueStats{}) || !e.blobs.Exists(h) {
+		t.Fatalf("pass on a fresh mark: %+v, %v", q, err)
+	}
+	e.advance(store.MarkStale)
 	if q, err := e.sw.QueuePass(e.ctx, false); err != nil || q != (sweep.QueueStats{Removed: 1}) {
-		t.Fatalf("next pass: %+v, %v", q, err)
+		t.Fatalf("pass on a stale mark: %+v, %v", q, err)
 	}
 	if e.blobs.Exists(h) || e.queued() != 0 {
-		t.Fatal("the next pass did not finish")
+		t.Fatal("the stale mark was not finished")
 	}
 
-	h = e.put("crash two")
-	if _, err := e.st.QueueUnreferencedBlobs(e.ctx, []string{h}, e.now()); err != nil {
-		t.Fatal(err)
-	}
-	e.sw.Blobs = e.blobs
+	h = e.queue("crash two")
 	ctx, cancel := context.WithCancel(e.ctx)
 	sweep.SetQueueSeams(e.sw, nil, func(string) { cancel() })
 	if _, err := e.sw.QueuePass(ctx, false); !errors.Is(err, context.Canceled) {
@@ -247,6 +304,7 @@ func TestQueuePassCrashSeams(t *testing.T) {
 		t.Fatalf("after step 2: file %v, %d rows", e.blobs.Exists(h), e.queued())
 	}
 	sweep.SetQueueSeams(e.sw, nil, nil)
+	e.advance(store.MarkStale)
 	if q, err := e.sw.QueuePass(e.ctx, false); err != nil || q != (sweep.QueueStats{Removed: 1}) {
 		t.Fatalf("next pass: %+v, %v", q, err)
 	}
@@ -254,9 +312,135 @@ func TestQueuePassCrashSeams(t *testing.T) {
 		t.Fatal("the marked row stayed")
 	}
 	// The retry of a writer stores a new copy and succeeds.
-	if _, err := e.st.CreateDocument(e.ctx, e.alice, store.NewDocument{Title: "y", Source: store.SourceFile,
-		OriginalSHA256: e.put("crash two"), OriginalMIME: "application/pdf"}); err != nil {
+	if err := e.create(e.alice, e.put("crash two")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Two queue passes at once (serve's sweeper and ./pgo sweep) in the order
+// of the review of #136: A marks H, B takes H too, A removes the file and
+// deletes the row, a writer stores the file again and commits its
+// document, then B would remove that file. The sweep lock keeps B out
+// while A runs (B does nothing and says so), and a mark of another pass is
+// never taken over, so the committed document keeps its file.
+func TestConcurrentQueuePassesKeepACommittedFile(t *testing.T) {
+	e := newFileEnv(t)
+	other, err := store.Open(e.ctx, e.url, e.blobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	h := e.queue("contended")
+	a := e.sw
+	b := &sweep.Sweeper{Store: other, Blobs: e.blobs, Now: e.now}
+	aMarked, aGo := make(chan struct{}), make(chan struct{})
+	sweep.SetQueueSeams(a, func(string) {
+		close(aMarked)
+		<-aGo
+	}, nil)
+	bMarked, bGo := make(chan struct{}), make(chan struct{})
+	sweep.SetQueueSeams(b, func(string) {
+		close(bMarked)
+		<-bGo
+	}, nil)
+
+	aDone := make(chan error, 1)
+	go func() {
+		_, err := a.QueuePass(e.ctx, false)
+		aDone <- err
+	}()
+	<-aMarked
+	bDone := make(chan error, 1)
+	var bStats sweep.QueueStats
+	go func() {
+		var err error
+		bStats, err = b.QueuePass(e.ctx, false)
+		bDone <- err
+	}()
+	bFinished := false
+	select {
+	case <-bMarked: // without the fix: B marked H as well and waits before its Remove
+	case err := <-bDone:
+		bFinished = true
+		if !errors.Is(err, store.ErrSweepRunning) || bStats != (sweep.QueueStats{}) {
+			t.Errorf("the second pass: %+v, %v; want ErrSweepRunning and nothing done", bStats, err)
+		}
+	}
+	close(aGo)
+	if err := <-aDone; err != nil {
+		t.Fatal(err)
+	}
+	if e.blobs.Exists(h) || e.queued() != 0 {
+		t.Fatal("A did not finish")
+	}
+	// A writer stores the file again and commits.
+	if _, created, err := e.blobs.Put(strings.NewReader("contended")); err != nil || !created {
+		t.Fatalf("Put: %v, %v", created, err)
+	}
+	if err := e.create(e.alice, h); err != nil {
+		t.Fatal(err)
+	}
+	close(bGo)
+	if !bFinished {
+		<-bDone
+	}
+	if !e.blobs.Exists(h) {
+		t.Fatal("a committed document's file was removed by the second pass")
+	}
+	// Once A is done, B may run: there is nothing left for it.
+	if q, err := b.QueuePass(e.ctx, false); err != nil || q != (sweep.QueueStats{}) {
+		t.Errorf("B afterwards: %+v, %v", q, err)
+	}
+}
+
+// A file named only by a trashed, not yet purged document is in use: the
+// queue pass keeps it (a purge of another document that shared it queued
+// it) and drops its row, the walk does not count it, and the document is
+// restored with its files.
+func TestTrashedDocumentKeepsItsFiles(t *testing.T) {
+	e := newFileEnv(t)
+	e.bind()
+	trashed := e.doc(e.alice, "trashed original", "trashed archive", "trashed thumb")
+	// Bob has the same original and his document is purged: it queues
+	// the hash, which alice's trashed document still names.
+	bobs := e.doc(e.bob, "trashed original", "", "")
+	e.purge(e.bob, bobs.ID)
+	if err := e.st.TrashDocument(e.ctx, e.alice, trashed.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The other two hashes are queued as a stray walk or purge would.
+	if _, err := e.conn.Exec(e.ctx, `INSERT INTO blob_removals (sha256, due_at) VALUES ($1, $3), ($2, $3)`,
+		*trashed.ArchiveSHA256, *trashed.ThumbnailSHA256, e.now().Add(store.BlobGrace)); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := e.sw.RunOnce(e.ctx); err != nil || st != (sweep.Stats{Purged: 1}) {
+		t.Fatalf("row pass: %+v, %v", st, err)
+	}
+	e.advance(2 * store.BlobGrace)
+	st, err := e.sw.RunOnce(e.ctx)
+	if err != nil || st.Queue != (sweep.QueueStats{InUse: 3}) {
+		t.Fatalf("queue pass past the grace: %+v, %v", st, err)
+	}
+	if w, err := e.sw.Walk(e.ctx, sweep.WalkOptions{}); err != nil || w.Blobs != 3 || w.Candidates != 0 || w.Queued != 0 {
+		t.Fatalf("walk: %+v, %v", w, err)
+	}
+	e.advance(2 * store.BlobGrace)
+	if st, err := e.sw.RunOnce(e.ctx); err != nil || st != (sweep.Stats{}) {
+		t.Fatalf("pass after the walk: %+v, %v", st, err)
+	}
+	for _, c := range []string{"trashed original", "trashed archive", "trashed thumb"} {
+		if !e.exists(c) {
+			t.Errorf("%s was removed", c)
+		}
+	}
+	d, err := e.st.RestoreDocument(e.ctx, e.alice, trashed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{d.OriginalSHA256, *d.ArchiveSHA256, *d.ThumbnailSHA256} {
+		if !e.blobs.Exists(h) {
+			t.Errorf("the restored document's file %s is gone", h)
+		}
 	}
 }
 

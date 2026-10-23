@@ -229,7 +229,7 @@ func TestBlobRemovalRaces(t *testing.T) {
 			if err := write(e.ctx, e.writer, h); !errors.Is(err, store.ErrBlobRemoved) {
 				t.Fatalf("write after step 2: %v, want ErrBlobRemoved", err)
 			}
-			if err := e.swSt.FinishBlobRemoval(e.ctx, h); err != nil {
+			if err := e.swSt.FinishBlobRemoval(e.ctx, h, e.now); err != nil {
 				t.Fatal(err)
 			}
 			if e.named(h) {
@@ -539,5 +539,66 @@ func TestRolledBackWriterKeepsTheQueueRow(t *testing.T) {
 	}
 	if !e.blobs.Exists(h) || e.queued(h) {
 		t.Error("the file of a live document went, or its row stayed")
+	}
+}
+
+// MarkBlobRemoval runs at READ COMMITTED also when the database's default
+// is REPEATABLE READ: its UPDATE must see a writer that committed while
+// the sweeper waited for the hash's lock. Here the hash is queued after
+// the writer's dequeue and before its commit; a snapshot from before the
+// wait would miss the new document and remove its file.
+func TestMarkBlobRemovalReadCommitted(t *testing.T) {
+	e := newBlobEnv(t)
+	var dbName string
+	if err := e.conn.QueryRow(e.ctx, `SELECT current_database()`).Scan(&dbName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.conn.Exec(e.ctx, `ALTER DATABASE `+pgx.Identifier{dbName}.Sanitize()+
+		` SET default_transaction_isolation = 'repeatable read'`); err != nil {
+		t.Fatal(err)
+	}
+	rr := openBlobStore(t, e.url, "sweeper-rr", e.blobs)
+	if iso, err := store.PoolSetting(e.ctx, rr, "default_transaction_isolation"); err != nil || iso != "repeatable read" {
+		t.Fatalf("isolation of the new store: %q, %v", iso, err)
+	}
+	sw := &sweep.Sweeper{Store: rr, Blobs: e.blobs, Now: func() time.Time { return e.now }}
+	h := e.put("late queue")
+	held, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	wctx := store.WithAfterBlobHold(e.ctx, func() {
+		once.Do(func() {
+			close(held)
+			select {
+			case <-release:
+			case <-e.ctx.Done():
+			}
+		})
+	})
+	done := startOp(func() error {
+		in := newDoc("late queue")
+		in.OriginalSHA256 = h
+		_, err := e.writer.CreateDocument(wctx, e.alice, in)
+		return err
+	})
+	<-held
+	if _, err := e.conn.Exec(e.ctx, `INSERT INTO blob_removals (sha256, due_at) VALUES ($1, $2)`, h, e.now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var qs sweep.QueueStats
+	swept := startOp(func() error {
+		var err error
+		qs, err = sw.QueuePass(e.ctx, false)
+		return err
+	})
+	waitForAdvisory(e.ctx, t, e.conn, "sweeper-rr", 1, swept)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-swept; err != nil || qs != (sweep.QueueStats{InUse: 1}) {
+		t.Fatalf("sweep: %+v, %v", qs, err)
+	}
+	if !e.blobs.Exists(h) || !e.named(h) {
+		t.Error("the new document's file was removed")
 	}
 }

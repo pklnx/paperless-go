@@ -24,3 +24,14 @@ SELECT pg_advisory_xact_lock_shared(sqlc.arg(class)::int, sqlc.arg(key)::int);
 
 -- name: LockBlob :exec
 SELECT pg_advisory_xact_lock(sqlc.arg(class)::int, sqlc.arg(key)::int);
+
+-- The sweep lock (store.ExclusiveSweep): a session-level advisory lock in
+-- its own class (store.sweepLockClass), held on one connection for a whole
+-- queue pass or walk, so at most one of them runs at a time across
+-- processes. A crash releases it with the connection.
+
+-- name: TrySweepLock :one
+SELECT pg_try_advisory_lock(sqlc.arg(class)::int, 0);
+
+-- name: SweepUnlock :one
+SELECT pg_advisory_unlock(sqlc.arg(class)::int, 0);

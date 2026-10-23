@@ -166,7 +166,8 @@ func TestFileBeingCleanedUpStays(t *testing.T) {
 	if _, err := e.st.PurgeDueDocuments(ctx, time.Now(), store.DefaultTrashRetention, 100); err != nil {
 		t.Fatal(err)
 	}
-	if m, err := e.st.MarkBlobRemoval(ctx, doc.OriginalSHA256, time.Now().Add(2*store.BlobGrace)); err != nil || m != store.BlobMarked {
+	marked := time.Now().Add(2 * store.BlobGrace)
+	if m, err := e.st.MarkBlobRemoval(ctx, doc.OriginalSHA256, marked); err != nil || m != store.BlobMarked {
 		t.Fatalf("mark: %v, %v", m, err)
 	}
 	b := e.write("anna/b.pdf", pdf("cleaned up"))
@@ -177,7 +178,7 @@ func TestFileBeingCleanedUpStays(t *testing.T) {
 	if n := e.log.count("being cleaned up", "b.pdf"); n != 1 {
 		t.Errorf("%d log lines about the clean-up, want 1:\n%s", n, e.log.String())
 	}
-	if err := e.st.FinishBlobRemoval(ctx, doc.OriginalSHA256); err != nil {
+	if err := e.st.FinishBlobRemoval(ctx, doc.OriginalSHA256, marked); err != nil {
 		t.Fatal(err)
 	}
 	if st := e.scan(); st.Imported != 1 {

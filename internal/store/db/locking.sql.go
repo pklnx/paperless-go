@@ -68,3 +68,30 @@ func (q *Queries) LockOwner(ctx context.Context, arg LockOwnerParams) error {
 	_, err := q.db.Exec(ctx, lockOwner, arg.Prefix, arg.OwnerID)
 	return err
 }
+
+const sweepUnlock = `-- name: SweepUnlock :one
+SELECT pg_advisory_unlock($1::int, 0)
+`
+
+func (q *Queries) SweepUnlock(ctx context.Context, class int32) (bool, error) {
+	row := q.db.QueryRow(ctx, sweepUnlock, class)
+	var pg_advisory_unlock bool
+	err := row.Scan(&pg_advisory_unlock)
+	return pg_advisory_unlock, err
+}
+
+const trySweepLock = `-- name: TrySweepLock :one
+
+SELECT pg_try_advisory_lock($1::int, 0)
+`
+
+// The sweep lock (store.ExclusiveSweep): a session-level advisory lock in
+// its own class (store.sweepLockClass), held on one connection for a whole
+// queue pass or walk, so at most one of them runs at a time across
+// processes. A crash releases it with the connection.
+func (q *Queries) TrySweepLock(ctx context.Context, class int32) (bool, error) {
+	row := q.db.QueryRow(ctx, trySweepLock, class)
+	var pg_try_advisory_lock bool
+	err := row.Scan(&pg_try_advisory_lock)
+	return pg_try_advisory_lock, err
+}

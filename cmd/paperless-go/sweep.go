@@ -8,8 +8,13 @@ import (
 
 	"github.com/pklnx/paperless-go/internal/blobstore"
 	"github.com/pklnx/paperless-go/internal/config"
+	"github.com/pklnx/paperless-go/internal/store"
 	"github.com/pklnx/paperless-go/internal/sweep"
 )
+
+// errSweepRunning answers a sweep while another one runs (serve's sweeper
+// for a moment every minute, or another ./pgo sweep).
+var errSweepRunning = errors.New("another sweep is running (serve's sweeper or another sweep command); try again in a minute")
 
 func newSweepCmd() *cobra.Command {
 	var dryRun, force, bind bool
@@ -68,6 +73,9 @@ directory has files, or when it would queue more than 10 % of the files.
 			log := newLogger(a.cfg.LogLevel)
 			s := &sweep.Sweeper{Store: a.store, Blobs: blobs, Log: log, Now: a.store.Now, Retention: a.store.TrashRetention}
 			q, err := s.QueuePass(ctx, dryRun)
+			if errors.Is(err, store.ErrSweepRunning) {
+				return errSweepRunning
+			}
 			if err != nil {
 				return err
 			}
@@ -82,6 +90,8 @@ directory has files, or when it would queue more than 10 % of the files.
 				queued, temp = fmt.Sprintf("would queue: %d", w.Candidates), "stale temporary files"
 			}
 			switch {
+			case errors.Is(walkErr, store.ErrSweepRunning):
+				return errSweepRunning
 			case errors.Is(walkErr, sweep.ErrUnbound):
 				fmt.Fprintf(out, "walk: refused: the data directory %s is not bound to this installation; "+
 					"check that it is this installation's, then run %s sweep --bind\n", dir, commandName())

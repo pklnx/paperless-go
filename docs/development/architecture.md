@@ -745,17 +745,34 @@ and thumbnail minutes before `CompleteJob`.
   every command (`TestOpenAppChecksTheDataDir`, and
   `TestOnlyOpenAppOpensTheStore` keeps it the only caller). Tests that store
   no files pass `storetest.AnyBlob`.
+- **One sweep at a time.** The queue pass and the walk each hold the sweep
+  lock for their whole run (`store.ExclusiveSweep`): a session-level
+  `pg_try_advisory_lock(0x70676f73, 0)` on a connection of its own, a class
+  no blob key uses. Another pass, in this process or another (`serve` and
+  `./pgo sweep`), does nothing and gets `store.ErrSweepRunning` (`serve`
+  tries again at the next round, `sweep` says so and exits 1). A crash
+  releases the lock with the connection; an unlock that fails closes it.
+  Without this, two passes that both marked a hash could interleave so
+  that the second removes a fresh copy that a writer stored and named after
+  the first pass finished (`TestConcurrentQueuePassesKeepACommittedFile`).
 - **The queue pass** (every minute in `serve`, after the row pass; up to
-  1 000 rows a run), per hash: (1) one transaction without I/O: the
-  exclusive blob lock, then `UPDATE blob_removals SET removed_at = now`
-  for a due (or already marked) row that no document names
-  (`MarkBlobRemoval`); a hash a document names loses its row instead (a
-  later purge queues it again). The exclusive lock waits for every writer
-  that holds the shared one, and under READ COMMITTED the `UPDATE` takes
-  its snapshot after the wait, so it sees every reference such a writer
-  committed. (2) `blobstore.Remove`, with no lock held; idempotent. (3)
-  `DELETE` the marked row. A failed `Remove` is logged and the pass goes on;
-  the row stays marked for the next pass.
+  1 000 rows a run), per hash: (1) one transaction without I/O, at READ
+  COMMITTED whatever the database's default: the exclusive blob lock, then
+  `UPDATE blob_removals SET removed_at = now` for a due unmarked row that
+  no document names (`MarkBlobRemoval`); a hash a document names loses its
+  row instead (a later purge queues it again). The exclusive lock waits for
+  every writer that holds the shared one, and under READ COMMITTED the
+  `UPDATE` takes its snapshot after the wait, so it sees every reference
+  such a writer committed (under REPEATABLE READ the snapshot would be the
+  lock statement's, from before the wait: `TestMarkBlobRemovalReadCommitted`).
+  A row marked by another pass is taken over only once the mark is
+  `store.MarkStale` (5 minutes) old, so a pass never acts on a live mark
+  even without the sweep lock. (2) `blobstore.Remove`, with no lock held;
+  idempotent. (3) `DELETE` the row this pass marked (`removed_at` equal to
+  its mark). A failed `Remove` is logged at error level and the row is
+  unmarked and due again after the grace (`RequeueBlobRemoval`), so uploads
+  of that file are not refused while the disk misbehaves; the pass goes on
+  with the next hash.
 - **Every order is safe.** A writer that commits before step 1 makes the
   sweeper see its reference. A writer holding its shared lock makes step 1
   wait, then see it. A writer arriving while step 1 holds the lock waits,
@@ -766,9 +783,10 @@ and thumbnail minutes before `CompleteJob`.
   `TestBlobRemovalRaces` run these orders for both writers, plus the
   upload API (`TestUploadPutSweepInsert`, `TestUploadWhileTheFileIsMarked`)
   and the worker (`TestWorkerArchiveRemovedBeforeCompletion`).
-- **Crash safety.** A crash after step 1 leaves the row marked: the next
-  pass takes it again (writers of the hash fail meanwhile, for at most a
-  minute), rechecks, removes and deletes it. A crash after step 2 leaves a
+- **Crash safety.** A crash after step 1 leaves the row marked: a pass
+  takes it over once the mark is `MarkStale` old (writers of the hash fail
+  and retry meanwhile, for about 5 minutes), rechecks, removes and deletes
+  it. A crash after step 2 leaves a
   marked row whose file is gone: `Remove` is fine with that. A writer whose
   `Put` re-created the file between step 2 and 3 fails once at the mark;
   its retry finds the file.
