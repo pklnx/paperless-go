@@ -87,7 +87,7 @@ add more users on the
 when needed and hides Docker Compose's progress output. Every `./pgo`
 command also works as `docker compose run --rm paperless-go …`, except that
 only `./pgo migrate` makes the data directory writable for the container and
-`./pgo backup` exists only in the wrapper.
+`./pgo backup` and `./pgo restore` exist only in the wrapper.
 :::
 
 ::: details From source instead
