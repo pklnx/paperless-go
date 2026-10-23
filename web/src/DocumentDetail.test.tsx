@@ -716,6 +716,22 @@ describe("notes in Markdown (#12)", () => {
     expect(within(rendered()).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["•eins", "•zwei"]);
   });
 
+  it("links bare URLs and e-mail addresses and shows entities as characters (#131)", async () => {
+    const notes = "Portal: https://portal.example/login, Fragen an müller@example.com\n`https://code.example` &amp; M&uuml;ller\n&#106;avascript:alert(1) javascript:alert(1)";
+    serve(doc("d1", "A", { notes }));
+    await openAt("/?doc=d1");
+    const links = within(rendered()).getAllByRole("link");
+    expect(links.map((a) => [a.getAttribute("href"), a.textContent, a.getAttribute("target"), a.getAttribute("rel")])).toEqual([
+      ["https://portal.example/login", "https://portal.example/login", "_blank", "noopener noreferrer"],
+      ["mailto:m%C3%BCller@example.com", "müller@example.com", "_blank", "noopener noreferrer"],
+    ]);
+    expect(rendered().querySelector("code")?.textContent).toBe("https://code.example");
+    expect(rendered().textContent).toBe("Portal: https://portal.example/login, Fragen an müller@example.com\nhttps://code.example & Müller\njavascript:alert(1) javascript:alert(1)");
+    // Edit shows the text as written.
+    fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
+    expect(notesArea()!.value).toBe(notes);
+  });
+
   it("opens a note nested thousands deep, and Edit opens it as text", async () => {
     const notes = "*a ".repeat(20_000) + "b*".repeat(20_000);
     serve(doc("d1", "A", { notes }));
