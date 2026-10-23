@@ -159,6 +159,8 @@ describe("metadata page", () => {
     fireEvent.click(page().getByRole("button", { name: t.deleteEntry("Steuer") }));
     let s = within(screen.getByRole("dialog", { name: t.deleteTitle("Steuer") }));
     expect(s.getByText(t.deleteTagText(4))).toBeTruthy();
+    // The count is of live documents; trashed ones lose the tag too (#12).
+    expect(s.getByText(t.deleteAlsoTrash)).toBeTruthy();
     expect(s.getByText(t.deleteTagChildren)).toBeTruthy();
     fireEvent.click(s.getByRole("button", { name: t.cancel }));
     expect(changes()).toEqual([]);

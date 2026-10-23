@@ -11,6 +11,7 @@ menu button on phones) chooses what the list shows.
 | All documents | Every document. Choosing it also clears the search. |
 | Inbox | Documents still in the inbox: new documents arrive here. |
 | Favorites | Documents marked as favourite. |
+| Trash | Deleted documents, until they are removed for good (see [Trash](#trash)). |
 | A tag | Documents with the tag or one of its sub-tags. |
 | A correspondent, a document type | Documents with it. |
 
@@ -117,6 +118,7 @@ Once documents are checked, a bar at the bottom changes them together:
 | Correspondent…, Type… | Sets one, or removes it from the documents. |
 | Remove from inbox, Move to inbox | Takes the documents out of the inbox, or puts them back. |
 | Favorite, Unfavorite | Marks them as favourites, or unmarks them. |
+| Delete… | Moves them to the trash, after asking with their number. |
 
 A change is all or nothing: either every checked document changes or none
 does. Afterwards the list and the counts load again, and the documents
@@ -138,13 +140,62 @@ a correspondent or a type needs documents of a single user. The bar says
 so before anything is sent: "Tags…" explains the rule, and
 "Correspondent…" and "Type…" offer only removing.
 
-The web UI cannot delete documents yet; it gets the trash with #12. The
-API already moves a document to the trash (`DELETE
-/api/documents/{id}`), where it stays for 30 days
-(`PAPERLESS_GO_TRASH_RETENTION`) before it is removed for good: the trash
-is `GET /api/documents?trashed=true`, and a document comes back with
-`POST /api/documents/{id}/restore`. A document in the trash is in no list,
-search or count, but its archive serial number stays taken.
+## Trash
+
+**Delete** in a row, in a document's form or in the bar of checked
+documents moves documents to the trash. Deleting one document asks
+nothing: a notice "… moved to the trash" offers **Undo** for 8 seconds,
+also when another page is opened meanwhile; the keyboard focus moves to it,
+and its time stands still while it has the focus or the pointer.
+Deleting checked documents, or every match of a search, asks first with
+their number.
+
+A document in the trash is in no list, search or count, and it cannot be
+changed. It stays there for 30 days (the admin can change that with
+`PAPERLESS_GO_TRASH_RETENTION`) and is then removed for good, files
+included. Its archive serial number stays taken meanwhile; the message
+of a taken number then says the other document is in the trash.
+
+**Trash** in the sidebar, below Favorites, lists the trash with its
+number, newest deleted first; each row says when the document was deleted
+and when it will be removed. The search field searches the trash with the
+same syntax as everywhere; the sidebar's other entries leave the trash.
+The upload panel is not shown there (a file dropped on the window opens
+the documents again).
+
+- **Restore** brings a document back as it was: its tags, correspondent,
+  type, archive serial number, inbox and favourite.
+- **Delete permanently** removes a document and its files for good. It
+  always asks first, and it cannot be undone.
+- **Empty trash** (shown while your own trash holds documents) counts your trash, asks "Remove N documents
+  permanently?" and then removes exactly those. If the trash changed in
+  between, nothing is removed and it counts and asks again. At most 5 000
+  documents go at once; for a larger trash, search it to narrow it down,
+  select all matches and delete them permanently.
+- Checked documents of the trash can be restored or deleted permanently
+  together; deleting permanently asks with the number.
+
+Opened from the trash, a document shows "In the trash since …" with
+Restore and Delete permanently; its form is read-only until it is
+restored. Previous and next walk the trash. If the document was moved to
+the trash elsewhere while you edited it, saving is refused, your changes
+stay in the form, and after Restore you can save them.
+
+Uploading a file that is already there as a document in the trash says
+"already there, in the trash" with a **Restore** button; nothing is
+restored by itself. (The consume folder, `./pgo import` and upload-only API
+keys, where nobody sees that button, restore the document by themselves.)
+While such a document is being removed for good, the upload is refused
+for about a minute; the row says when to try again and offers "Try again".
+
+An admin's "Empty trash" (with "Everyone's documents" on: "Empty my
+trash") removes only the admin's own trash. Other users' trashed documents
+are removed one by one or by checking them; the confirmation names their
+owners. Deleting every match of a search permanently works only on the
+admin's own trash, with "Everyone's documents" off.
+
+Deleting a tag, correspondent or type counts only documents outside the
+trash; documents in the trash lose it too.
 
 ## Tags, correspondents and types
 
@@ -158,7 +209,8 @@ the list filtered by it.
   sub-tags.
 - On a larger screen a tag can also be dragged onto another tag to move it
   there, or onto the field above the tree to make it a top-level tag.
-- **Delete** asks first and says how many documents are affected. The
+- **Delete** asks first and says how many documents are affected (not
+  counting the trash, whose documents lose it too). The
   documents stay; they only lose the tag, correspondent or type. A deleted
   tag's sub-tags become top-level tags. If one of them has the name of an
   existing top-level tag, the delete is refused and names it: rename one

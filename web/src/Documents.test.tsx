@@ -88,6 +88,58 @@ describe("DocumentsUpload", () => {
   });
 });
 
+describe("a duplicate in the trash and a later retry (#12)", () => {
+  it("offers Restore for a duplicate whose document is in the trash", async () => {
+    const calls: { url: string; method: string }[] = [];
+    let status = 200;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method ?? "GET" });
+      return new Response(JSON.stringify(status === 200 ? doc("9", "Old") : { error: "not found" }), { status, headers: { "Content-Type": "application/json" } });
+    });
+    const queue = new UploadQueue();
+    const onRestored = vi.fn();
+    render(<DocumentsUpload queue={queue} maxSize={1000} onRestored={onRestored} />);
+    fireEvent.change(screen.getByTestId("file-picker"), { target: { files: [file("a.pdf"), file("b.pdf")] } });
+    await act(async () => FakeXHR.all[0]!.respond(200, { duplicate: true, existing: { id: "9", title: "Old" }, trashed: true }));
+    await act(async () => FakeXHR.all[1]!.respond(200, { duplicate: true, existing: { id: "8", title: "Other" }, trashed: true }));
+    expect(within(rows()[0]!).getByRole("status").textContent).toBe(t.uploadInTrashOf("Old"));
+
+    fireEvent.click(screen.getByRole("button", { name: t.uploadRestoreLabel("a.pdf") }));
+    await vi.waitFor(() => expect(within(rows()[0]!).getByRole("status").textContent).toBe(t.uploadRestored));
+    expect(calls).toEqual([{ url: "/api/documents/9/restore", method: "POST" }]);
+    expect(onRestored).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: t.uploadRestoreLabel("a.pdf") })).toBeNull();
+
+    // Gone from the trash meanwhile: the row says so and stays as it was.
+    status = 404;
+    fireEvent.click(screen.getByRole("button", { name: t.uploadRestoreLabel("b.pdf") }));
+    expect((await within(rows()[1]!).findByRole("alert")).textContent).toBe(t.notInTrashAnyMore);
+    expect(within(rows()[1]!).getByRole("status").textContent).toBe(t.uploadInTrashOf("Other"));
+    expect(onRestored).toHaveBeenCalledOnce();
+  });
+
+  it("offers no Restore for a plain duplicate", async () => {
+    renderHome();
+    fireEvent.change(screen.getByTestId("file-picker"), { target: { files: [file("a.pdf")] } });
+    await act(async () => FakeXHR.all[0]!.respond(200, { duplicate: true, existing: { id: "9", title: "Old" } }));
+    expect(screen.queryByRole("button", { name: t.uploadRestoreLabel("a.pdf") })).toBeNull();
+  });
+
+  it("says when to try again after a 503 with Retry-After, and sends the file again on request", async () => {
+    renderHome();
+    const f = file("a.pdf");
+    fireEvent.change(screen.getByTestId("file-picker"), { target: { files: [f] } });
+    await act(async () => FakeXHR.all[0]!.respond(503, { error: "being removed" }, { "Retry-After": "60" }));
+    expect(within(rows()[0]!).getByRole("status").textContent).toBe(t.uploadRetryAfter(60));
+    fireEvent.click(screen.getByRole("button", { name: t.retryUpload("a.pdf") }));
+    expect(FakeXHR.all).toHaveLength(2);
+    expect(FakeXHR.all[1]!.body).toBe(f);
+    await act(async () => FakeXHR.all[1]!.respond(201, doc("1", "a")));
+    expect(within(rows()[0]!).getByRole("status").textContent).toBe(t.uploadImported);
+    expect(screen.queryByRole("button", { name: t.retryUpload("a.pdf") })).toBeNull();
+  });
+});
+
 describe("WindowDrop", () => {
   it("takes files dropped anywhere and shows where they go while dragging", () => {
     const onFiles = vi.fn();
