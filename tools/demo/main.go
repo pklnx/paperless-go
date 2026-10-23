@@ -189,8 +189,11 @@ func run(dbURL, listen string, log *slog.Logger) error {
 	srv := web.New(st, log, web.Options{
 		Sealer: sealer, SecretKey: key, PublicURL: publicURL, Blobs: blobs, SweepWake: wakeSweeper,
 	})
-	fmt.Printf("demo UI on %s, log in as %q with password %q and a TOTP code for secret %s (Ctrl-C to stop and delete the demo data)\n",
-		publicURL, demoAdmin.name, demoAdmin.password, demoAdmin.totp)
+	// The password and the TOTP secret are not printed: they are public,
+	// but a password does not go into output (CodeQL). They are in the
+	// users above and in web/e2e/demo.ts.
+	fmt.Printf("demo UI on %s, log in as %q: password and TOTP secret in tools/demo/main.go (Ctrl-C to stop and delete the demo data)\n",
+		publicURL, demoAdmin.name)
 	err = srv.ListenAndServe(runCtx, listen)
 	cancel()
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {

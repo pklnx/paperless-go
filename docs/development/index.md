@@ -99,8 +99,8 @@ port 18280 (`E2E_PORT` sets another one, so that two runs do not collide)
 and stops it at the end. Install the browser once with
 `pnpm exec playwright install --only-shell chromium`, or point
 `CHROMIUM_PATH` at a Chromium of your own. `go run ./tools/demo -db …` also
-runs the demo by itself, for trying the UI; it prints the URL and the
-`demo` login.
+runs the demo by itself, for trying the UI; it prints the URL and the user
+name `demo`, whose password and TOTP secret are in `tools/demo/main.go`.
 
 - **Guards.** Every test fails on an uncaught page error, a console error, a
   Content Security Policy violation and a request to any other host (which

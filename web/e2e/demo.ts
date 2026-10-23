@@ -1,7 +1,7 @@
 // The demo server the end-to-end tests run against (tools/demo), its
 // made-up logins and seed documents. The values match tools/demo/main.go
 // and tools/demo/seed.go.
-import { createHmac } from "node:crypto";
+import { createHmac, randomInt } from "node:crypto";
 
 /** The demo's port: E2E_PORT, so that two local runs do not collide. */
 export const port = Number(process.env.E2E_PORT || 18280);
@@ -69,12 +69,12 @@ export function totp(secret: string, step: number): string {
 
 /** A name no earlier run has used, for things a test creates. */
 export function unique(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
+  return `${prefix}-${Date.now().toString(36)}${randomInt(1296).toString(36)}`;
 }
 
 /** A word of letters only that no earlier run has used: a search finds it as one word. */
 export function uniqueWord(prefix: string): string {
-  const digits = `${Date.now().toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`;
+  const digits = `${Date.now().toString(36)}${randomInt(46656).toString(36)}`;
   // Digits become letters, so the word stays one token for the search.
   return prefix + [...digits].map((c) => (/[0-9]/.test(c) ? "abcdefghij"[Number(c)] : c)).join("");
 }
