@@ -58,7 +58,7 @@ describe("LogPage", () => {
     stubServer({ "": { entries: entries.slice(0, 2), nextCursor: "c1" }, c1: { entries: entries.slice(2) } });
     render(<LogPage admin />);
     expect(await screen.findByText(t.auditAction("user.lock"))).toBeTruthy();
-    expect(screen.getByText(new RegExp(t.logCLIBy("patrick").replace(/[()]/g, "\\$&")))).toBeTruthy();
+    expect(screen.getByText(`· ${t.logCLIBy("patrick")}`)).toBeTruthy();
     expect(screen.getByText(/bob/, { selector: "span" })).toBeTruthy();
     expect(screen.getByText(`${t.logTriedName("nobody")}, ${t.auditCode("password")}, ${t.auditCode("unknown_user")}`)).toBeTruthy();
     expect(screen.getByText(t.logWho)).toBeTruthy();
