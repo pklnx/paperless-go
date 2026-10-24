@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { seed, unique } from "./demo";
 import { expect, test } from "./fixtures";
-import { chosenNames, closeDocument, detail, detailForm, discardChanges, discardQuestion, documentLink, field, formError, keepEditing, logOut, notice, openSavedViewMenu, pdfPage, pick, pickTag, rowTags, saveDocument, search, sheet } from "./ui";
+import { chosen, chosenNames, closeDocument, detail, detailForm, discardChanges, discardQuestion, documentLink, field, formError, keepEditing, logOut, notice, openSavedViewMenu, pdfPage, pick, pickTag, rowTags, saveDocument, search, sheet } from "./ui";
 
 /** The open document's ID, from the URL. */
 const openID = (page: Page) => new URL(page.url()).searchParams.get("doc") ?? "";
@@ -251,13 +251,35 @@ test("a change made elsewhere meanwhile: the save is refused and the user's edit
 
 test("a nested tag is picked by typing its own name, and the row shows it", async ({ page }) => {
   // Bills is a sub-tag of Finance: the picker lists it as "Finance / Bills" and finds it by "Bills".
-  await page.goto("/");
-  await documentLink(page, seed.lease.title).click();
-  await expect(detail(page, seed.lease.title)).toBeVisible();
-  await expect(chosenNames(page)).toHaveText(["Home"]);
-  await pickTag(page, "Bills", "Finance / Bills");
-  await expect(chosenNames(page)).toHaveText(["Home", "Bills"]);
-  await saveDocument(page);
-  await closeDocument(page);
-  await expect(rowTags(page, seed.lease.title).getByRole("listitem")).toHaveText(["Home", "Bills"]);
+  // The lease is seed data other specs count on: the tag is taken off again at the end, whatever happened.
+  const { title } = seed.lease;
+  const removeBills = async () => {
+    await page.goto("/");
+    await documentLink(page, title).click();
+    await expect(detail(page, title)).toBeVisible();
+    const bills = chosenNames(page).filter({ hasText: /^Bills$/ });
+    if ((await bills.count()) === 0) return;
+    await chosen(page).getByRole("button", { name: "Remove Bills", exact: true }).click();
+    await expect(chosenNames(page)).toHaveText(["Home"]);
+    await saveDocument(page);
+    await closeDocument(page);
+  };
+  try {
+    await page.goto("/");
+    await documentLink(page, title).click();
+    await expect(detail(page, title)).toBeVisible();
+    await expect(chosenNames(page)).toHaveText(["Home"]);
+    await pickTag(page, "Bills", "Finance / Bills");
+    // The chips in the order chosen.
+    await expect(chosenNames(page)).toHaveText(["Home", "Bills"]);
+    await saveDocument(page);
+    await closeDocument(page);
+    // The row shows both; the server lists a document's tags by their id, so their order is not the chips'.
+    const tags = rowTags(page, title).getByRole("listitem");
+    await expect(tags).toHaveCount(2);
+    expect((await tags.allTextContents()).sort()).toEqual(["Bills", "Home"]);
+  } finally {
+    await removeBills();
+    await expect(rowTags(page, title).getByRole("listitem")).toHaveText(["Home"]);
+  }
 });
