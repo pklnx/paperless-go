@@ -1,28 +1,36 @@
+import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render } from "@testing-library/react";
 import markDark from "./brand/paperless-go-mark-dark.svg";
 import markLight from "./brand/paperless-go-mark-light.svg";
 import { ProductMark } from "./ProductMark";
+import { setTheme } from "./theme";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+  document.documentElement.className = "";
+});
 
 describe("ProductMark", () => {
-  it("renders a decorative light and dark mark, switched by the dark variant", () => {
-    const { container } = render(<ProductMark className="size-7" />);
-    const imgs = [...container.querySelectorAll("img")];
-    expect(imgs).toHaveLength(2);
-    for (const img of imgs) {
-      expect(img.getAttribute("alt")).toBe("");
-      expect(img.classList).toContain("size-7");
-    }
-    const [light, dark] = imgs as [HTMLImageElement, HTMLImageElement];
-    expect(light.classList).toContain("app-mark--light");
-    expect(light.classList).toContain("dark:hidden");
-    expect(light.getAttribute("src")).toBe(markLight);
-    expect(dark.classList).toContain("app-mark--dark");
-    expect(dark.classList).toContain("hidden");
-    expect(dark.classList).toContain("dark:block");
-    expect(dark.getAttribute("src")).toBe(markDark);
-    expect(markLight).not.toBe(markDark);
+  it("shows the mark for the applied theme and follows a theme change", () => {
+    const { container } = render(<ProductMark className="extra" size={40} />);
+    const img = () => container.querySelector("img")!;
+    // No stored choice and a light system (testSetup.ts): the light mark.
+    expect(img().getAttribute("src")).toBe(markLight);
+    expect(img().getAttribute("alt")).toBe("");
+    expect(img().className).toBe("app-mark app-mark--light extra");
+    expect(img().getAttribute("width")).toBe("40");
+
+    act(() => setTheme("dark"));
+    expect(img().getAttribute("src")).toBe(markDark);
+    expect(img().className).toBe("app-mark app-mark--dark extra");
+
+    act(() => setTheme("light"));
+    expect(img().getAttribute("src")).toBe(markLight);
+    expect(img().className).toBe("app-mark app-mark--light extra");
+  });
+
+  it("uses two different files for the two themes", () => {
+    expect(markDark).not.toBe(markLight);
   });
 });

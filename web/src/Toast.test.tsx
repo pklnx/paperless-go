@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { Toast, noticeDuration, noticeTimer, useNotice, type Notify } from "./Toast";
 
 afterEach(() => {
@@ -59,5 +59,70 @@ describe("Toast", () => {
     act(() => show({ text: "restored" }));
     expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
     expect(active()).toEqual([noticeDuration]);
+  });
+
+  /** The shell's notice with its hook, as App.tsx mounts it; returns show and the timers. */
+  function mount() {
+    const active = timers();
+    let show!: Notify;
+    function Harness() {
+      const n = useNotice();
+      show = n.show;
+      return (
+        <>
+          <button type="button">Delete</button>
+          <Toast notice={n.notice} close={n.close} pause={n.pause} resume={n.resume} />
+        </>
+      );
+    }
+    render(<Harness />);
+    return { active, show: (n: Parameters<Notify>[0]) => act(() => show(n)) };
+  }
+
+  // Carbon's defaults (role alertdialog with hasFocus) would move the focus
+  // into a notice with an action and never let it expire; Escape would
+  // close it; two hidden "Focus sentinel" tab stops would sit in the live
+  // region. Each test fails with those defaults.
+  it("leaves the focus where it was for a pointer action with Undo, and expires", () => {
+    const { active, show } = mount();
+    const row = screen.getByRole("button", { name: "Delete" });
+    // Delete clicked with the pointer: the focus stays on the row's button.
+    fireEvent.pointerDown(row);
+    act(() => row.focus());
+    show({ text: "moved to the trash", action: { label: "Undo", run: () => {} } });
+    expect(screen.getByRole("button", { name: "Undo" })).toBeTruthy();
+    expect(document.activeElement).toBe(row);
+    // Its 8 s run, and the notice is gone when they are over.
+    expect(active()).toEqual([noticeDuration]);
+    act(() => vi.mocked(noticeTimer.set).mock.calls.at(-1)![0]());
+    expect(screen.queryByTestId("notice")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+  });
+
+  it("focuses Undo for a keyboard user, and Escape does not close the notice", () => {
+    const { active, show } = mount();
+    const row = screen.getByRole("button", { name: "Delete" });
+    fireEvent.keyDown(row, { key: "Enter" });
+    act(() => row.focus());
+    show({ text: "moved to the trash", action: { label: "Undo", run: () => {} }, focus: true });
+    const undo = screen.getByRole("button", { name: "Undo" });
+    expect(document.activeElement).toBe(undo);
+    expect(active()).toEqual([]);
+    fireEvent.keyDown(undo, { key: "Escape" });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.getByRole("button", { name: "Undo" })).toBe(undo);
+    expect(screen.getByTestId("notice").textContent).toContain("moved to the trash");
+  });
+
+  it("renders no focus sentinels and announces through the app's live regions only", () => {
+    const { show } = mount();
+    show({ text: "restored", action: { label: "Undo", run: () => {} } });
+    expect(screen.queryByText("Focus sentinel")).toBeNull();
+    expect(document.body.innerHTML).not.toContain("Focus sentinel");
+    expect(screen.getByTestId("notice").querySelector('[role="alertdialog"], [role="status"], [role="alert"]')).toBeNull();
+    expect(screen.getByTestId("notice-polite").textContent).toContain("restored");
+    show({ text: "failed", error: true });
+    expect(screen.getByTestId("notice-assertive").textContent).toContain("failed");
+    expect(screen.getByTestId("notice-polite").textContent).toBe("");
   });
 });

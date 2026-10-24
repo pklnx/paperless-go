@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { carbonStyles } from "./build/stripRemoteFonts.ts";
 
 // pdf.js (the PDF viewer of the document detail) needs data files at run
 // time: the character maps (cmaps), the 14 standard fonts, and the
@@ -51,7 +52,9 @@ function pdfjsAssets(): Plugin {
 
 // The build is embedded into the Go binary (internal/web/ui).
 export default defineConfig({
-  plugins: [react(), tailwindcss(), pdfjsAssets()],
+  // carbonStyles writes src/vendor/carbon.css (Carbon without its CDN fonts)
+  // before Vite inlines it into index.css.
+  plugins: [carbonStyles(), react(), tailwindcss(), pdfjsAssets()],
   define: {
     __PDFJS_ASSETS__: JSON.stringify(`/${pdfjsBase}`),
   },
@@ -66,8 +69,9 @@ export default defineConfig({
   },
   test: {
     // The unit tests only: web/e2e/*.spec.ts are Playwright's (pnpm e2e).
-    // scripts/ holds the test of the build's eval guard (noEval.test.ts).
-    include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.ts"],
+    // scripts/ holds the tests of the build checks (check-dist, the
+    // telemetry block), build/ the test of the Carbon font strip.
+    include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.ts", "build/**/*.test.ts"],
     environment: "jsdom",
     testTimeout: 5_000,
     setupFiles: ["src/testSetup.ts"],

@@ -5,7 +5,6 @@ import type { Health } from "./health";
 import { Chevron, InboxIcon, StarIcon, DocumentIcon, TrashIcon } from "./icons";
 import { t } from "./i18n";
 import { buildTagTree, containsTag, type CollapsedTags, type TagNode } from "./tagTree";
-import { ThemeToggle } from "./ThemeToggle";
 import { activeFilter, type Filter, type ViewState } from "./urlState";
 
 const docsURL = "https://pklnx.github.io/paperless-go/";
@@ -113,7 +112,8 @@ export function Sidebar({ state, select, show, user, logout, counts, metadata, c
   const statusColor = { checking: "bg-line-control", ok: "bg-ok", down: "bg-danger" }[health];
 
   return (
-    <nav aria-label={t.navigation} className="flex min-h-full flex-col gap-3 p-3">
+    // A .legacy root (index.css) until part 2 of #150 rewrites the navigation.
+    <nav aria-label={t.navigation} className="legacy flex min-h-full flex-col gap-3 p-3">
       <div className="flex flex-col gap-0.5">
         {entry(null, t.allDocuments, <DocumentIcon />, counts?.total)}
         {entry({ kind: "inbox" }, t.inbox, <InboxIcon />, counts?.inbox)}
@@ -157,12 +157,9 @@ export function Sidebar({ state, select, show, user, logout, counts, metadata, c
           >
             {user.name}
           </button>
-          <span className="flex items-center gap-1">
-            <ThemeToggle />
-            <button type="button" className="shrink-0 text-accent-ink hover:underline pointer-coarse:min-h-11" onClick={logout}>
-              {t.logOut}
-            </button>
-          </span>
+          <button type="button" className="shrink-0 text-accent-ink hover:underline pointer-coarse:min-h-11" onClick={logout}>
+            {t.logOut}
+          </button>
         </div>
         <p className="flex items-center gap-2 px-2 text-xs text-ink-muted">
           <span aria-hidden className={`size-2 shrink-0 rounded-full ${statusColor}`} />

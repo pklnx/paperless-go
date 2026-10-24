@@ -87,7 +87,7 @@ export function MetadataPage({ metadata, userId, onChanged, open }: Props) {
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
+    <div className="legacy mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
       <h2 className="text-lg font-semibold">{t.manageMetadata}</h2>
       <div role="tablist" aria-label={t.manageMetadata} className="flex gap-1 border-b border-line">
         {tabs.map(([k, label]) => (

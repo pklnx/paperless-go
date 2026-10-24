@@ -1,12 +1,36 @@
-@import "tailwindcss";
+/* Layer order (#150): Carbon sits below Tailwind's utilities, so the pages
+   not converted yet keep their spacing; converted pages use no utilities.
+   Unlayered rules would beat every layer, so every rule is in one; fonts.css
+   holds only @font-face.
+   - theme: Tailwind's tokens (custom properties only)
+   - legacy: today's global rules for the unconverted markup; Carbon wins
+   - carbon: @carbon/styles, precompiled, with its CDN fonts removed, then
+     the pklnx design system theme: same selectors and specificity as
+     Carbon's theme rules, later in the layer, so its tokens win
+   - base: a reset for the unconverted markup (.legacy), since Tailwind's
+     preflight is not loaded
+   - utilities: Tailwind's utilities
+   - app: layout.css, page layout for the converted pages
+   Part 6 of #150 removes Tailwind with the theme, legacy and base layers. */
+@layer theme, legacy, carbon, base, components, utilities, app;
+@import "tailwindcss/theme.css" layer(theme);
+@import "./fonts.css";
+/* Written by build/stripRemoteFonts.ts when Vite starts (not committed). */
+@import "./vendor/carbon.css" layer(carbon);
+@import "@pklnx/design-system/theme/pklnx-carbon.css" layer(carbon);
+@import "tailwindcss/utilities.css" layer(utilities);
+@import "./layout.css" layer(app);
 
 /* Dark mode is class-based (html.dark): it follows the system until the user
-   picks a theme with the toggle (see theme.ts). */
+   picks a theme with the toggle (see theme.ts). The class stays next to
+   Carbon's cds--g100 for the unconverted views until part 6 of #150. */
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* Semantic colors (the design system's tokens): components use bg-surface-sunken,
    text-ink-muted, border-line … and the .dark block below switches all of them,
-   so no component needs its own dark: color variant. */
+   so no component needs its own dark: color variant. Custom properties only,
+   so they are no layer's business. The dark --color-bg matches Carbon's g100
+   background, so unconverted views show no seam against it. */
 @theme {
   --color-bg: #ffffff; /* page, list, reading pane */
   --color-surface-sunken: var(--color-zinc-50); /* sidebar */
@@ -41,7 +65,7 @@
 }
 
 .dark {
-  --color-bg: var(--color-zinc-950);
+  --color-bg: #161616;
   --color-surface-sunken: var(--color-zinc-900);
   --color-surface-hover: var(--color-zinc-800);
   --color-surface-raised: var(--color-zinc-900);
@@ -67,80 +91,55 @@
   --color-scrim: rgb(0 0 0 / 0.55);
 }
 
-html,
-body,
-#root {
-  height: 100%;
-}
-
-/* The page reaches under notch and home indicator (viewport-fit=cover in
-   index.html); the app keeps its content clear of them. 0 elsewhere. */
-#root {
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
-}
-
-body {
-  @apply bg-bg text-ink antialiased;
-}
-
-/* One focus ring for everything, keyboard only (inputs show it on any focus). */
-:focus-visible {
-  outline: 2px solid var(--color-focus);
-  outline-offset: 2px;
-}
-/* A heading that takes the focus when a view opens (the document detail) is no control. */
-h2[tabindex="-1"]:focus-visible {
-  outline: none;
-}
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
-  outline-offset: 0;
-}
-
-/* Safari ignores padding and height on native selects (22px next to 34px
-   fields), so selects drop the native look and draw their own arrow; then the
-   field classes size them like text inputs in every browser. Unlayered, so the
-   room for the arrow wins over the px-* utilities. */
-select:not([multiple], [size]) {
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2371717b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
-  background-position: right 0.5rem center;
-  background-repeat: no-repeat;
-  background-size: 1rem;
-  padding-right: 2rem;
-}
-
-/* Below 16px iOS Safari zooms into the page when a field gets focus. Unlayered,
-   so it wins over the text-sm/text-xs utilities of the fields. */
-@media (max-width: 767px) {
-  input:not([type="checkbox"], [type="radio"]),
-  select,
-  textarea {
-    font-size: 16px;
+/* Today's global rules, for the markup not converted yet. Carbon's own
+   body colors, focus styles and motion win over them. */
+@layer legacy {
+  body {
+    @apply bg-bg text-ink antialiased;
   }
-}
 
-/* Motion: colors ease on hover and press; sheets slide up on phones and
-   fade in on larger screens. Nothing moves with reduced motion. */
-@layer base {
-  button,
-  a,
-  [role="tab"] {
+  /* One focus ring for everything, keyboard only (inputs show it on any focus). */
+  :focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+  /* A heading that takes the focus when a view opens (the document detail) is no control. */
+  h2[tabindex="-1"]:focus-visible {
+    outline: none;
+  }
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline-offset: 0;
+  }
+
+  /* Motion: colors ease on hover and press; sheets slide up on phones and
+     fade in on larger screens. */
+  .legacy :where(button, a, [role="tab"]) {
     transition-property: color, background-color, border-color, opacity;
     transition-duration: 150ms;
     transition-timing-function: ease-out;
   }
-}
-dialog.sheet[open] {
-  animation: sheet-up 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-dialog.sheet[open]::backdrop {
-  animation: fade-in 200ms ease-out;
-}
-@media (min-width: 48rem) {
   dialog.sheet[open] {
-    animation-name: sheet-in;
+    animation: sheet-up 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  dialog.sheet[open]::backdrop {
+    animation: fade-in 200ms ease-out;
+  }
+  @media (min-width: 48rem) {
+    dialog.sheet[open] {
+      animation-name: sheet-in;
+    }
+  }
+  /* Nothing of the above moves with reduced motion. Carbon handles reduced
+     motion itself, and some of its components wait for their transitions. */
+  @media (prefers-reduced-motion: reduce) {
+    .legacy :where(button, a, [role="tab"]),
+    dialog.sheet[open],
+    dialog.sheet[open]::backdrop {
+      animation: none !important;
+      transition: none !important;
+    }
   }
 }
 @keyframes sheet-up {
@@ -159,73 +158,86 @@ dialog.sheet[open]::backdrop {
     opacity: 0;
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::backdrop {
-    animation: none !important;
-    transition: none !important;
+
+/* Safari ignores padding and height on native selects (22px next to 34px
+   fields), so the unconverted selects drop the native look and draw their
+   own arrow; then the field classes size them like text inputs in every
+   browser. In the app layer, so the room for the arrow wins over the px-*
+   utilities; never on Carbon's Select. */
+@layer app {
+  select:not([multiple], [size], .cds--select-input) {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2371717b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-position: right 0.5rem center;
+    background-repeat: no-repeat;
+    background-size: 1rem;
+    padding-right: 2rem;
   }
 }
 
-/* The PDF viewer's text layer (pdf.js TextLayer, after its pdf_viewer.css):
-   transparent text over the drawn page, for selecting and finding text.
-   The layer's element sets --total-scale-factor and the rounding steps. */
-.textLayer {
-  position: absolute;
-  inset: 0;
-  overflow: clip;
-  line-height: 1;
-  text-align: initial;
-  letter-spacing: normal;
-  word-spacing: normal;
-  text-size-adjust: none;
-  forced-color-adjust: none;
-  transform-origin: 0 0;
-  caret-color: CanvasText;
-  z-index: 0;
-  --min-font-size: 1;
-  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
-  --min-font-size-inv: calc(1 / var(--min-font-size));
-
-  :is(span, br) {
-    color: transparent;
-    position: absolute;
-    white-space: pre;
-    cursor: text;
-    transform-origin: 0% 0%;
-    user-select: text;
+/* Without Tailwind's preflight, the unconverted markup would get Carbon's
+   element styles (2.6rem headings, link colors, line-height 1) and the
+   browser's button look. This is the part of preflight that markup relies
+   on, only inside .legacy and never on a Carbon element. Each part of #150
+   removes .legacy from the views it converts. */
+@layer base {
+  .legacy {
+    line-height: 1.5;
+    font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
   }
-
-  > :not(.markedContent),
-  .markedContent span:not(.markedContent) {
-    z-index: 1;
-    --font-height: 0;
-    font-size: calc(var(--text-scale-factor) * var(--font-height));
-    --scale-x: 1;
-    --rotate: 0deg;
-    transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+  .legacy :where(*):not([class*="cds--"]),
+  .legacy :where(*):not([class*="cds--"])::before,
+  .legacy :where(*):not([class*="cds--"])::after,
+  .legacy :where(*)::backdrop {
+    box-sizing: border-box;
+    border: 0 solid;
+    margin: 0;
+    padding: 0;
   }
-
-  .markedContent {
-    display: contents;
+  .legacy :where(button, input, select, textarea, optgroup):not([class*="cds--"]) {
+    background-color: transparent;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    border-radius: 0;
   }
-
-  ::selection {
-    background: color-mix(in srgb, AccentColor, transparent 50%);
-    color: transparent;
+  .legacy :where(button, [role="button"]):not([class*="cds--"]) {
+    cursor: pointer;
   }
-
-  /* pdf.js appends this to end a selection cleanly. */
-  .endOfContent {
-    display: block;
-    position: absolute;
-    inset: 100% 0 0;
-    z-index: 0;
+  .legacy :where(:disabled):not([class*="cds--"]) {
     cursor: default;
-    user-select: none;
   }
-
-  &.selecting .endOfContent {
-    top: 0;
+  .legacy :where(input, textarea)::placeholder {
+    color: color-mix(in oklab, currentcolor 50%, transparent);
+  }
+  .legacy :where(h1, h2, h3, h4, h5, h6, p):not([class*="cds--"]) {
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+    letter-spacing: inherit;
+  }
+  .legacy :where(a):not([class*="cds--"]) {
+    color: inherit;
+    text-decoration: inherit;
+  }
+  .legacy :where(b, strong):not([class*="cds--"]) {
+    font-weight: bolder;
+  }
+  .legacy :where(code, kbd, samp, pre):not([class*="cds--"]) {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .legacy :where(img, svg, video, canvas, audio, iframe, embed, object):not([class*="cds--"]) {
+    display: block;
+    vertical-align: middle;
+  }
+  .legacy :where(img, video):not([class*="cds--"]) {
+    max-width: 100%;
+    height: auto;
+  }
+  .legacy :where(dialog):not([class*="cds--"]) {
+    color: inherit;
+  }
+  .legacy :where([hidden]:not([hidden="until-found"])) {
+    display: none !important;
   }
 }

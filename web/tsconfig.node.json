@@ -1,5 +1,5 @@
 {
-  // vite.config.ts and scripts/ run in Node: Node's types, and only there
+  // vite.config.ts, build/ and scripts/ run in Node: Node's types, and only there
   // (the UI's code in src/ is checked without them, as the browser has no
   // Node APIs).
   "compilerOptions": {
@@ -11,8 +11,11 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "isolatedModules": true,
+    // vite.config.ts imports build/stripRemoteFonts.ts with its extension (Vite's native config loader asks for it).
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["vite.config.ts", "scripts"]
+  "include": ["vite.config.ts", "build", "scripts"]
 }

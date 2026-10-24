@@ -1,6 +1,6 @@
 import { passwordChangeUser, plainUser, unique } from "./demo";
 import { expect, test } from "./fixtures";
-import { confirmDialog, formWithButton, logInThroughForm, navigation, themeToggle } from "./ui";
+import { confirmDialog, formWithButton, logInThroughForm, loginError, navigation, themeToggle } from "./ui";
 
 test.describe("as a user without a stored session", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
@@ -49,7 +49,7 @@ test.describe("as a user without a stored session", () => {
     await navigation(page).getByRole("button", { name: "Log out" }).click();
     await expect(page.getByLabel("User name")).toBeVisible();
     await logInThroughForm(page, passwordChangeUser.name, passwordChangeUser.password);
-    await expect(page.getByRole("alert")).toHaveText("Wrong user name or password.");
+    await expect(loginError(page)).toHaveText("Wrong user name or password.");
     await logInThroughForm(page, passwordChangeUser.name, next);
     // Logged in again, on the page the URL still names.
     await expect(page).toHaveURL(/[?&]view=profile/);

@@ -550,7 +550,8 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
         data-testid="document-detail"
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
-        className="fixed inset-x-0 top-3 bottom-0 z-20 flex flex-col overflow-hidden rounded-t-2xl bg-bg shadow-2xl md:top-0 md:left-64 md:rounded-none md:shadow-none"
+        // Below Carbon's fixed header (3rem plus the notch), a .legacy root (index.css) until part 4 of #150.
+        className="legacy fixed inset-x-0 top-[calc(3rem+env(safe-area-inset-top))] bottom-0 z-20 flex flex-col overflow-hidden rounded-t-2xl bg-bg shadow-2xl md:left-64 md:rounded-none md:shadow-none"
       >
         <header className="flex items-center gap-1 border-b border-line px-2 py-1.5">
           <button type="button" className={iconButton} aria-label={t.closeDocument} title={t.closeDocument} onClick={close}>

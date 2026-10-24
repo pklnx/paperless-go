@@ -1,7 +1,7 @@
 import { devices } from "@playwright/test";
 import { seed } from "./demo";
 import { expect, test } from "./fixtures";
-import { closeDocument, detail, documentLink, documentList, menuButton, navigation, openNavigation } from "./ui";
+import { closeDocument, collapseTag, detail, documentLink, documentList, expandTag, menuButton, navigation, openNavigation, sidebar, tagEntry } from "./ui";
 
 // A phone with a touch screen: no sidebar; the navigation is a sheet
 // behind the menu button, and a document opens over the whole screen.
@@ -28,6 +28,19 @@ test("the navigation opens from the menu, closes on Escape and filters the list"
   await expect(documentList(page, "Inbox")).toBeVisible();
 });
 
+test("collapsed sub-tags are hidden inside the navigation sheet too", async ({ page }) => {
+  await page.goto("/");
+  const dialog = await openNavigation(page);
+  const nav = dialog.getByRole("navigation", { name: "Navigation" });
+  await expect(tagEntry(nav, "Bills")).toBeVisible();
+  // The same Sidebar under the sheet's own .legacy root (index.css).
+  await collapseTag(nav, "Finance");
+  await expect(tagEntry(nav, "Bills")).toBeHidden();
+  await expect(tagEntry(nav, "Finance")).toBeVisible();
+  await expandTag(nav, "Finance");
+  await expect(tagEntry(nav, "Bills")).toBeVisible();
+});
+
 test("a document opens over the whole screen and Close returns to the list", async ({ page }) => {
   await page.goto("/");
   await documentLink(page, seed.incomeTax.title).click();
@@ -46,4 +59,24 @@ test("the upload button is reachable and the page does not scroll sideways", asy
   await expect(documentList(page)).toBeVisible();
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(0);
+});
+
+// Between Carbon's md (48rem) and lg (66rem), where the sidebar is
+// permanent: the header's menu button is hidden, so no width shows both.
+// Part 2 of #150 moves the shell to lg and replaces this block.
+test.describe("on a desktop of 1024px", () => {
+  const { defaultBrowserType: _d, ...desktop } = devices["Desktop Chrome"];
+  test.use({ ...desktop, viewport: { width: 1024, height: 768 } });
+
+  test("the sidebar is visible and the menu button is hidden", async ({ page }) => {
+    await page.goto("/");
+    await expect(documentList(page)).toBeVisible();
+    await expect(sidebar(page)).toBeVisible();
+    await expect(sidebar(page).getByRole("navigation", { name: "Navigation" })).toBeVisible();
+    await expect(menuButton(page)).toBeHidden();
+    // The header is there at every width, with the app name and Log out.
+    const header = page.getByRole("banner");
+    await expect(header.getByRole("link", { name: "paperless-go" })).toBeVisible();
+    await expect(header.getByRole("button", { name: "Log out" })).toBeVisible();
+  });
 });

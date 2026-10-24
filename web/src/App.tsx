@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type MouseEvent } from "react";
+import { Header, HeaderGlobalAction, HeaderGlobalBar, HeaderMenuButton, HeaderName } from "@carbon/react";
+import { Logout } from "@carbon/icons-react";
 import { documentsApi, metadataApi, savedViewsApi, type DocumentCounts, type Metadata, type SavedView, type User } from "./api";
 import { AuthGate } from "./Auth";
+import { isPlainClick } from "./clicks";
 import { DocumentList } from "./DocumentList";
 import { DocumentsUpload, WindowDrop, useQueue } from "./Documents";
 import { fetchHealth, type Health } from "./health";
 import { t } from "./i18n";
-import { MenuIcon, iconButton } from "./icons";
 import { LogPage } from "./LogPage";
 import { MetadataPage } from "./MetadataPage";
 import { ProductMark } from "./ProductMark";
@@ -13,6 +15,7 @@ import { ProfilePage } from "./Profile";
 import { SaveViewButton, SavedViewList } from "./SavedViews";
 import { Sheet } from "./Sheet";
 import { Sidebar, type Loaded } from "./Sidebar";
+import { ThemeToggle } from "./ThemeToggle";
 import { Toast, useNotice } from "./Toast";
 import { useCollapsedTags } from "./tagTree";
 import { UploadQueue } from "./uploads";
@@ -176,7 +179,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
   const view = state.view === "profile" || state.view === "log" || state.view === "metadata" || (state.view === "users" && user.admin) ? state.view : "";
 
   return (
-    <div className="flex h-full">
+    <div className="app-shell">
       <WindowDrop
         onFiles={(files) => {
           queue.add(files);
@@ -184,24 +187,43 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
           if (view !== "" || state.trash === "1") update({ view: "", doc: "", trash: "" });
         }}
       />
-      <aside className="hidden w-64 shrink-0 flex-col overflow-y-auto border-r border-line bg-surface-sunken md:flex" data-testid="sidebar">
-        <div className="flex items-center gap-2 px-5 pt-4">
-          <ProductMark className="size-7" />
-          <h1 className="text-base font-semibold">{t.appName}</h1>
-        </div>
-        {sidebar}
-      </aside>
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-2 border-b border-line px-2 py-1.5 md:hidden">
-          <button type="button" className={iconButton} aria-label={t.openMenu} title={t.openMenu} aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}>
-            <MenuIcon />
-          </button>
-          <ProductMark className="size-6" />
-          <span className="text-base font-semibold">{t.appName}</span>
-        </header>
-        <main className="flex-1 overflow-y-auto">
+      {/* Carbon's UI Shell header at every width (#150, part 1). */}
+      <Header aria-label={t.appName}>
+        {/* Opens today's navigation sheet below md; layout.css hides the
+            button from md, where the sidebar is permanent (part 2 moves the
+            whole shell to Carbon's lg). */}
+        <HeaderMenuButton aria-label={t.openMenu} aria-expanded={menuOpen} isActive={menuOpen} onClick={() => setMenuOpen((open) => !open)} />
+        <HeaderName
+          href="/"
+          prefix=""
+          onClick={(e: MouseEvent) => {
+            // All documents. A Ctrl/Cmd, Shift or Alt click is left to the
+            // browser, so it still opens "/" in a new tab or window.
+            if (!isPlainClick(e)) return;
+            e.preventDefault();
+            select(null);
+          }}
+        >
+          <ProductMark className="app-header__logo" />
+          {t.appName}
+        </HeaderName>
+        <HeaderGlobalBar>
+          <span className="app-header__user" aria-hidden>
+            {user.name}
+          </span>
+          <ThemeToggle header />
+          <HeaderGlobalAction aria-label={t.logOut} tooltipAlignment="end" onClick={leave}>
+            <Logout size={20} />
+          </HeaderGlobalAction>
+        </HeaderGlobalBar>
+      </Header>
+      <div className="app-shell__row">
+        <aside className="hidden w-64 shrink-0 flex-col overflow-y-auto border-r border-line bg-surface-sunken md:flex" data-testid="sidebar">
+          {sidebar}
+        </aside>
+        <main className="min-w-0 flex-1 overflow-y-auto">
           {view === "" && (
-            <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6">
+            <div className="legacy mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6">
               {state.trash !== "1" && <DocumentsUpload queue={queue} maxSize={maxSize} onRestored={onUploadRestored} />}
               <DocumentList
                 state={state}

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
 import { adminWithout2FA, generatedPasswordUser, lockedUser, timeStep, totp, twoFactorUser, type Login } from "./demo";
 import { expect, test } from "./fixtures";
-import { documentList, logInThroughForm, searchBox, twoFactorRequiredNotice } from "./ui";
+import { documentList, logInButton, logInThroughForm, logOut, loginError, passwordField, productMark, searchBox, twoFactorRequiredNotice, userNameField } from "./ui";
 
 // No session: these tests use the login page.
 test.use({ storageState: { cookies: [], origins: [] } });
@@ -10,11 +10,6 @@ test.use({ storageState: { cookies: [], origins: [] } });
 // Without a session, GET /api/session answers 401 by design (on load and
 // after logging out); the browser logs that as a console error.
 test.beforeEach(({ guards }) => guards.allowHTTPError("/api/session", 401));
-
-// The password field. Exact: other fields' names contain "password".
-const passwordField = (page: Page) => page.getByLabel("Password", { exact: true });
-// Exact: "Log in with a passkey" is a button too.
-const logIn = (page: Page) => page.getByRole("button", { name: "Log in", exact: true });
 
 /** Fills in the login form and submits it. */
 const submitLogin = (page: Page, user: Login, password = user.password) => logInThroughForm(page, user.name, password);
@@ -26,14 +21,14 @@ test("login with password and authentication code, then log out", async ({ page 
   // The demo confirmed this user's 2FA with an hour-old code, so the
   // current step is unused. The test runs once (retries: 0).
   await page.getByLabel("Authentication code").fill(totp(twoFactorUser.totpSecret, timeStep()));
-  await logIn(page).click();
+  await logInButton(page).click();
 
   // kim has no documents: the list's empty state, with kim logged in.
   await expect(searchBox(page)).toBeVisible();
   await expect(page.getByText("No documents yet", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Profile" })).toHaveText(twoFactorUser.name);
-  await page.getByRole("button", { name: "Log out" }).click();
-  await expect(page.getByLabel("User name")).toBeVisible();
+  await logOut(page);
+  await expect(userNameField(page)).toBeVisible();
 });
 
 test("a wrong password is refused and the field is cleared", async ({ page }) => {
@@ -41,7 +36,7 @@ test("a wrong password is refused and the field is cleared", async ({ page }) =>
   const answer = page.waitForResponse((r) => r.url().endsWith("/api/session") && r.request().method() === "POST");
   await submitLogin(page, twoFactorUser, "not-the-password");
   expect((await answer).status()).toBe(401);
-  await expect(page.getByRole("alert")).toHaveText("Wrong user name or password.");
+  await expect(loginError(page)).toHaveText("Wrong user name or password.");
   await expect(passwordField(page)).toHaveValue("");
 });
 
@@ -51,7 +46,7 @@ test("a locked user is refused before the code step", async ({ page, guards }) =
   const answer = page.waitForResponse((r) => r.url().endsWith("/api/session") && r.request().method() === "POST");
   await submitLogin(page, lockedUser);
   expect((await answer).status()).toBe(403);
-  await expect(page.getByRole("alert")).toHaveText("This user is locked. Ask an admin to unlock it.");
+  await expect(loginError(page)).toHaveText("This user is locked. Ask an admin to unlock it.");
   await expect(page.getByRole("heading", { name: "Enter your authentication code" })).toHaveCount(0);
 });
 
@@ -128,9 +123,16 @@ test("the web app manifest and its icons are served without a session", async ({
 test("the product mark follows the colour scheme", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "light" });
   await page.goto("/");
-  await expect(page.locator(".app-mark--light")).toBeVisible();
-  await expect(page.locator(".app-mark--dark")).toBeHidden();
+  // Exactly one mark, the one for the applied theme; it is decorative and its file loads.
+  const mark = productMark(page);
+  await expect(mark).toHaveCount(1);
+  await expect(mark).toBeVisible();
+  await expect(mark).toHaveClass(/(^|\s)app-mark--light(\s|$)/);
+  await expect(mark).toHaveAttribute("alt", "");
+  expect(await mark.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
   await page.emulateMedia({ colorScheme: "dark" });
-  await expect(page.locator(".app-mark--dark")).toBeVisible();
-  await expect(page.locator(".app-mark--light")).toBeHidden();
+  await expect(mark).toHaveCount(1);
+  await expect(mark).toHaveClass(/(^|\s)app-mark--dark(\s|$)/);
+  await expect(mark).not.toHaveClass(/app-mark--light/);
+  await expect.poll(() => mark.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
 });
