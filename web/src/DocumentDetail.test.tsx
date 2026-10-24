@@ -98,6 +98,8 @@ let patchAnswer: { status: number; body: unknown } | null;
 let patchHold: Promise<void> | null;
 /** While set, a DELETE or purge waits for it before it answers. */
 let trashHold: Promise<void> | null;
+/** While set, a POST that creates a tag, correspondent or type waits for it before it answers. */
+let createHold: Promise<void> | null;
 /** Each saved change gets a new modifiedAt with microseconds, as the server's. */
 let stamp: number;
 
@@ -144,6 +146,7 @@ beforeEach(() => {
   patchAnswer = null;
   patchHold = null;
   trashHold = null;
+  createHold = null;
   stamp = 0;
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
@@ -158,6 +161,7 @@ beforeEach(() => {
     if (path === "/api/correspondents" && method === "GET") return json(200, { correspondents });
     if (path === "/api/document-types" && method === "GET") return json(200, { documentTypes: [] });
     if (path === "/api/tags" && method === "POST") {
+      if (createHold) await createHold;
       const b = body as { name: string; ownerId?: number };
       const row = tag(`new-${b.name}`, b.name, { ownerId: b.ownerId ?? 1 });
       tags = [...tags, row];
@@ -431,12 +435,13 @@ describe("editing", () => {
     fireEvent.keyDown(box, { key: "Escape" });
     expect(screen.getByTestId("document-detail")).toBeTruthy();
     expect(docParam()).toBe("d1");
-    // ...and with it open.
+    // ...and with it open (typed text: Carbon closes the list; the document stays).
     fireEvent.change(box, { target: { value: "x" } });
     expect(detail().getByRole("listbox", { name: /Correspondent|Korrespondent/ })).toBeTruthy();
     fireEvent.keyDown(box, { key: "Escape" });
     expect(screen.getByTestId("document-detail")).toBeTruthy();
     expect(docParam()).toBe("d1");
+    await waitFor(() => expect(box.closest(".cds--list-box")?.classList.contains("cds--list-box--expanded")).toBe(false));
     fireEvent.click(detail().getByRole("button", { name: t.save }));
     await waitFor(() => expect(patches()[0]?.body).toEqual({ correspondentId: "c1", expectedModifiedAt: "2026-10-21T10:00:00Z" }));
   });
@@ -1408,6 +1413,109 @@ describe("the Carbon pickers (#150 part 4): the keys that would clear a choice (
     const chip = within(detail().getByRole("list", { name: t.chosenIn(t.tags) })).getByRole("listitem").firstElementChild as HTMLElement;
     expect(chip.getAttribute("style")).toBeNull();
     expect(chip.className).toContain("cds--tag--gray");
+  });
+});
+
+describe("the Carbon pickers (#150 part 4): the ComboBox's field and the form agree (review B, blocking 1)", () => {
+  const corrBox = async () => {
+    const box = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(box.value).toBe("Finanzamt"));
+    return box;
+  };
+
+  // The field was emptied and left: the choice is cleared, the form is dirty, the save sends null.
+  for (const [how, leave] of [
+    ["with its list still open", (box: HTMLInputElement) => fireEvent.blur(box)],
+    [
+      "with its list closed",
+      (box: HTMLInputElement) => {
+        fireEvent.keyDown(box, { key: "Escape" });
+        fireEvent.blur(box);
+      },
+    ],
+  ] as const) {
+    it(`an emptied correspondent field, left ${how}, clears the choice: the form is dirty and the save sends null`, async () => {
+      correspondents = [named("c1", "Finanzamt")];
+      serve(doc("d1", "A", { correspondentId: "c1" }));
+      await openAt("/?doc=d1");
+      const box = await corrBox();
+      box.focus();
+      fireEvent.change(box, { target: { value: "" } });
+      leave(box);
+      await waitFor(() => expect((detail().getByRole("button", { name: t.save }) as HTMLButtonElement).disabled).toBe(false));
+      await waitFor(() => expect(box.value).toBe(""));
+      expect(detail().getByText(t.unsaved)).toBeTruthy();
+      fireEvent.click(detail().getByRole("button", { name: t.save }));
+      await waitFor(() => expect(patches()).toHaveLength(1));
+      expect(patches()[0]!.body).toEqual({ correspondentId: null, expectedModifiedAt: "2026-10-21T10:00:00Z" });
+    });
+  }
+
+  it("other text left in the field with its list closed gives way to the choice's name again, nothing changes", async () => {
+    correspondents = [named("c1", "Finanzamt"), named("c2", "Arzt")];
+    serve(doc("d1", "A", { correspondentId: "c1" }));
+    await openAt("/?doc=d1");
+    const box = await corrBox();
+    box.focus();
+    fireEvent.change(box, { target: { value: "Arzt" } });
+    fireEvent.keyDown(box, { key: "Escape" });
+    fireEvent.blur(box);
+    await waitFor(() => expect(box.value).toBe("Finanzamt"));
+    expect((detail().getByRole("button", { name: t.save }) as HTMLButtonElement).disabled).toBe(true);
+    expect(detail().queryByText(t.unsaved)).toBeNull();
+  });
+});
+
+describe("the Carbon pickers (#150 part 4): review B's follow-ups", () => {
+  it("the tag field's clear button removes every chosen tag at once, as a deliberate clear (follow-up 4)", async () => {
+    tags = [tag("t1", "Steuer"), tag("t2", "Arzt")];
+    serve(doc("d1", "A", { tagIds: ["t1", "t2"] }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    fireEvent.click(detail().getByRole("button", { name: t.carbon.ids["clear.all"] }));
+    await waitFor(() => expect(detail().queryByRole("list", { name: t.chosenIn(t.tags) })).toBeNull());
+    expect(detail().getByText(t.unsaved)).toBeTruthy();
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ tagIds: [], expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
+
+  it("the tag field takes the focus back after a tag was created from it by keyboard (follow-up 2)", async () => {
+    tags = [tag("t1", "Steuer")];
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    let release: () => void = () => {};
+    createHold = new Promise<void>((r) => (release = r));
+    box.focus();
+    fireEvent.change(box, { target: { value: "Neu" } });
+    // Enter takes the highlighted item: the only one, "Create “Neu”".
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(requests.some((r) => r.method === "POST" && r.url === "/api/tags")).toBe(true));
+    await waitFor(() => expect(box.disabled).toBe(true));
+    // A browser drops the focus from the disabled field (jsdom keeps it, and ignores blur()): the body takes it.
+    document.body.tabIndex = -1;
+    document.body.focus();
+    document.body.removeAttribute("tabindex");
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => {
+      createHold = null;
+      release();
+    });
+    await detail().findByRole("button", { name: t.removeChoice("Neu") });
+    await waitFor(() => expect(document.activeElement).toBe(detail().getByRole("combobox", { name: t.tags })));
+  });
+
+  it("offers no Create item for a typed path of an existing nested tag (follow-up 3)", async () => {
+    tags = [tag("t1", "Finance"), tag("t2", "Bills", { parentId: "t1" })];
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    fireEvent.change(box, { target: { value: "finance / bills" } });
+    expect(detail().getAllByRole("option").map((o) => o.getAttribute("aria-label"))).toEqual(["Finance / Bills"]);
   });
 });
 

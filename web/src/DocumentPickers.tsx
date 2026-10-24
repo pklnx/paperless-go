@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
 import { ComboBox, DismissibleTag, FilterableMultiSelect } from "@carbon/react";
 import { ApiError } from "./api";
 import { t, translateWithId } from "./i18n";
@@ -26,24 +26,30 @@ export const CREATE = "\u0000create";
 
 const fold = (s: string) => s.toLocaleLowerCase();
 
-/** Whether a typed name (trimmed) names none of the choices, so "Create" applies. */
-export function canCreate(name: string, choices: readonly Choice[]): boolean {
+/** Whether a typed name (trimmed) names none of the choices (by name, or by a tag's path), so "Create" applies. */
+export function canCreate(name: string, choices: readonly (Choice & { path?: string })[]): boolean {
   const q = fold(name);
-  return q !== "" && !choices.some((c) => fold(c.name) === q);
+  return q !== "" && !choices.some((c) => fold(c.name) === q || (c.path !== undefined && fold(c.path) === q));
 }
 
 /** Whether the picker's list box (inside root) is open: Carbon marks the open ListBox. */
 const listOpen = (root: HTMLElement | null) => root?.querySelector(".cds--list-box--expanded") !== null;
 
 /**
- * Escape in a picker's field while its list is closed: Carbon would clear
- * the chosen entries (the FilterableMultiSelect) or empty the text but
- * keep the choice (the ComboBox, through downshift). Neither reaches the
- * field: the key is the document's Escape, as before (onEscape), and the
- * field stays as it is. With the list open, Carbon closes the list.
+ * Escape in a picker's field. With the list open, Carbon closes the list;
+ * the default is prevented so that the document's own Escape (which
+ * yields on a prevented key) leaves the document open. With the list
+ * closed, Carbon would clear the chosen entries (the
+ * FilterableMultiSelect) or empty the text but keep the choice (the
+ * ComboBox, through downshift): neither reaches the field, the key is
+ * the document's Escape, as before (onEscape), and the field stays as it is.
  */
 function escapeClosed(e: KeyboardEvent<HTMLElement>, root: HTMLElement | null, onEscape: (() => void) | undefined): boolean {
-  if (e.key !== "Escape" || !(e.target instanceof HTMLInputElement) || listOpen(root)) return false;
+  if (e.key !== "Escape" || !(e.target instanceof HTMLInputElement)) return false;
+  if (listOpen(root)) {
+    e.preventDefault();
+    return false;
+  }
   e.stopPropagation();
   onEscape?.();
   return true;
@@ -78,6 +84,19 @@ function useCreator(onCreate: ((name: string) => Promise<string>) | undefined) {
   return { creating, error, clearError: () => setError(""), create };
 }
 
+/**
+ * The field takes the focus back once a creation has settled: it was
+ * disabled while the row was created, and a browser drops the focus from
+ * a disabled field (review B of #192).
+ */
+function useRefocus(creating: boolean, field: () => HTMLElement | null | undefined) {
+  const was = useRef(creating);
+  useEffect(() => {
+    if (was.current && !creating) field()?.focus();
+    was.current = creating;
+  });
+}
+
 interface NamedProps {
   label: string;
   /** In the order shown. */
@@ -109,14 +128,29 @@ export function NamedPicker({ label, choices, selected, onChange, onCreate, disa
   }, [choices, typed, onCreate]);
   // The choice's own object while it stays (Carbon resets its field to the
   // choice's name whenever this prop changes); null while the rows load.
+  // resync: a new object makes Carbon write the choice's name into the field again.
+  const [resync, setResync] = useState(0);
   const selectedItem = useMemo<Choice | null>(() => {
     if (selected === null) return null;
     const found = choices.find((c) => c.id === selected);
     // No rows yet (they are loading): nothing to show; an id among rows that lack it is "unknown".
-    return found ?? (choices.length === 0 ? null : { id: selected, name: t.unknownEntry });
-  }, [choices, selected]);
+    const item = found ?? (choices.length === 0 ? null : { id: selected, name: t.unknownEntry });
+    return item && resync > 0 ? { ...item } : item;
+  }, [choices, selected, resync]);
+  const field = () => root.current?.querySelector("input");
+  useRefocus(creator.creating, field);
+  // Leaving the field: what it shows is what the form has. An emptied
+  // field clears the choice (the form becomes dirty); other text that is
+  // not the choice's name gives way to the name again (a choice is made
+  // from the list, with Enter or a click). Carbon does either only while
+  // the list is open (review B of #192).
+  const onBlurCapture = (e: FocusEvent<HTMLDivElement>) => {
+    if (!(e.target instanceof HTMLInputElement) || selectedItem === null) return;
+    if (e.target.value === "") onChange(null);
+    else if (e.target.value !== selectedItem.name) setResync((n) => n + 1);
+  };
   return (
-    <div ref={root} className="doc-form__picker" onKeyDownCapture={(e) => escapeClosed(e, root.current, onEscape)}>
+    <div ref={root} className="doc-form__picker" onKeyDownCapture={(e) => escapeClosed(e, root.current, onEscape)} onBlurCapture={onBlurCapture}>
       <ComboBox<Choice>
         id={`${id}-combo`}
         titleText={label}
@@ -207,6 +241,7 @@ export function TagPicker({ label, choices, selected, onChange, onCreate, disabl
     }
   };
   const chipsDisabled = disabled || readOnly;
+  useRefocus(creator.creating, () => root.current?.querySelector("input"));
   return (
     <div ref={root} className="doc-form__tags" onKeyDownCapture={onKeyDownCapture}>
       <FilterableMultiSelect<TagChoice>

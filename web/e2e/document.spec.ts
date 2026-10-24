@@ -249,6 +249,30 @@ test("a change made elsewhere meanwhile: the save is refused and the user's edit
   await expect(detailForm(page).getByText("Changed in another tab.")).toBeVisible();
 });
 
+test("an emptied type field, left with its list closed, clears the type: the form says so and the save sends it (review B of #192)", async ({ page }) => {
+  await page.goto("/");
+  await documentLink(page, seed.water.title).click();
+  await expect(detail(page, seed.water.title)).toBeVisible();
+  const type = field(page, "Document type");
+  await expect(type).toHaveValue("Invoice");
+  // Select the text and delete it; Escape closes the list the typing opened; Tab leaves the field.
+  await type.selectText();
+  await page.keyboard.press("Delete");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Tab");
+  await expect(type).toHaveValue("");
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+  // The save would send documentTypeId: null; the document is left as it was instead.
+  const patches: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "PATCH") patches.push(r.postData() ?? "");
+  });
+  await closeDocument(page);
+  await discardChanges(page);
+  await expect(page).not.toHaveURL(/[?&]doc=/);
+  expect(patches).toEqual([]);
+});
+
 test.describe("the tag picker on the seeded lease", () => {
   // The lease is seed data other specs count on: whatever the test did
   // (also on a failure or a timeout), the Bills tag comes off again through
