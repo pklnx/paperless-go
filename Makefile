@@ -43,7 +43,7 @@ build:
 
 ## test: all tests, including PostgreSQL integration tests
 test:
-	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" $(GO) test -race -shuffle=on -count=1 ./...
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" $(GO) test -race -shuffle=on -count=1 -timeout 15m ./...
 
 ## test-unit: tests that need no database
 test-unit:

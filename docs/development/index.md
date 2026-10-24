@@ -174,8 +174,11 @@ Changes start as an issue with an approved plan; see
 [Issues, plans and releases](./process).
 
 `main` is protected: changes go through pull requests, which can only be
-squash-merged when the required CI checks pass (all checks except `audit` and
-`docs-audit`, see [Dependencies](#dependencies)). A pull request is merged (squash) after
+squash-merged when the required CI checks pass. The `main` ruleset (repository
+settings) is the authority for which checks are required; on 2026-10-23 they
+were `test`, `lint`, `vulncheck`, `docker`, `compose`, `web`, `toolstest` and
+`secret-scan`. `audit` and `docs-audit` are not required (see
+[Dependencies](#dependencies)). A pull request is merged (squash) after
 an approving review and green checks; auto-merge is not used. Agent rules are
 in `CLAUDE.md` at the repository root.
 
@@ -252,7 +255,7 @@ the narrow allowlist in `.gitleaks.toml`:
   clone, scans only its last commit and says so in the log.
 
 The workflow has no `paths` filter, so the check runs on every pull request;
-the maintainer adds it to the required checks of the `main` ruleset. Secret
+it is a required check of the `main` ruleset. Secret
 values are redacted in the log. Pull request runs cancel older runs of the
 same pull request; push runs are never cancelled.
 

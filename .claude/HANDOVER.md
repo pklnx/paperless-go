@@ -72,7 +72,8 @@ State of the work for the next session. Update before a session ends.
 
 ## Manual checks for the maintainer
 - Ruleset for `main` with the required checks (test, lint, vulncheck, docker, compose, web; `toolstest` recommended): part of the public-switch steps; confirm it is active. `audit` and `docs-audit` (`pnpm audit`, #151) stay off the required list.
-- After #158 part 1 is green on `main`: add `web-e2e` to the required checks of the `main` ruleset. Then note the Chromium setup step's time of the next 10 runs here; if the apt fallback never ran, lower the job's timeout from 20 to 15.
+- After #158 part 1 is green on `main`: add `web-e2e` to the required checks of the `main` ruleset, and extend the list of required checks in `docs/development/index.md` (Pull requests and labels) in the same step. Then note the Chromium setup step's time of the next 10 runs here; if the apt fallback never ran, lower the job's timeout from 20 to 15.
+- Docker Hub 429 watch (#159): if a `compose` or `docker` job fails with `429 Too Many Requests` or `toomanyrequests` on a fallback pull, add a read-only Docker Hub token (option (a) of the #151 plan). None seen on `main` since #157.
 - Trusted proxies behind Tailscale or Caddy (`PAPERLESS_GO_TRUSTED_PROXIES`) so the `__Host-` cookie is kept (#51).
 - After updating: `./pgo keygen` into `.env`, then `./pgo migrate`. Try TOTP with a real authenticator app, and a passkey at an HTTPS `PAPERLESS_GO_PUBLIC_URL`.
 - Drag and drop in Safari and Firefox; a ~100 MB upload through a reverse proxy.

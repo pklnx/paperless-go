@@ -69,7 +69,11 @@ jobs:
       # Random test order (-shuffle=on): a failure prints its seed as
       # -test.shuffle N; rerun it with go test -shuffle=N.
       - run: go test -tags loadtest -shuffle=on -count=1 ./scripts/loadtest/...
-      - run: go test -race -shuffle=on -count=1 ./...
+      # -timeout stays well below timeout-minutes: setup and the -race compile
+      # come before its clock starts, and a hang then prints its goroutine
+      # dump instead of the job being killed silently. Keep in step with the
+      # Makefile's test target.
+      - run: go test -race -shuffle=on -count=1 -timeout 15m ./...
         env:
           TEST_DATABASE_URL: postgres://paperless:paperless@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/paperless?sslmode=disable
 
@@ -171,6 +175,9 @@ jobs:
         with:
           persist-credentials: false
       - run: scripts/ci-docker-mirror.sh
+      # The image list parser, offline: a parser regression fails before any
+      # pulling.
+      - run: sh scripts/ci-pull-images-test.sh
       # The base images and postgres:18 with retries; the smoke test's build
       # then takes them from the local store.
       - run: scripts/ci-pull-images.sh
