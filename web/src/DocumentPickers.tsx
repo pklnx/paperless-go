@@ -1,0 +1,222 @@
+import { useId, useMemo, useState } from "react";
+import { ComboBox, DismissibleTag, FilterableMultiSelect } from "@carbon/react";
+import { ApiError } from "./api";
+import { t, translateWithId } from "./i18n";
+import { chipInk } from "./tagTree";
+
+// The detail's pickers (#150 part 4, decision 2): Carbon's ComboBox for the
+// correspondent and the type, its FilterableMultiSelect for the tags. Both
+// offer a synthetic "Create “x”" item while the typed name matches nothing,
+// which creates the row and chooses it. Names are text only.
+
+/** One choice: a row's id and name. A tag also has its path ("Finance / Bills") and colour. */
+export interface Choice {
+  id: string;
+  name: string;
+}
+
+export interface TagChoice extends Choice {
+  /** The names from the root down, joined with " / "; the name itself for a root tag. */
+  path: string;
+  color?: string;
+}
+
+/** The id of the synthetic "Create “x”" item. */
+export const CREATE = "\u0000create";
+
+const fold = (s: string) => s.toLocaleLowerCase();
+
+/** Whether a typed name (trimmed) names none of the choices, so "Create" applies. */
+export function canCreate(name: string, choices: readonly Choice[]): boolean {
+  const q = fold(name);
+  return q !== "" && !choices.some((c) => fold(c.name) === q);
+}
+
+/** What went wrong when a row could not be created. */
+function createErrorText(err: unknown): string {
+  if (err instanceof ApiError && err.body.code === "name_taken") return t.nameTaken;
+  if (err instanceof ApiError && err.body.code === "invalid_name") return t.invalidName;
+  return t.failed(err instanceof Error ? err.message : String(err));
+}
+
+/** Creates the row named name and answers its id; the error is kept for the field. */
+function useCreator(onCreate: ((name: string) => Promise<string>) | undefined) {
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState("");
+  const create = (name: string, then: (id: string) => void) => {
+    if (!onCreate || creating) return;
+    setCreating(true);
+    setError("");
+    onCreate(name).then(
+      (id) => {
+        setCreating(false);
+        then(id);
+      },
+      (err: unknown) => {
+        setCreating(false);
+        setError(createErrorText(err));
+      },
+    );
+  };
+  return { creating, error, clearError: () => setError(""), create };
+}
+
+interface NamedProps {
+  label: string;
+  /** In the order shown. */
+  choices: readonly Choice[];
+  /** The chosen row's id; an id without a row shows as "unknown". */
+  selected: string | null;
+  onChange: (id: string | null) => void;
+  /** Creates a row named name and answers its id; without it, nothing can be created here. */
+  onCreate?: (name: string) => Promise<string>;
+  disabled?: boolean;
+}
+
+/**
+ * One choice at most (the correspondent, the type): Carbon's ComboBox with
+ * the rows, a "Create “x”" item for a typed name that is no row yet, and
+ * its clear button. Enter chooses the highlighted row (the first match
+ * while typing), Escape closes the list and keeps the document open.
+ */
+export function NamedPicker({ label, choices, selected, onChange, onCreate, disabled }: NamedProps) {
+  const id = useId();
+  const [typed, setTyped] = useState("");
+  const creator = useCreator(onCreate);
+  const items = useMemo<Choice[]>(() => {
+    const name = typed.trim();
+    return onCreate && canCreate(name, choices) ? [...choices, { id: CREATE, name: t.createNamed(name) }] : [...choices];
+  }, [choices, typed, onCreate]);
+  // The choice's own object while it stays (Carbon resets its field to the
+  // choice's name whenever this prop changes); null while the rows load.
+  const selectedItem = useMemo<Choice | null>(() => {
+    if (selected === null) return null;
+    const found = choices.find((c) => c.id === selected);
+    // No rows yet (they are loading): nothing to show; an id among rows that lack it is "unknown".
+    return found ?? (choices.length === 0 ? null : { id: selected, name: t.unknownEntry });
+  }, [choices, selected]);
+  return (
+    <ComboBox<Choice>
+      id={`${id}-combo`}
+      titleText={label}
+      placeholder={t.chooseOne}
+      items={items}
+      itemToString={(item) => item?.name ?? ""}
+      selectedItem={selectedItem}
+      disabled={disabled || creator.creating}
+      invalid={creator.error !== ""}
+      invalidText={creator.error}
+      translateWithId={translateWithId}
+      // The rows that contain the typed text; "Create" always.
+      shouldFilterItem={({ item, inputValue }) => item.id === CREATE || !inputValue || fold(item.name).includes(fold(inputValue))}
+      onInputChange={(text) => {
+        setTyped(text);
+        creator.clearError();
+      }}
+      onChange={({ selectedItem: item }) => {
+        if (!item) {
+          if (selected !== null) onChange(null);
+          return;
+        }
+        if (item.id === CREATE) {
+          creator.create(typed.trim(), onChange);
+          return;
+        }
+        if (item.id !== selected) onChange(item.id);
+      }}
+      inputProps={{ maxLength: 128 }}
+    />
+  );
+}
+
+interface TagsProps {
+  label: string;
+  /** In tree order, each with its path. */
+  choices: readonly TagChoice[];
+  /** The chosen ids in their order; an id without a row shows as "unknown". */
+  selected: readonly string[];
+  onChange: (ids: string[]) => void;
+  onCreate?: (name: string) => Promise<string>;
+  disabled?: boolean;
+}
+
+/**
+ * Several choices (the tags): Carbon's FilterableMultiSelect with the tags
+ * in tree order and their path ("Finance / Bills"), so a nested tag is
+ * found by its own name and by its parent's; a "Create “x”" item when the
+ * typed name is no tag yet; the chosen tags as dismissible chips under the
+ * field ("Chosen: Tags"), in the order they were chosen.
+ */
+export function TagPicker({ label, choices, selected, onChange, onCreate, disabled }: TagsProps) {
+  const id = useId();
+  const creator = useCreator(onCreate);
+  const byId = useMemo(() => new Map(choices.map((c) => [c.id, c])), [choices]);
+  const chosen = selected.map((s) => byId.get(s) ?? { id: s, name: t.unknownEntry, path: t.unknownEntry });
+  const selectedItems = useMemo(() => selected.map((s) => byId.get(s)).filter((c): c is TagChoice => c !== undefined), [selected, byId]);
+  // Carbon compares items by value: the same objects as in choices, so the
+  // chosen ones are the choices themselves, and "Create" is appended per filter.
+  const filterItems = (items: readonly TagChoice[], { inputValue }: { inputValue: string | null }) => {
+    const name = (inputValue ?? "").trim();
+    const q = fold(name);
+    const matches = q === "" ? [...items] : items.filter((c) => fold(c.path).includes(q));
+    if (onCreate && canCreate(name, choices)) matches.push({ id: CREATE, name, path: t.createNamed(name) });
+    return matches;
+  };
+  const remove = (tagId: string) => onChange(selected.filter((s) => s !== tagId));
+  return (
+    <div className="doc-form__tags">
+      <FilterableMultiSelect<TagChoice>
+        id={`${id}-tags`}
+        titleText={label}
+        placeholder={t.addChoice}
+        items={choices as TagChoice[]}
+        itemToString={(item) => item?.path ?? ""}
+        selectedItems={selectedItems}
+        // Tree order, whatever is chosen (Carbon would sort the chosen ones to the top).
+        sortItems={(items) => items as TagChoice[]}
+        selectionFeedback="fixed"
+        filterItems={filterItems}
+        disabled={disabled || creator.creating}
+        invalid={creator.error !== ""}
+        invalidText={creator.error}
+        translateWithId={translateWithId}
+        clearSelectionDescription={t.chosenCount}
+        clearSelectionText={t.clearChosenHint}
+        inputProps={{ "aria-label": label, maxLength: 128 }}
+        onChange={({ selectedItems: items }) => {
+          creator.clearError();
+          const create = items.find((c) => c.id === CREATE);
+          if (create) {
+            creator.create(create.name, (newId) => onChange([...selected.filter((s) => s !== newId), newId]));
+            return;
+          }
+          // The ids of the rows, in the order they were chosen; an id
+          // without a row (unknown here) is kept as it is.
+          const ids = items.map((c) => c.id);
+          const kept = selected.filter((s) => !byId.has(s) || ids.includes(s));
+          const next = [...kept, ...ids.filter((x) => !kept.includes(x))];
+          if (next.length !== selected.length || next.some((x, i) => x !== selected[i])) onChange(next);
+        }}
+      />
+      {chosen.length > 0 && (
+        <ul aria-label={t.chosenIn(label)} className="doc-form__chosen">
+          {chosen.map((c) => (
+            <li key={c.id}>
+              {/* A tag's own colour, with black or white text for contrast; without one, and read-only, Carbon's gray. */}
+              <DismissibleTag
+                size="md"
+                type={c.color && !disabled ? undefined : "gray"}
+                text={c.name}
+                title={t.removeChoice(c.name)}
+                dismissTooltipLabel={t.removeChoice(c.name)}
+                disabled={disabled}
+                style={c.color && !disabled ? { backgroundColor: c.color, color: chipInk(c.color) } : undefined}
+                onClose={() => remove(c.id)}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}

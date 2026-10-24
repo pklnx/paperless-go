@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Button, IconButton } from "@carbon/react";
+import { FitToWidth, ZoomIn, ZoomOut } from "@carbon/icons-react";
 import { documentsApi, type DocumentDetail } from "./api";
 import { t } from "./i18n";
 import { loadPdf, type PdfDocument, type PdfPageSize } from "./pdfViewer";
-import { button } from "./styles";
 
 /** What the detail shows of a document's file. */
 export type PreviewSource = { kind: "pdf"; url: string } | { kind: "image"; url: string } | { kind: "heic" } | { kind: "none" };
@@ -28,19 +29,17 @@ export function Preview({ doc, processing }: { doc: DocumentDetail; processing: 
     // A plain image request: the file endpoint's sandbox and attachment
     // headers do not apply to images, and img-src 'self' allows it.
     return (
-      <div className="h-full overflow-auto bg-surface-sunken p-3">
-        <img src={src.url} alt={t.previewOf(doc.title || doc.originalFileName)} className="mx-auto max-w-full bg-paper shadow" />
+      <div className="doc-preview doc-preview--image">
+        <img src={src.url} alt={t.previewOf(doc.title || doc.originalFileName)} className="doc-preview__image" />
       </div>
     );
   }
   return (
-    <div className="grid h-full place-items-center bg-surface-sunken p-6 text-center text-sm text-ink-muted">
-      <div className="flex flex-col items-center gap-2">
-        <p>{src.kind === "heic" && processing ? t.previewHeicProcessing : t.noPreview}</p>
-        <a className={button} href={documentsApi.fileURL(doc.id, "original")} download>
-          {t.downloadOriginal}
-        </a>
-      </div>
+    <div className="doc-preview doc-preview--none">
+      <p className="doc-preview__note">{src.kind === "heic" && processing ? t.previewHeicProcessing : t.noPreview}</p>
+      <Button as="a" kind="tertiary" size="md" href={documentsApi.fileURL(doc.id, "original")} download>
+        {t.downloadOriginal}
+      </Button>
     </div>
   );
 }
@@ -145,29 +144,31 @@ export function PdfView({ url }: { url: string }) {
 
   if (error) {
     return (
-      <div className="grid h-full place-items-center bg-surface-sunken p-6 text-center text-sm text-danger" role="alert">
+      <div className="doc-preview doc-preview--none app-text-error" role="alert">
         {t.previewFailed}
       </div>
     );
   }
+  // The toolbar (Carbon IconButtons) over the pages; the canvases, the text
+  // layer and the IntersectionObserver below are the viewer's own.
   return (
-    <div className="flex h-full min-h-0 flex-col bg-surface-sunken">
-      <div className="flex flex-wrap items-center gap-1 border-b border-line px-2 py-1 text-sm" role="toolbar" aria-label={t.viewerTools}>
-        <button type="button" className={button} disabled={!doc} aria-pressed={zoom === "fit"} onClick={() => setZoom("fit")}>
-          {t.zoomFit}
-        </button>
-        <button type="button" className={button} disabled={!doc || scale <= minScale} aria-label={t.zoomOut} title={t.zoomOut} onClick={() => setScale(scale / zoomStep)}>
-          −
-        </button>
-        <button type="button" className={button} disabled={!doc || scale >= maxScale} aria-label={t.zoomIn} title={t.zoomIn} onClick={() => setScale(scale * zoomStep)}>
-          +
-        </button>
-        <span className="ml-auto tabular-nums text-ink-muted" aria-live="polite">
+    <div className="doc-preview doc-preview--pdf">
+      <div className="doc-preview__tools" role="toolbar" aria-label={t.viewerTools}>
+        <IconButton kind="ghost" size="md" align="bottom-start" label={t.zoomFit} isSelected={zoom === "fit"} aria-pressed={zoom === "fit"} disabled={!doc} onClick={() => setZoom("fit")}>
+          <FitToWidth />
+        </IconButton>
+        <IconButton kind="ghost" size="md" align="bottom" label={t.zoomOut} disabled={!doc || scale <= minScale} onClick={() => setScale(scale / zoomStep)}>
+          <ZoomOut />
+        </IconButton>
+        <IconButton kind="ghost" size="md" align="bottom" label={t.zoomIn} disabled={!doc || scale >= maxScale} onClick={() => setScale(scale * zoomStep)}>
+          <ZoomIn />
+        </IconButton>
+        <span className="doc-preview__pages app-text-secondary" aria-live="polite">
           {doc ? t.pageOf(`${current} / ${doc.numPages}`) : t.loading}
         </span>
       </div>
-      <div ref={scroller} onScroll={onScroll} data-testid="pdf-pages" className="min-h-0 flex-1 overflow-auto">
-        <div className="flex w-max min-w-full flex-col items-center gap-3 p-3">
+      <div ref={scroller} onScroll={onScroll} data-testid="pdf-pages" className="doc-preview__scroller">
+        <div className="doc-preview__sheet">
           {doc &&
             first &&
             observer &&
@@ -210,11 +211,11 @@ function PdfPage({ doc, n, scale, estimate, observer, near }: { doc: PdfDocument
   const h = size.height * scale;
   // CSSOM sizes (not style attributes), which the CSP allows.
   return (
-    <div ref={box} data-page={n} aria-label={t.pageNumber(String(n))} role="group" className="relative shrink-0 bg-paper shadow" style={{ width: w, height: h }}>
+    <div ref={box} data-page={n} aria-label={t.pageNumber(String(n))} role="group" className="doc-preview__page" style={{ width: w, height: h }}>
       {near && (
         <>
           {/* A new canvas per scale: pdf.js refuses a canvas that is still being drawn. */}
-          <canvas key={scale} ref={canvas} aria-hidden="true" className="absolute inset-0" style={{ width: w, height: h }} />
+          <canvas key={scale} ref={canvas} aria-hidden="true" className="doc-preview__canvas" style={{ width: w, height: h }} />
           <div key={`t${scale}`} ref={text} className="textLayer" />
         </>
       )}

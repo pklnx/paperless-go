@@ -1,3 +1,5 @@
+/// <reference types="node" />
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { documentsApi, type DocumentDetail, type NamedRow, type Tag } from "./api";
@@ -161,6 +163,12 @@ beforeEach(() => {
       tags = [...tags, row];
       return json(201, row);
     }
+    if ((path === "/api/correspondents" || path === "/api/document-types") && method === "POST") {
+      const b = body as { name: string; ownerId?: number };
+      const row = named(`new-${b.name}`, b.name, b.ownerId ?? 1);
+      if (path === "/api/correspondents") correspondents = [...correspondents, row];
+      return json(201, row);
+    }
     if (path === "/api/documents" && method === "GET") {
       const list = order
         .map((id) => docs.get(id))
@@ -225,6 +233,15 @@ function serve(...ds: DocumentDetail[]) {
 }
 
 const detail = () => within(screen.getByTestId("document-detail"));
+
+/** layout.css, whose rules jsdom does not apply: tests pin the ones a layout depends on (Vitest runs in web/). */
+const layoutCSS = () => readFileSync("src/layout.css", "utf8");
+/** The declarations of the first rule whose selector list is exactly selector. */
+function rule(css: string, selector: string): string {
+  const m = new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(css);
+  if (!m) throw new Error(`no rule for ${selector} in layout.css`);
+  return m[1]!;
+}
 const patches = () => requests.filter((r) => r.method === "PATCH");
 const docParam = () => new URLSearchParams(window.location.search).get("doc");
 
@@ -406,11 +423,20 @@ describe("editing", () => {
     fireEvent.focus(box);
     fireEvent.change(box, { target: { value: "fin" } });
     fireEvent.keyDown(box, { key: "Enter" });
-    expect(detail().getByRole("button", { name: t.removeChoice("Finanzamt") })).toBeTruthy();
-    // Escape in the picker closes its list, not the document.
-    fireEvent.change(box, { target: { value: "x" } });
+    // The ComboBox shows the choice in its field, with a clear button.
+    expect((box as HTMLInputElement).value).toBe("Finanzamt");
+    expect(detail().getByRole("button", { name: t.carbon.ids["clear.selection"] })).toBeTruthy();
+    // Escape in the picker belongs to the picker (its list, its text), never closes the document:
+    // with the list closed (after Enter)...
     fireEvent.keyDown(box, { key: "Escape" });
     expect(screen.getByTestId("document-detail")).toBeTruthy();
+    expect(docParam()).toBe("d1");
+    // ...and with it open.
+    fireEvent.change(box, { target: { value: "x" } });
+    expect(detail().getByRole("listbox", { name: /Correspondent|Korrespondent/ })).toBeTruthy();
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect(screen.getByTestId("document-detail")).toBeTruthy();
+    expect(docParam()).toBe("d1");
     fireEvent.click(detail().getByRole("button", { name: t.save }));
     await waitFor(() => expect(patches()[0]?.body).toEqual({ correspondentId: "c1", expectedModifiedAt: "2026-10-21T10:00:00Z" }));
   });
@@ -801,12 +827,12 @@ describe("notes in Markdown (#12)", () => {
     expect(links[0]!.getAttribute("rel")).toBe("noopener noreferrer");
     expect(rendered().textContent).toContain("böse");
 
-    fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
+    fireEvent.click(detail().getByRole("tab", { name: t.notesEditLabel }));
     expect(notesArea()!.value).toBe(notes);
     expect(document.activeElement).toBe(notesArea());
     // The preview shows the text as edited, unsaved.
     fireEvent.change(notesArea()!, { target: { value: "*neu*" } });
-    fireEvent.click(detail().getByRole("button", { name: t.notesPreviewLabel }));
+    fireEvent.click(detail().getByRole("tab", { name: t.notesPreviewLabel }));
     expect(notesArea()).toBeNull();
     expect(rendered().querySelector("em")?.textContent).toBe("neu");
     expect(detail().getByText(t.unsaved)).toBeTruthy();
@@ -818,7 +844,7 @@ describe("notes in Markdown (#12)", () => {
     await openAt("/?doc=d1");
     expect(detail().queryByTestId("notes-rendered")).toBeNull();
     // Nothing to preview yet.
-    expect(detail().queryByRole("button", { name: t.notesPreviewLabel })).toBeNull();
+    expect(detail().queryByRole("tab", { name: t.notesPreviewLabel })).toBeNull();
     fireEvent.change(notesArea()!, { target: { value: "- eins\n  - zwei" } });
     // Typing keeps the textarea.
     expect(notesArea()!.value).toBe("- eins\n  - zwei");
@@ -844,7 +870,7 @@ describe("notes in Markdown (#12)", () => {
       expect(rendered().textContent).toBe("Portal: https://portal.example/login, Fragen an müller@example.com\nhttps://code.example & Müller\njavascript:alert(1) javascript:alert(1)"),
     );
     // Edit shows the text as written.
-    fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
+    fireEvent.click(detail().getByRole("tab", { name: t.notesEditLabel }));
     expect(notesArea()!.value).toBe(notes);
   });
 
@@ -853,7 +879,7 @@ describe("notes in Markdown (#12)", () => {
     serve(doc("d1", "A", { notes }));
     await openAt("/?doc=d1");
     expect(rendered().querySelector("em")).not.toBeNull();
-    fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
+    fireEvent.click(detail().getByRole("tab", { name: t.notesEditLabel }));
     expect(notesArea()!.value).toBe(notes);
     expect(detail().queryByTestId("notes-rendered")).toBeNull();
   });
@@ -863,23 +889,32 @@ describe("notes in Markdown (#12)", () => {
     await openAt("/?doc=d1");
     const pre = rendered().querySelector("pre")!;
     expect(pre.textContent).toBe("x".repeat(200));
-    expect(pre.className).toContain("overflow-x-auto");
-    // A fieldset is at least as wide as its content unless told otherwise.
+    // The rendered notes and the fieldset above them carry the layout
+    // classes whose rules (layout.css) let the code scroll and keep the
+    // fieldset as narrow as its column: a fieldset is otherwise at least
+    // as wide as its content.
+    expect(rendered().classList.contains("notes-rendered")).toBe(true);
+    let fieldset: HTMLElement | null = null;
     for (let el: HTMLElement | null = pre; el && el.tagName !== "FORM"; el = el.parentElement) {
-      if (el.tagName === "FIELDSET") expect(el.className.split(" ")).toContain("min-w-0");
+      if (el.tagName === "FIELDSET") fieldset = el;
     }
-    expect(rendered().className.split(" ")).toContain("min-w-0");
+    expect(fieldset?.classList.contains("doc-form__fields")).toBe(true);
+    const css = layoutCSS();
+    expect(rule(css, ".notes-rendered pre")).toContain("overflow-x: auto");
+    expect(rule(css, ".doc-form__fields")).toContain("min-inline-size: 0");
+    expect(rule(css, ".notes-rendered")).toContain("min-inline-size: 0");
   });
 
   it("shows the textarea again when the server refuses the notes", async () => {
     serve(doc("d1", "A", { notes: "alt" }));
     await openAt("/?doc=d1");
-    fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
+    fireEvent.click(detail().getByRole("tab", { name: t.notesEditLabel }));
     fireEvent.change(notesArea()!, { target: { value: "neu" } });
-    fireEvent.click(detail().getByRole("button", { name: t.notesPreviewLabel }));
+    fireEvent.click(detail().getByRole("tab", { name: t.notesPreviewLabel }));
     patchAnswer = { status: 400, body: { error: "bad", code: "invalid_notes" } };
     fireEvent.click(detail().getByRole("button", { name: t.save }));
-    expect((await detail().findByText(t.invalidNotes)).id).toBe(notesArea()!.getAttribute("aria-describedby"));
+    // Carbon's TextArea names its error text as aria-errormessage.
+    expect((await detail().findByText(t.invalidNotes)).id).toBe(notesArea()!.getAttribute("aria-errormessage"));
     expect(notesArea()!.value).toBe("neu");
     expect(notesArea()!.getAttribute("aria-invalid")).toBe("true");
   });
@@ -934,9 +969,9 @@ describe("the trash (#12)", () => {
     serve(doc("d1", "Rechnung", trashed));
     await openAt("/?doc=d1&trash=1");
     const banner = within(detail().getByRole("region", { name: t.trash }));
-    expect(detail().getByRole("region", { name: t.trash }).textContent).toBe(
-      `${t.trashBanner(trashDay(trashed.deletedAt))} ${t.trashBannerRemoved(trashDay(trashed.purgeAt))}${t.restore}${t.purge}`,
-    );
+    expect(banner.getByText(t.trashBanner(trashDay(trashed.deletedAt)))).toBeTruthy();
+    expect(banner.getByText(t.trashBannerRemoved(trashDay(trashed.purgeAt)))).toBeTruthy();
+    expect(banner.getByRole("button", { name: t.purge })).toBeTruthy();
     expect(titleField().matches(":disabled")).toBe(true);
     expect(detail().queryByRole("button", { name: t.save })).toBeNull();
     expect(detail().queryByRole("button", { name: t.deleteDocumentLabel("Rechnung") })).toBeNull();
@@ -968,23 +1003,21 @@ describe("the trash (#12)", () => {
     serve(doc("d1", "Rechnung", { ...trashed, notes: "Bezahlt" }), doc("d2", "Brief", trashed));
     await openAt("/?doc=d1&trash=1");
     const rendered = detail().getByTestId("notes-rendered");
-    expect(rendered.className).toContain("bg-surface-hover");
-    expect(rendered.className).toContain("text-ink-muted");
-    const edit = detail().getByRole("button", { name: t.notesEditLabel });
+    expect(rendered.classList.contains("notes-rendered--disabled")).toBe(true);
+    expect(rule(layoutCSS(), ".notes-rendered--disabled")).toContain("var(--cds-text-disabled)");
+    // The switcher's tabs are in the disabled fieldset.
+    const edit = detail().getByRole("tab", { name: t.notesEditLabel });
     expect(edit.matches(":disabled")).toBe(true);
-    expect(edit.className).toContain("disabled:opacity-50");
-    // Empty notes: the textarea, disabled and with the fields' disabled style.
+    // Empty notes: Carbon's textarea, disabled (its disabled style is Carbon's).
     fireEvent.click(detail().getByRole("button", { name: t.nextDocument }));
     await waitFor(() => expect(titleField().value).toBe("Brief"));
     const area = detail().getByRole("textbox", { name: t.fieldNotes });
     expect(area.matches(":disabled")).toBe(true);
-    expect(area.className).toContain("disabled:bg-surface-hover");
-    expect(area.className).toContain("disabled:text-ink-muted");
     // A live document's rendered notes are not dimmed.
     cleanup();
     serve(doc("d3", "Lebt", { notes: "Offen" }));
     await openAt("/?doc=d3");
-    expect(detail().getByTestId("notes-rendered").className).not.toContain("bg-surface-hover");
+    expect(detail().getByTestId("notes-rendered").classList.contains("notes-rendered--disabled")).toBe(false);
   });
 
   it("asks before Delete permanently, and closes once it is done", async () => {
@@ -1054,7 +1087,7 @@ describe("the trash (#12)", () => {
     patchAnswer = { status: 409, body: { error: "the document is in the trash", code: "in_trash" } };
     fireEvent.click(detail().getByRole("button", { name: t.save }));
     const countsBefore = requests.filter((r) => r.url.startsWith("/api/documents/counts")).length;
-    expect((await detail().findByText(t.inTrashEditsKept)).getAttribute("role")).toBe("alert");
+    expect((await detail().findByText(t.inTrashEditsKept)).closest("[role=alert]")).not.toBeNull();
     await waitFor(() => expect(detail().getByRole("region", { name: t.trash })).toBeTruthy());
     expect(titleField().matches(":disabled")).toBe(true);
     // The edit is kept, not dropped for the server's state.
@@ -1084,8 +1117,11 @@ describe("the trash (#12)", () => {
   it("makes the read-only fields of a trashed document look disabled", async () => {
     serve(doc("d1", "Rechnung", trashed));
     await openAt("/?doc=d1&trash=1");
-    expect(titleField().className).toContain("disabled:bg-surface-hover");
-    expect(titleField().className).toContain("disabled:text-ink-muted");
+    // Carbon's fields in a disabled fieldset: disabled, with Carbon's disabled style.
+    expect(titleField().matches(":disabled")).toBe(true);
+    expect(titleField().classList.contains("cds--text-input")).toBe(true);
+    expect(detail().getByRole("combobox", { name: t.tags }).matches(":disabled")).toBe(true);
+    expect(detail().getByRole("checkbox", { name: t.inInbox }).matches(":disabled")).toBe(true);
   });
 
   it("says when the archive serial number is taken by a document in the trash", async () => {
@@ -1179,5 +1215,193 @@ describe("a delete or purge answered after the detail was left (#135 review B)",
     expect((await screen.findByTestId("notice")).textContent).toContain(t.purgedDocument("Rechnung"));
     await waitFor(() => expect(screen.queryByRole("link", { name: "Rechnung" })).toBeNull());
     expect(screen.getByRole("link", { name: "Bleibt" })).toBeTruthy();
+  });
+});
+
+describe("the Carbon pickers (#150 part 4)", () => {
+  const tagBox = async () => {
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    return box;
+  };
+  const optionNames = () => detail().getAllByRole("option").map((o) => o.getAttribute("aria-label"));
+
+  it("lists the tags in tree order with their path, and finds a nested tag by its own name and by its parent's", async () => {
+    tags = [tag("t3", "Home"), tag("t1", "Finance"), tag("t2", "Bills", { parentId: "t1" })];
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    const box = await tagBox();
+    fireEvent.click(box);
+    expect(optionNames()).toEqual(["Finance", "Finance / Bills", "Home"]);
+    // Its own name.
+    fireEvent.change(box, { target: { value: "bills" } });
+    expect(optionNames()).toEqual(["Finance / Bills"]);
+    // Its parent's name shows the parent and the child.
+    fireEvent.change(box, { target: { value: "Finance" } });
+    expect(optionNames()).toEqual(["Finance", "Finance / Bills"]);
+    fireEvent.click(detail().getByRole("option", { name: "Finance / Bills" }));
+    // Chosen: the tag by its own name, as a chip with its remove button.
+    const chosen = within(await detail().findByRole("list", { name: t.chosenIn(t.tags) }));
+    expect(chosen.getAllByRole("listitem")).toHaveLength(1);
+    expect(chosen.getByText("Bills")).toBeTruthy();
+    expect(chosen.getByRole("button", { name: t.removeChoice("Bills") })).toBeTruthy();
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ tagIds: ["t2"], expectedModifiedAt: "2026-10-21T10:00:00Z" });
+    // The chip removes it again.
+    fireEvent.click(chosen.getByRole("button", { name: t.removeChoice("Bills") }));
+    await waitFor(() => expect(detail().queryByRole("list", { name: t.chosenIn(t.tags) })).toBeNull());
+    expect((detail().getByRole("button", { name: t.save }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("offers Create only for a name that is no tag yet, and a created tag is chosen at once", async () => {
+    tags = [tag("t1", "Steuer")];
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    const box = await tagBox();
+    fireEvent.change(box, { target: { value: "steuer" } });
+    expect(optionNames()).toEqual(["Steuer"]);
+    fireEvent.change(box, { target: { value: "Steuern" } });
+    expect(optionNames()).toEqual([t.createNamed("Steuern")]);
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Steuern") }));
+    expect(await detail().findByRole("button", { name: t.removeChoice("Steuern") })).toBeTruthy();
+    expect(requests.find((r) => r.method === "POST" && r.url === "/api/tags")!.body).toEqual({ name: "Steuern" });
+    // Created, it is a tag like any other: no Create for it any more.
+    fireEvent.change(box, { target: { value: "Steuern" } });
+    expect(optionNames()).toEqual(["Steuern"]);
+  });
+
+  it("shows why a tag could not be created, at the field", async () => {
+    tags = [tag("t1", "Steuer")];
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    vi.spyOn(documentsApi, "get");
+    const realFetch = fetch;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url === "/api/tags" && init?.method === "POST") return json(409, { error: "taken", code: "name_taken" });
+      return realFetch(url, init);
+    });
+    const box = await tagBox();
+    fireEvent.change(box, { target: { value: "Neu" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Neu") }));
+    expect(await detail().findByText(t.nameTaken)).toBeTruthy();
+    expect(detail().queryByRole("button", { name: t.removeChoice("Neu") })).toBeNull();
+  });
+
+  it("keeps the arrow keys inside an open list box and the notes switcher: they never change the document", async () => {
+    tags = [tag("t1", "Steuer"), tag("t2", "Arzt")];
+    serve(doc("d1", "A", { notes: "x" }), doc("d2", "B"), doc("d3", "C"));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "B" }));
+    await waitFor(() => expect(titleField().value).toBe("B"));
+    const box = await tagBox();
+    fireEvent.click(box);
+    const list = detail().getByRole("listbox", { name: /Tags/ });
+    // In the field with the list open, and on an option of the list.
+    fireEvent.keyDown(box, { key: "ArrowRight" });
+    fireEvent.keyDown(box, { key: "ArrowLeft" });
+    fireEvent.keyDown(within(list).getAllByRole("option")[0]!, { key: "ArrowRight" });
+    expect(docParam()).toBe("d2");
+    // Escape in the picker: the list closes, the document stays open.
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect(docParam()).toBe("d2");
+    expect(screen.getByTestId("document-detail")).toBeTruthy();
+    // The notes switcher moves between Edit and Preview with the arrows.
+    fireEvent.click(detail().getByRole("button", { name: t.previousDocument }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    const preview = detail().getByRole("tab", { name: t.notesPreviewLabel });
+    fireEvent.keyDown(preview, { key: "ArrowLeft" });
+    expect(docParam()).toBe("d1");
+    await waitFor(() => expect(detail().getByRole("textbox", { name: t.fieldNotes })).toBeTruthy());
+    // Outside, the keys still move between documents.
+    fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    expect(docParam()).toBe("d2");
+  });
+
+  it("chooses and clears the correspondent with the ComboBox, with Create for a new name", async () => {
+    correspondents = [named("c1", "Finanzamt")];
+    serve(doc("d1", "A", { correspondentId: "c1" }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(box.value).toBe("Finanzamt"));
+    fireEvent.click(detail().getByRole("button", { name: t.carbon.ids["clear.selection"] }));
+    await waitFor(() => expect(box.value).toBe(""));
+    fireEvent.change(box, { target: { value: "Arzt" } });
+    expect(detail().getAllByRole("option").map((o) => o.textContent)).toEqual([t.createNamed("Arzt")]);
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Arzt") }));
+    await waitFor(() => expect(box.value).toBe("Arzt"));
+    expect(requests.find((r) => r.method === "POST" && r.url === "/api/correspondents")!.body).toEqual({ name: "Arzt" });
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ correspondentId: "new-Arzt", expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
+});
+
+describe("the Carbon pickers (#150 part 4): changing a choice", () => {
+  it("keeps what is typed over a chosen correspondent, and Enter takes the match", async () => {
+    correspondents = [named("c1", "Finanzamt"), named("c2", "Arzt")];
+    serve(doc("d1", "A", { correspondentId: "c1" }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(box.value).toBe("Finanzamt"));
+    fireEvent.change(box, { target: { value: "ar" } });
+    fireEvent.change(box, { target: { value: "arz" } });
+    await act(async () => {});
+    expect(box.value).toBe("arz");
+    // The match, and Create for the typed name (no row is named exactly so).
+    expect(detail().getAllByRole("option").map((o) => o.textContent)).toEqual(["Arzt", t.createNamed("arz")]);
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(box.value).toBe("Arzt"));
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ correspondentId: "c2", expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
+});
+
+describe("the detail in German", () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it("names the header, the fields, the pickers, the notes switcher and the actions in German, nothing in English", async () => {
+    vi.resetModules();
+    vi.stubGlobal("navigator", { ...navigator, languages: ["de-DE", "en-US"], language: "de-DE" });
+    const { App: GermanApp } = await import("./App");
+    const { messagesFor } = await import("./i18n");
+    const de = messagesFor("de");
+    tags = [tag("t1", "Steuer")];
+    correspondents = [named("c1", "Finanzamt")];
+    serve(doc("d1", "Rechnung", { tagIds: ["t1"], correspondentId: "c1", notes: "Bezahlt" }));
+    window.history.replaceState(null, "", "/?doc=d1");
+    render(<GermanApp />);
+    const d = within(await screen.findByTestId("document-detail"));
+    await waitFor(() => expect(d.getByLabelText(de.fieldTitle)).toBeTruthy());
+    // The header row and the viewer's toolbar.
+    for (const name of [de.closeDocument, de.previousDocument, de.nextDocument, de.zoomFit, de.zoomIn, de.zoomOut]) expect(d.getByRole("button", { name })).toBeTruthy();
+    expect(d.getByRole("toolbar", { name: de.viewerTools })).toBeTruthy();
+    // The fields and the pickers, with Carbon's texts.
+    for (const name of [de.fieldDate, de.fieldASN]) expect(d.getByLabelText(name)).toBeTruthy();
+    const corr = d.getByRole("combobox", { name: de.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(corr.value).toBe("Finanzamt"));
+    // The correspondent's clear button; the tag picker has one of its own.
+    expect(d.getAllByRole("button", { name: de.carbon.ids["clear.selection"] }).length).toBeGreaterThanOrEqual(1);
+    expect(d.getAllByRole("button", { name: de.carbon.ids["open.menu"] }).length).toBeGreaterThanOrEqual(2);
+    expect(d.getByRole("combobox", { name: de.tags })).toBeTruthy();
+    const chosen = within(d.getByRole("list", { name: de.chosenIn(de.tags) }));
+    expect(chosen.getByRole("button", { name: de.removeChoice("Steuer") })).toBeTruthy();
+    // The notes switcher, the flags, the actions and the facts.
+    expect(d.getByRole("tab", { name: de.notesEditLabel })).toBeTruthy();
+    expect(d.getByRole("tab", { name: de.notesPreviewLabel })).toBeTruthy();
+    expect(d.getByRole("checkbox", { name: de.inInbox })).toBeTruthy();
+    expect(d.getByRole("checkbox", { name: de.favorite })).toBeTruthy();
+    expect(d.getByRole("button", { name: de.save })).toBeTruthy();
+    expect(d.getByRole("button", { name: de.done })).toBeTruthy();
+    expect(d.getByRole("button", { name: de.deleteDocumentLabel("Rechnung") })).toBeTruthy();
+    expect(d.getByRole("region", { name: de.fileFacts })).toBeTruthy();
+    expect(d.getByRole("link", { name: de.downloadOriginal })).toBeTruthy();
+    const html = document.body.innerHTML;
+    for (const s of ["Open menu", "Close menu", "Clear selected", "Total items selected", "To clear selection", "Zoom in", "Zoom out", "Fit width", "Close document", "Next document", ">Save<", ">Done<", "Edit notes", "Choose an item"]) {
+      expect(html, s).not.toContain(s);
+    }
   });
 });

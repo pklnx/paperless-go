@@ -1,15 +1,14 @@
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type TouchEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type MouseEvent, type ReactNode, type TouchEvent } from "react";
+import { Button, Checkbox, ContentSwitcher, Form, IconButton, InlineNotification, Link, Switch, TextArea, TextInput } from "@carbon/react";
+import { ChevronLeft, ChevronRight, Close } from "@carbon/icons-react";
 import { ApiError, documentsApi, metadataApi, type DocumentDetail as Doc, type DocumentSummary, type Metadata, type MetadataKind, type User } from "./api";
 import { DangerModal } from "./DangerModal";
 import { documentName, ProcessingStatus } from "./DocumentParts";
-import { dialogOpen } from "./dialogs";
+import { dialogOpen, ownedByWidget } from "./dialogs";
 import { formFrom, isDirty, patchFrom, rebaseForm, type DocumentForm, type InvalidField } from "./documentForm";
-import { ArrowIcon, CloseIcon, InboxIcon, StarIcon, iconButton } from "./icons";
 import { lang, t } from "./i18n";
-import type { PickerOption } from "./Picker";
-import { Picker } from "./Picker";
+import { NamedPicker, TagPicker, type Choice, type TagChoice } from "./DocumentPickers";
 import { Preview } from "./DocumentPreview";
-import { button, input, primary } from "./styles";
 import { inTrash, PurgeConfirm, foreignOwners, trashDay, trashErrorText } from "./Trash";
 import { buildTagTree, type TagNode } from "./tagTree";
 import { sortByName } from "./collate";
@@ -52,14 +51,18 @@ const day = (iso: string) => {
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleString(lang, { dateStyle: "medium", timeStyle: "short" });
 };
 
-/** Whether a key press belongs to a field (arrow keys move the caret there, not between documents). */
+/** Whether a touch starts in a field or a list box (a swipe there scrolls or selects, it does not change the document). */
 function inField(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
-  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.closest("[role=listbox]") !== null;
+  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.closest("[role=listbox], .cds--list-box") !== null;
 }
 
-function tagOptions(nodes: TagNode[], depth = 0): PickerOption[] {
-  return nodes.flatMap((n) => [{ id: n.item.id, name: n.item.name, depth, color: n.item.color || undefined }, ...tagOptions(n.children, depth + 1)]);
+/** The tags in tree order, each with its path from the root ("Finance / Bills"). */
+function tagChoices(nodes: TagNode[], above = ""): TagChoice[] {
+  return nodes.flatMap((n) => {
+    const path = above ? `${above} / ${n.item.name}` : n.item.name;
+    return [{ id: n.item.id, name: n.item.name, path, color: n.item.color || undefined }, ...tagChoices(n.children, path)];
+  });
 }
 
 /**
@@ -215,19 +218,23 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // A picker that took Escape (its list closes, its text clears) has
+      // prevented the default or stopped the event: the document stays.
       if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
-      // A dialog or a navigation overlay over the detail has the keys.
+      // A dialog (the guard's modal, the purge question) or a navigation
+      // overlay over the detail has the keys.
       if (dialogOpen()) return;
       const n = nav.current;
       if (e.key === "Escape") {
         e.preventDefault();
         n.close();
-      } else if (!inField(e.target) && e.key === "ArrowLeft" && n.prev && !n.saving) {
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        // Not in a field, a list box, a tab list or an open popover: there the keys move inside.
+        if (ownedByWidget(e)) return;
+        const to = e.key === "ArrowLeft" ? n.prev : n.next;
+        if (!to || n.saving) return;
         e.preventDefault();
-        n.open(n.prev.id);
-      } else if (!inField(e.target) && e.key === "ArrowRight" && n.next && !n.saving) {
-        e.preventDefault();
-        n.open(n.next.id);
+        n.open(to.id);
       }
     };
     document.addEventListener("keydown", onKey);
@@ -294,16 +301,15 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
         text: other ? (
           <>
             {taken}{" "}
-            <a
-              className="text-accent-ink underline"
+            <Link
               href={docHref(other)}
-              onClick={(e) => {
+              onClick={(e: MouseEvent<HTMLAnchorElement>) => {
                 e.preventDefault();
                 open(other);
               }}
             >
               {t.openThatDocument}
-            </a>
+            </Link>
           </>
         ) : (
           taken
@@ -558,255 +564,169 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   const metaData = meta && doc && meta.owner === doc.ownerId ? meta.data : null;
   const options = useMemo(() => {
     if (!metaData) return null;
-    const named = (rows: Metadata["correspondents"]) => sortByName(rows, (r) => r.name).map((r) => ({ id: r.id, name: r.name, depth: 0 }));
-    return { tags: tagOptions(buildTagTree(metaData.tags)), correspondents: named(metaData.correspondents), types: named(metaData.documentTypes) };
+    const named = (rows: Metadata["correspondents"]): Choice[] => sortByName(rows, (r) => r.name).map((r) => ({ id: r.id, name: r.name }));
+    return { tags: tagChoices(buildTagTree(metaData.tags)), correspondents: named(metaData.correspondents), types: named(metaData.documentTypes) };
   }, [metaData]);
 
   const name = doc ? documentName({ title: form?.title ?? doc.title, originalFileName: doc.originalFileName }) : "";
   const foreignOwner = doc && user.admin && doc.ownerName && doc.ownerId !== user.id ? doc.ownerName : "";
   const trashed = trashedNow;
-  const fieldError = (f: ErrorField) =>
-    errors[f] ? (
-      <p id={`${headingId}-${f}-error`} role="alert" className="text-sm text-danger">
-        {errors[f]}
-      </p>
-    ) : null;
-  const errorProps = (f: ErrorField) => (errors[f] ? { "aria-invalid": true, "aria-describedby": `${headingId}-${f}-error` } : {});
-  const label = "text-sm font-medium";
-  // The rendered notes of a trashed document look like the disabled fields around them.
-  const notesReadOnly = "rounded-md border border-line-control bg-surface-hover px-2.5 py-1.5 text-ink-muted";
+  const fieldId = (f: string) => `${headingId}-${f}`;
+  // Carbon shows invalidText under the field (id "<field>-error-msg"); the
+  // TextInput does not describe itself by it, the TextArea names it as
+  // aria-errormessage.
+  const invalid = (f: ErrorField) => (errors[f] ? { invalid: true, invalidText: errors[f], "aria-describedby": `${fieldId(f)}-error-msg` } : {});
+  const notesLabelId = fieldId("notes-label");
 
   return (
-    <>
-      <div aria-hidden="true" className="fixed inset-0 z-20 bg-scrim md:hidden" />
-      <section
-        aria-labelledby={headingId}
-        data-testid="document-detail"
-        onTouchStart={onTouchStart}
-        onTouchEnd={onTouchEnd}
-        // Below Carbon's fixed header (3rem plus the notch) and, from lg, right of the
-        // rail and the column (app-detail, layout.css); a .legacy root (index.css) until part 4 of #150.
-        className="legacy app-detail fixed inset-x-0 top-[calc(3rem+env(safe-area-inset-top))] bottom-0 z-20 flex flex-col overflow-hidden rounded-t-2xl bg-bg shadow-2xl md:rounded-none md:shadow-none"
-      >
-        <header className="flex items-center gap-1 border-b border-line px-2 py-1.5">
-          <button type="button" className={iconButton} aria-label={t.closeDocument} title={t.closeDocument} onClick={close}>
-            <CloseIcon />
-          </button>
-          <h2 id={headingId} ref={heading} tabIndex={-1} className="min-w-0 flex-1 truncate px-1 font-semibold outline-none">
-            {doc ? name : loadError ? t.document : t.loading}
-          </h2>
-          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!prev || busy} aria-label={t.previousDocument} title={t.previousDocument} onClick={() => prev && !busy && open(prev.id)}>
-            <span className="-rotate-90">
-              <ArrowIcon up />
-            </span>
-          </button>
-          <button type="button" className={`${iconButton} disabled:opacity-40`} disabled={!next || busy} aria-label={t.nextDocument} title={t.nextDocument} onClick={() => next && !busy && open(next.id)}>
-            <span className="rotate-90">
-              <ArrowIcon up />
-            </span>
-          </button>
-        </header>
-        {loadError && (
-          <p role="alert" className="p-4 text-sm text-danger">
-            {loadError}
-          </p>
-        )}
-        {doc && form && (
-          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto md:grid md:grid-cols-[minmax(0,1fr)_24rem] md:overflow-hidden">
-            <div className="h-[60dvh] shrink-0 md:h-auto md:min-h-0">
-              <Preview doc={doc} processing={doc.processing?.state === "queued" || doc.processing?.state === "running"} />
-            </div>
-            <div className="flex flex-col gap-4 border-line p-4 md:min-h-0 md:overflow-y-auto md:border-l">
-              {foreignOwner && <p className="text-sm text-ink-muted">{t.ownedBy(foreignOwner)}</p>}
-              {trashed && (
-                <div ref={banner} role="region" aria-label={t.trash} className="flex flex-col gap-2 rounded-lg border border-warning-line bg-warning-soft p-3 text-sm">
-                  <p>
-                    {t.trashBanner(trashDay(doc.deletedAt))} {doc.purgeAt && t.trashBannerRemoved(trashDay(doc.purgeAt))}
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    <button type="button" className={primary} disabled={trashBusy} onClick={restore}>
-                      {t.restore}
-                    </button>
-                    <button type="button" className={button} disabled={trashBusy} onClick={() => setPurgeAsk({ error: "" })}>
-                      {t.purge}
-                    </button>
-                  </div>
+    <section aria-labelledby={headingId} data-testid="document-detail" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} className="doc-detail">
+      <header className="doc-detail__head">
+        <IconButton kind="ghost" size="md" align="bottom-start" label={t.closeDocument} onClick={close}>
+          <Close />
+        </IconButton>
+        <h2 id={headingId} ref={heading} tabIndex={-1} className="doc-detail__title">
+          {doc ? name : loadError ? t.document : t.loading}
+        </h2>
+        <IconButton kind="ghost" size="md" align="bottom" label={t.previousDocument} disabled={!prev || busy} onClick={() => prev && !busy && open(prev.id)}>
+          <ChevronLeft />
+        </IconButton>
+        <IconButton kind="ghost" size="md" align="bottom-end" label={t.nextDocument} disabled={!next || busy} onClick={() => next && !busy && open(next.id)}>
+          <ChevronRight />
+        </IconButton>
+      </header>
+      {loadError && (
+        <div className="doc-detail__notice">
+          <InlineNotification className="notification--full" kind="error" lowContrast hideCloseButton role="alert" statusIconDescription={t.carbon.status.error} subtitle={loadError} />
+        </div>
+      )}
+      {doc && form && (
+        <div className="doc-detail__body">
+          <div className="doc-detail__preview">
+            <Preview doc={doc} processing={doc.processing?.state === "queued" || doc.processing?.state === "running"} />
+          </div>
+          <div className="doc-detail__panel">
+            {foreignOwner && <p className="doc-detail__owner app-text-secondary">{t.ownedBy(foreignOwner)}</p>}
+            {trashed && (
+              <div ref={banner} role="region" aria-label={t.trash} className="doc-trash">
+                {/* Carbon's notification takes no buttons: the actions sit under it, in the same region. */}
+                <InlineNotification className="notification--full" kind="warning" lowContrast hideCloseButton role="status" statusIconDescription={t.carbon.status.warning} title={t.trashBanner(trashDay(doc.deletedAt))} subtitle={doc.purgeAt ? t.trashBannerRemoved(trashDay(doc.purgeAt)) : undefined} />
+                <div className="doc-trash__actions">
+                  <Button kind="primary" size="sm" disabled={trashBusy} onClick={restore}>
+                    {t.restore}
+                  </Button>
+                  <Button kind="danger--ghost" size="sm" disabled={trashBusy} onClick={() => setPurgeAsk({ error: "" })}>
+                    {t.purge}
+                  </Button>
                 </div>
-              )}
-              <form
-                className="flex flex-col gap-3"
-                aria-label={t.editDocument}
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  save(false);
-                }}
-              >
-                <fieldset disabled={saving || trashed} className="flex min-w-0 flex-col gap-3">
-                  <div className="flex flex-col gap-1">
-                    <label htmlFor={`${headingId}-title`} className={label}>
-                      {t.fieldTitle}
-                    </label>
-                    <input id={`${headingId}-title`} ref={titleField} className={input} value={form.title} maxLength={1024} placeholder={doc.originalFileName} onChange={(e) => set("title", e.target.value)} {...errorProps("title")} />
-                    {fieldError("title")}
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="flex flex-col gap-1">
-                      <label htmlFor={`${headingId}-date`} className={label}>
-                        {t.fieldDate}
-                      </label>
-                      <input id={`${headingId}-date`} type="date" required className={input} value={form.date} onChange={(e) => set("date", e.target.value)} {...errorProps("date")} />
-                      {fieldError("date")}
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <label htmlFor={`${headingId}-asn`} className={label}>
-                        {t.fieldASN}
-                      </label>
-                      <input id={`${headingId}-asn`} className={input} inputMode="numeric" value={form.asn} maxLength={10} onChange={(e) => set("asn", e.target.value)} {...errorProps("asn")} />
-                      {fieldError("asn")}
-                    </div>
-                  </div>
-                  {metaError && (
-                    <p role="alert" className="text-sm text-danger">
-                      {metaError}
-                    </p>
-                  )}
-                  <Picker
-                    label={t.fieldCorrespondent}
-                    options={options?.correspondents ?? []}
-                    selected={form.correspondentId ? [form.correspondentId] : []}
-                    multiple={false}
-                    disabled={!options}
-                    onChange={(ids) => set("correspondentId", ids[0] ?? null)}
-                    onCreate={creator("correspondents")}
-                  />
-                  <Picker
-                    label={t.fieldType}
-                    options={options?.types ?? []}
-                    selected={form.documentTypeId ? [form.documentTypeId] : []}
-                    multiple={false}
-                    disabled={!options}
-                    onChange={(ids) => set("documentTypeId", ids[0] ?? null)}
-                    onCreate={creator("document-types")}
-                  />
-                  <Picker label={t.tags} options={options?.tags ?? []} selected={form.tagIds} multiple disabled={!options} onChange={(ids) => set("tagIds", ids)} onCreate={creator("tags")} />
-                  <div className="flex flex-col gap-1">
-                    <div className="flex items-center justify-between gap-2">
-                      {notesEditing ? (
-                        <label htmlFor={`${headingId}-notes`} className={label}>
-                          {t.fieldNotes}
-                        </label>
-                      ) : (
-                        <span id={`${headingId}-notes-label`} className={label}>
-                          {t.fieldNotes}
-                        </span>
-                      )}
-                      {(!notesEditing || form.notes !== "") && (
-                        <button
-                          type="button"
-                          className="rounded-md px-1.5 text-sm text-accent-ink hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent pointer-coarse:min-h-11"
-                          aria-label={notesEditing ? t.notesPreviewLabel : t.notesEditLabel}
-                          onClick={() => {
-                            focusNotes.current = !notesEditing;
-                            setNotesEditing(!notesEditing);
-                          }}
-                        >
-                          {notesEditing ? t.notesPreview : t.notesEdit}
-                        </button>
-                      )}
-                    </div>
-                    {notesEditing ? (
-                      <>
-                        <textarea
-                          id={`${headingId}-notes`}
-                          ref={notesField}
-                          className={`${input} min-h-24`}
-                          value={form.notes}
-                          maxLength={100000}
-                          onChange={(e) => set("notes", e.target.value)}
-                          aria-describedby={errors.notes ? `${headingId}-notes-error` : `${headingId}-notes-hint`}
-                          aria-invalid={errors.notes ? true : undefined}
-                        />
-                        <p id={`${headingId}-notes-hint`} className="text-xs text-ink-muted">
-                          {t.notesHint}
-                        </p>
-                      </>
-                    ) : (
-                      <div role="group" aria-labelledby={`${headingId}-notes-label`} data-testid="notes-rendered" className={`flex min-w-0 flex-col gap-2 text-sm wrap-anywhere ${trashed ? notesReadOnly : ""}`}>
-                        {form.notes !== "" ? <NotesView text={form.notes} /> : <p className="text-ink-muted">{t.notesNone}</p>}
-                      </div>
+              </div>
+            )}
+            <Form
+              className="doc-form"
+              aria-label={t.editDocument}
+              onSubmit={(e) => {
+                e.preventDefault();
+                save(false);
+              }}
+            >
+              {/* In the trash, and while a save runs, every field is read-only: the disabled fieldset. */}
+              <fieldset disabled={saving || trashed} className="doc-form__fields">
+                <TextInput id={fieldId("title")} ref={titleField} labelText={t.fieldTitle} value={form.title} maxLength={1024} placeholder={doc.originalFileName} onChange={(e) => set("title", e.target.value)} {...invalid("title")} />
+                <div className="doc-form__row">
+                  <TextInput id={fieldId("date")} type="date" required labelText={t.fieldDate} value={form.date} onChange={(e) => set("date", e.target.value)} {...invalid("date")} />
+                  <TextInput id={fieldId("asn")} labelText={t.fieldASN} inputMode="numeric" value={form.asn} maxLength={10} onChange={(e) => set("asn", e.target.value)} {...invalid("asn")} />
+                </div>
+                {metaError && <InlineNotification className="notification--full" kind="error" lowContrast hideCloseButton role="alert" statusIconDescription={t.carbon.status.error} subtitle={metaError} />}
+                <NamedPicker label={t.fieldCorrespondent} choices={options?.correspondents ?? []} selected={form.correspondentId} disabled={!options} onChange={(id) => set("correspondentId", id)} onCreate={creator("correspondents")} />
+                <NamedPicker label={t.fieldType} choices={options?.types ?? []} selected={form.documentTypeId} disabled={!options} onChange={(id) => set("documentTypeId", id)} onCreate={creator("document-types")} />
+                <TagPicker label={t.tags} choices={options?.tags ?? []} selected={form.tagIds} disabled={!options} onChange={(ids) => set("tagIds", ids)} onCreate={creator("tags")} />
+                <div className="doc-notes">
+                  <div className="doc-notes__head">
+                    {/* The field's own label is Carbon's (hidden); this one names the rendered notes. */}
+                    <span id={notesLabelId} className="cds--label" aria-hidden={notesEditing || undefined}>
+                      {t.fieldNotes}
+                    </span>
+                    {(!notesEditing || form.notes !== "") && (
+                      <ContentSwitcher
+                        size="sm"
+                        aria-label={t.notesMode}
+                        selectedIndex={notesEditing ? 0 : 1}
+                        onChange={({ index }) => {
+                          const editing = index === 0;
+                          if (editing === notesEditing) return;
+                          focusNotes.current = editing;
+                          setNotesEditing(editing);
+                        }}
+                      >
+                        <Switch name="edit" text={t.notesEdit} aria-label={t.notesEditLabel} />
+                        <Switch name="preview" text={t.notesPreview} aria-label={t.notesPreviewLabel} />
+                      </ContentSwitcher>
                     )}
-                    {fieldError("notes")}
                   </div>
-                  <div className="flex flex-wrap gap-x-5 gap-y-2">
-                    <label className="flex items-center gap-2 text-sm pointer-coarse:min-h-11">
-                      <input type="checkbox" checked={form.isInbox} onChange={(e) => set("isInbox", e.target.checked)} />
-                      <InboxIcon />
-                      {t.inInbox}
-                    </label>
-                    <label className="flex items-center gap-2 text-sm pointer-coarse:min-h-11">
-                      <input type="checkbox" checked={form.isFavorite} onChange={(e) => set("isFavorite", e.target.checked)} />
-                      <StarIcon filled={form.isFavorite} />
-                      {t.favorite}
-                    </label>
-                  </div>
-                </fieldset>
-                {general && (
-                  <p role="alert" className="text-sm text-danger">
-                    {general}
-                  </p>
-                )}
-                {!trashed && (
-                <div className="flex flex-wrap items-center gap-2">
-                  <button type="submit" className={primary} disabled={saving || !dirty}>
+                  {notesEditing ? (
+                    <TextArea id={fieldId("notes")} ref={notesField} labelText={t.fieldNotes} hideLabel rows={5} value={form.notes} maxLength={100000} onChange={(e) => set("notes", e.target.value)} helperText={t.notesHint} {...invalid("notes")} />
+                  ) : (
+                    <div role="group" aria-labelledby={notesLabelId} data-testid="notes-rendered" className={trashed ? "notes-rendered notes-rendered--disabled" : "notes-rendered"}>
+                      {form.notes !== "" ? <NotesView text={form.notes} /> : <p className="app-text-secondary">{t.notesNone}</p>}
+                    </div>
+                  )}
+                </div>
+                <div className="doc-form__flags">
+                  <Checkbox id={fieldId("inbox")} labelText={t.inInbox} checked={form.isInbox} onChange={(e) => set("isInbox", e.target.checked)} />
+                  <Checkbox id={fieldId("favorite")} labelText={t.favorite} checked={form.isFavorite} onChange={(e) => set("isFavorite", e.target.checked)} />
+                </div>
+              </fieldset>
+              {general && <InlineNotification className="notification--full" kind="error" lowContrast hideCloseButton role="alert" statusIconDescription={t.carbon.status.error} subtitle={general} />}
+              {!trashed && (
+                <div className="doc-form__actions">
+                  <Button type="submit" kind="primary" size="md" disabled={saving || !dirty}>
                     {saving ? t.saving : t.save}
-                  </button>
-                  <button type="button" className={button} disabled={saving} title={inboxList ? t.doneHintInbox : t.doneHint} onClick={() => save(true)}>
+                  </Button>
+                  <Button type="button" kind="secondary" size="md" disabled={saving} title={inboxList ? t.doneHintInbox : t.doneHint} onClick={() => save(true)}>
                     {t.done}
-                  </button>
+                  </Button>
                   {saved && !dirty && (
-                    <span role="status" className="text-sm text-ink-muted">
+                    <span role="status" className="doc-form__state app-text-secondary">
                       {t.saved}
                     </span>
                   )}
-                  {dirty && !saving && <span className="text-sm text-ink-muted">{t.unsaved}</span>}
-                  <button type="button" className={`${button} ml-auto`} disabled={saving || trashBusy} aria-label={t.deleteDocumentLabel(name)} title={t.deleteDocumentLabel(name)} onClick={moveToTrash}>
+                  {dirty && !saving && <span className="doc-form__state app-text-secondary">{t.unsaved}</span>}
+                  <Button type="button" kind="danger--ghost" size="md" className="doc-form__delete" disabled={saving || trashBusy} aria-label={t.deleteDocumentLabel(name)} title={t.deleteDocumentLabel(name)} onClick={moveToTrash}>
                     {t.deleteDocument}
-                  </button>
+                  </Button>
                 </div>
-                )}
-              </form>
-              <FileFacts doc={doc} onChange={(d) => setDoc((x) => (x ? { ...x, processing: d.processing } : x))} />
-            </div>
+              )}
+            </Form>
+            <FileFacts doc={doc} onChange={(d) => setDoc((x) => (x ? { ...x, processing: d.processing } : x))} />
           </div>
-        )}
-        {asking && (
-          <DangerModal
-            size="sm"
-            modalHeading={t.discardChangesTitle}
-            primaryButtonText={t.discardChanges}
-            secondaryButtonText={t.keepEditing}
-            // Escape and the close button mean "Keep editing".
-            onRequestClose={() => answer(false)}
-            onSecondarySubmit={() => answer(false)}
-            onRequestSubmit={() => answer(true)}
-            // A question opened by Back or Forward has no opener: the focus goes to the heading.
-            returnFocus={() => heading.current}
-          >
-            <p>{t.unsavedChanges}</p>
-          </DangerModal>
-        )}
-        <PurgeConfirm
-          open={purgeAsk !== null && doc !== null}
-          title={t.purgeTitle(name)}
-          n={1}
-          owners={doc ? foreignOwners([doc], user) : []}
-          busy={trashBusy}
-          error={purgeAsk?.error}
-          confirm={purge}
-          cancel={() => setPurgeAsk(null)}
-        />
-      </section>
-    </>
+        </div>
+      )}
+      {asking && (
+        <DangerModal
+          size="sm"
+          modalHeading={t.discardChangesTitle}
+          primaryButtonText={t.discardChanges}
+          secondaryButtonText={t.keepEditing}
+          // Escape and the close button mean "Keep editing".
+          onRequestClose={() => answer(false)}
+          onSecondarySubmit={() => answer(false)}
+          onRequestSubmit={() => answer(true)}
+          // A question opened by Back or Forward has no opener: the focus goes to the heading.
+          returnFocus={() => heading.current}
+        >
+          <p>{t.unsavedChanges}</p>
+        </DangerModal>
+      )}
+      <PurgeConfirm
+        open={purgeAsk !== null && doc !== null}
+        title={t.purgeTitle(name)}
+        n={1}
+        owners={doc ? foreignOwners([doc], user) : []}
+        busy={trashBusy}
+        error={purgeAsk?.error}
+        confirm={purge}
+        cancel={() => setPurgeAsk(null)}
+      />
+    </section>
   );
 }
 
@@ -821,23 +741,24 @@ function FileFacts({ doc, onChange }: { doc: Doc; onChange: (d: DocumentSummary)
     ...(doc.processingNote ? [[t.processingNote, doc.processingNote] as [string, string]] : []),
   ];
   return (
-    <section aria-label={t.fileFacts} className="flex flex-col gap-2 border-t border-line pt-3 text-sm">
-      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
+    <section aria-label={t.fileFacts} className="doc-facts">
+      <h3 className="doc-facts__title">{t.fileFacts}</h3>
+      <dl className="doc-facts__list">
         {rows.map(([k, v]) => (
-          <div key={k} className="contents">
-            <dt className="text-ink-muted">{k}</dt>
-            <dd className="wrap-anywhere">{v}</dd>
+          <div key={k} className="doc-facts__row">
+            <dt className="app-text-secondary">{k}</dt>
+            <dd>{v}</dd>
           </div>
         ))}
       </dl>
-      <div className="flex flex-wrap gap-2">
-        <a className={button} href={documentsApi.fileURL(doc.id, "original")} download>
+      <div className="doc-facts__actions">
+        <Button as="a" kind="tertiary" size="sm" href={documentsApi.fileURL(doc.id, "original")} download>
           {t.downloadOriginal}
-        </a>
+        </Button>
         {doc.hasArchive && (
-          <a className={button} href={documentsApi.fileURL(doc.id, "archive")} download>
+          <Button as="a" kind="tertiary" size="sm" href={documentsApi.fileURL(doc.id, "archive")} download>
             {t.downloadArchive}
-          </a>
+          </Button>
         )}
       </div>
       <ProcessingStatus doc={doc} onChange={onChange} />

@@ -12,6 +12,10 @@ configure({ asyncUtilTimeout: 4_500 });
 // a specific answer (theme.test.ts) stub them again. Tests in the node
 // environment (build/, scripts/) have no window and need none of it.
 if (typeof window !== "undefined") {
+  // Carbon's ComboBox scrolls the highlighted option into view.
+  if (typeof Element.prototype.scrollIntoView !== "function") {
+    Element.prototype.scrollIntoView = () => {};
+  }
   if (typeof window.ResizeObserver === "undefined") {
     window.ResizeObserver = class ResizeObserver {
       observe() {}

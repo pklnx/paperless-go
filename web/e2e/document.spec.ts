@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { seed, unique } from "./demo";
 import { expect, test } from "./fixtures";
-import { chosen, closeDocument, detail, detailForm, discardChanges, discardQuestion, documentLink, field, keepEditing, logOut, notice, openSavedViewMenu, pdfPage, pick, pickTag, search, sheet } from "./ui";
+import { chosenNames, closeDocument, detail, detailForm, discardChanges, discardQuestion, documentLink, field, formError, keepEditing, logOut, notice, openSavedViewMenu, pdfPage, pick, pickTag, rowTags, saveDocument, search, sheet } from "./ui";
 
 /** The open document's ID, from the URL. */
 const openID = (page: Page) => new URL(page.url()).searchParams.get("doc") ?? "";
@@ -36,8 +36,10 @@ test("edit every field, save, and the values are kept after a reload", async ({ 
   const box = detailForm(page).getByRole("combobox", { name: "Correspondent", exact: true });
   await box.fill(correspondent);
   await page.getByRole("option", { name: `Create “${correspondent}”` }).click();
+  await expect(box).toHaveValue(correspondent);
   await pick(page, "Document type", "Contract");
   await pickTag(page, "Home");
+  await expect(chosenNames(page)).toHaveText(["Home"]);
   await field(page, "Notes").fill(`Bring the **insurance card**. [Practice website](${url})`);
   await expect(page.getByText("Unsaved changes")).toBeVisible();
   await detailForm(page).getByRole("button", { name: "Save", exact: true }).click();
@@ -47,9 +49,9 @@ test("edit every field, save, and the values are kept after a reload", async ({ 
   await expect(detail(page, title)).toBeVisible();
   await expect(field(page, "Title")).toHaveValue(title);
   await expect(field(page, "Document date")).toHaveValue("2026-06-30");
-  await expect(chosen(page, "Correspondent")).toHaveText(correspondent);
-  await expect(chosen(page, "Document type")).toHaveText("Contract");
-  await expect(chosen(page, "Tags")).toHaveText("Home");
+  await expect(field(page, "Correspondent")).toHaveValue(correspondent);
+  await expect(field(page, "Document type")).toHaveValue("Contract");
+  await expect(chosenNames(page)).toHaveText(["Home"]);
   // The notes show rendered: the link is a link.
   await expect(detailForm(page).getByRole("link", { name: "Practice website" })).toHaveAttribute("href", url);
   await expect(detailForm(page).getByText("insurance card")).toBeVisible();
@@ -237,9 +239,7 @@ test("a change made elsewhere meanwhile: the save is refused and the user's edit
   expect(status).toBe(200);
 
   await detailForm(page).getByRole("button", { name: "Save", exact: true }).click();
-  await expect(detailForm(page).getByRole("alert")).toHaveText(
-    "This document was changed elsewhere meanwhile. Your changes are kept on top of the new state; check them and save again.",
-  );
+  await expect(formError(page)).toHaveText("This document was changed elsewhere meanwhile. Your changes are kept on top of the new state; check them and save again.");
   await expect(field(page, "Title")).toHaveValue(title);
   await detailForm(page).getByRole("button", { name: "Save", exact: true }).click();
   await expect(detailForm(page).getByRole("status")).toHaveText("Saved");
@@ -247,4 +247,17 @@ test("a change made elsewhere meanwhile: the save is refused and the user's edit
   await page.reload();
   await expect(field(page, "Title")).toHaveValue(title);
   await expect(detailForm(page).getByText("Changed in another tab.")).toBeVisible();
+});
+
+test("a nested tag is picked by typing its own name, and the row shows it", async ({ page }) => {
+  // Bills is a sub-tag of Finance: the picker lists it as "Finance / Bills" and finds it by "Bills".
+  await page.goto("/");
+  await documentLink(page, seed.lease.title).click();
+  await expect(detail(page, seed.lease.title)).toBeVisible();
+  await expect(chosenNames(page)).toHaveText(["Home"]);
+  await pickTag(page, "Bills", "Finance / Bills");
+  await expect(chosenNames(page)).toHaveText(["Home", "Bills"]);
+  await saveDocument(page);
+  await closeDocument(page);
+  await expect(rowTags(page, seed.lease.title).getByRole("listitem")).toHaveText(["Home", "Bills"]);
 });
