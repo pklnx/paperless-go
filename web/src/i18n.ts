@@ -339,7 +339,7 @@ const en = {
   chosenIn: (label: string) => `Chosen: ${label}`,
   /** Read with the tag picker's label: how many are chosen, and how to clear them. */
   chosenCount: "Chosen:",
-  clearChosenHint: "Delete or Backspace in the empty field removes the last chosen entry",
+  clearChosenHint: "Backspace or Delete in the empty field removes the last chosen entry",
   notesMode: "Notes: edit or preview",
   removeChoice: (name: string) => `Remove ${name}`,
   createNamed: (name: string) => `Create “${name}”`,
@@ -955,7 +955,7 @@ const de: Messages = {
   chooseOne: "Auswählen…",
   chosenIn: (label: string) => `Ausgewählt: ${label}`,
   chosenCount: "Ausgewählt:",
-  clearChosenHint: "Entfernen oder Rücktaste im leeren Feld entfernt den zuletzt ausgewählten Eintrag",
+  clearChosenHint: "Rücktaste oder Entfernen im leeren Feld entfernt den zuletzt ausgewählten Eintrag",
   notesMode: "Notizen: bearbeiten oder Vorschau",
   removeChoice: (name: string) => `${name} entfernen`,
   createNamed: (name: string) => `„${name}“ anlegen`,

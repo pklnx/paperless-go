@@ -1337,6 +1337,80 @@ describe("the Carbon pickers (#150 part 4)", () => {
   });
 });
 
+describe("the Carbon pickers (#150 part 4): the keys that would clear a choice (review A, blocking 1)", () => {
+  const chips = () => within(detail().getByRole("list", { name: t.chosenIn(t.tags) })).getAllByRole("listitem").length;
+
+  it("Escape on the focused tag field with its list closed keeps the chips, changes nothing and closes the document", async () => {
+    tags = [tag("t1", "Steuer"), tag("t2", "Arzt")];
+    serve(doc("d1", "A", { tagIds: ["t1", "t2"] }), doc("d2", "B"));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "A" }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    expect(chips()).toBe(2);
+    box.focus();
+    fireEvent.keyDown(box, { key: "Escape" });
+    // Nothing unsaved: no question; the document closes, as from any other field.
+    await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
+    expect(docParam()).toBeNull();
+    expect(discardQuestion()).toBeNull();
+    expect(patches()).toHaveLength(0);
+    // Opened again, both tags are still there.
+    fireEvent.click(await screen.findByRole("link", { name: "A" }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    await waitFor(() => expect(chips()).toBe(2));
+  });
+
+  it("Backspace or Delete in the empty tag field removes the last chosen tag only, and the save sends the rest", async () => {
+    tags = [tag("t1", "Steuer"), tag("t2", "Arzt"), tag("t3", "Bank")];
+    serve(doc("d1", "A", { tagIds: ["t1", "t2", "t3"] }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    box.focus();
+    fireEvent.keyDown(box, { key: "Backspace" });
+    await waitFor(() => expect(chips()).toBe(2));
+    fireEvent.keyDown(box, { key: "Delete" });
+    await waitFor(() => expect(chips()).toBe(1));
+    expect(detail().getByRole("button", { name: t.removeChoice("Steuer") })).toBeTruthy();
+    expect(screen.getByTestId("document-detail")).toBeTruthy();
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ tagIds: ["t1"], expectedModifiedAt: "2026-10-21T10:00:00Z" });
+    // With text in the field, Delete edits the text and keeps the chip.
+    fireEvent.change(box, { target: { value: "x" } });
+    fireEvent.keyDown(box, { key: "Delete" });
+    expect(chips()).toBe(1);
+  });
+
+  it("Escape on a closed correspondent field keeps its text and its value, and closes the document (review A, follow-up 1)", async () => {
+    correspondents = [named("c1", "Finanzamt")];
+    serve(doc("d1", "A", { correspondentId: "c1" }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(box.value).toBe("Finanzamt"));
+    box.focus();
+    fireEvent.keyDown(box, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
+    expect(discardQuestion()).toBeNull();
+    expect(patches()).toHaveLength(0);
+    await openAt("/?doc=d1");
+    const again = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(again.value).toBe("Finanzamt"));
+  });
+
+  it("greys the chosen tags' chips of a document in the trash (review A, follow-up 3)", async () => {
+    tags = [tag("t1", "Steuer", { color: "#ff0000" })];
+    serve(doc("d1", "A", { tagIds: ["t1"], deletedAt: "2026-10-01T08:00:00Z", purgeAt: "2026-10-31T08:00:00Z" }));
+    await openAt("/?doc=d1&trash=1");
+    await waitFor(() => expect(chips()).toBe(1));
+    const chip = within(detail().getByRole("list", { name: t.chosenIn(t.tags) })).getByRole("listitem").firstElementChild as HTMLElement;
+    expect(chip.getAttribute("style")).toBeNull();
+    expect(chip.className).toContain("cds--tag--gray");
+  });
+});
+
 describe("the Carbon pickers (#150 part 4): changing a choice", () => {
   it("keeps what is typed over a chosen correspondent, and Enter takes the match", async () => {
     correspondents = [named("c1", "Finanzamt"), named("c2", "Arzt")];

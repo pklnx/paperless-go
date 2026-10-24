@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { ComboBox, DismissibleTag, FilterableMultiSelect } from "@carbon/react";
 import { ApiError } from "./api";
 import { t, translateWithId } from "./i18n";
@@ -30,6 +30,23 @@ const fold = (s: string) => s.toLocaleLowerCase();
 export function canCreate(name: string, choices: readonly Choice[]): boolean {
   const q = fold(name);
   return q !== "" && !choices.some((c) => fold(c.name) === q);
+}
+
+/** Whether the picker's list box (inside root) is open: Carbon marks the open ListBox. */
+const listOpen = (root: HTMLElement | null) => root?.querySelector(".cds--list-box--expanded") !== null;
+
+/**
+ * Escape in a picker's field while its list is closed: Carbon would clear
+ * the chosen entries (the FilterableMultiSelect) or empty the text but
+ * keep the choice (the ComboBox, through downshift). Neither reaches the
+ * field: the key is the document's Escape, as before (onEscape), and the
+ * field stays as it is. With the list open, Carbon closes the list.
+ */
+function escapeClosed(e: KeyboardEvent<HTMLElement>, root: HTMLElement | null, onEscape: (() => void) | undefined): boolean {
+  if (e.key !== "Escape" || !(e.target instanceof HTMLInputElement) || listOpen(root)) return false;
+  e.stopPropagation();
+  onEscape?.();
+  return true;
 }
 
 /** What went wrong when a row could not be created. */
@@ -71,6 +88,8 @@ interface NamedProps {
   /** Creates a row named name and answers its id; without it, nothing can be created here. */
   onCreate?: (name: string) => Promise<string>;
   disabled?: boolean;
+  /** Escape in the field while its list is closed: the document's Escape. */
+  onEscape?: () => void;
 }
 
 /**
@@ -79,8 +98,9 @@ interface NamedProps {
  * its clear button. Enter chooses the highlighted row (the first match
  * while typing), Escape closes the list and keeps the document open.
  */
-export function NamedPicker({ label, choices, selected, onChange, onCreate, disabled }: NamedProps) {
+export function NamedPicker({ label, choices, selected, onChange, onCreate, disabled, onEscape }: NamedProps) {
   const id = useId();
+  const root = useRef<HTMLDivElement>(null);
   const [typed, setTyped] = useState("");
   const creator = useCreator(onCreate);
   const items = useMemo<Choice[]>(() => {
@@ -96,36 +116,38 @@ export function NamedPicker({ label, choices, selected, onChange, onCreate, disa
     return found ?? (choices.length === 0 ? null : { id: selected, name: t.unknownEntry });
   }, [choices, selected]);
   return (
-    <ComboBox<Choice>
-      id={`${id}-combo`}
-      titleText={label}
-      placeholder={t.chooseOne}
-      items={items}
-      itemToString={(item) => item?.name ?? ""}
-      selectedItem={selectedItem}
-      disabled={disabled || creator.creating}
-      invalid={creator.error !== ""}
-      invalidText={creator.error}
-      translateWithId={translateWithId}
-      // The rows that contain the typed text; "Create" always.
-      shouldFilterItem={({ item, inputValue }) => item.id === CREATE || !inputValue || fold(item.name).includes(fold(inputValue))}
-      onInputChange={(text) => {
-        setTyped(text);
-        creator.clearError();
-      }}
-      onChange={({ selectedItem: item }) => {
-        if (!item) {
-          if (selected !== null) onChange(null);
-          return;
-        }
-        if (item.id === CREATE) {
-          creator.create(typed.trim(), onChange);
-          return;
-        }
-        if (item.id !== selected) onChange(item.id);
-      }}
-      inputProps={{ maxLength: 128 }}
-    />
+    <div ref={root} className="doc-form__picker" onKeyDownCapture={(e) => escapeClosed(e, root.current, onEscape)}>
+      <ComboBox<Choice>
+        id={`${id}-combo`}
+        titleText={label}
+        placeholder={t.chooseOne}
+        items={items}
+        itemToString={(item) => item?.name ?? ""}
+        selectedItem={selectedItem}
+        disabled={disabled || creator.creating}
+        invalid={creator.error !== ""}
+        invalidText={creator.error}
+        translateWithId={translateWithId}
+        // The rows that contain the typed text; "Create" always.
+        shouldFilterItem={({ item, inputValue }) => item.id === CREATE || !inputValue || fold(item.name).includes(fold(inputValue))}
+        onInputChange={(text) => {
+          setTyped(text);
+          creator.clearError();
+        }}
+        onChange={({ selectedItem: item }) => {
+          if (!item) {
+            if (selected !== null) onChange(null);
+            return;
+          }
+          if (item.id === CREATE) {
+            creator.create(typed.trim(), onChange);
+            return;
+          }
+          if (item.id !== selected) onChange(item.id);
+        }}
+        inputProps={{ maxLength: 128 }}
+      />
+    </div>
   );
 }
 
@@ -138,6 +160,10 @@ interface TagsProps {
   onChange: (ids: string[]) => void;
   onCreate?: (name: string) => Promise<string>;
   disabled?: boolean;
+  /** The document is read-only (in the trash): the chips take Carbon's disabled look (the fieldset disables the rest). */
+  readOnly?: boolean;
+  /** Escape in the field while its list is closed: the document's Escape. */
+  onEscape?: () => void;
 }
 
 /**
@@ -145,10 +171,14 @@ interface TagsProps {
  * in tree order and their path ("Finance / Bills"), so a nested tag is
  * found by its own name and by its parent's; a "Create “x”" item when the
  * typed name is no tag yet; the chosen tags as dismissible chips under the
- * field ("Chosen: Tags"), in the order they were chosen.
+ * field ("Chosen: Tags"), in the order they were chosen. Backspace or
+ * Delete in the empty field removes the last chosen tag; Carbon's own keys
+ * that would remove every chosen tag at once (Escape, Delete, Backspace
+ * while the list is closed) never reach the form.
  */
-export function TagPicker({ label, choices, selected, onChange, onCreate, disabled }: TagsProps) {
+export function TagPicker({ label, choices, selected, onChange, onCreate, disabled, readOnly, onEscape }: TagsProps) {
   const id = useId();
+  const root = useRef<HTMLDivElement>(null);
   const creator = useCreator(onCreate);
   const byId = useMemo(() => new Map(choices.map((c) => [c.id, c])), [choices]);
   const chosen = selected.map((s) => byId.get(s) ?? { id: s, name: t.unknownEntry, path: t.unknownEntry });
@@ -163,8 +193,22 @@ export function TagPicker({ label, choices, selected, onChange, onCreate, disabl
     return matches;
   };
   const remove = (tagId: string) => onChange(selected.filter((s) => s !== tagId));
+  const onKeyDownCapture = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (escapeClosed(e, root.current, onEscape)) return;
+    if (!(e.target instanceof HTMLInputElement) || (e.key !== "Backspace" && e.key !== "Delete")) return;
+    if (e.target.value === "") {
+      // The empty field: the last chosen tag goes (Carbon would drop them all).
+      e.preventDefault();
+      e.stopPropagation();
+      if (selected.length > 0 && !disabled && !readOnly) onChange(selected.slice(0, -1));
+    } else if (e.key === "Delete" && !listOpen(root.current)) {
+      // Delete edits the text; Carbon would clear the text and every chosen tag.
+      e.stopPropagation();
+    }
+  };
+  const chipsDisabled = disabled || readOnly;
   return (
-    <div className="doc-form__tags">
+    <div ref={root} className="doc-form__tags" onKeyDownCapture={onKeyDownCapture}>
       <FilterableMultiSelect<TagChoice>
         id={`${id}-tags`}
         titleText={label}
@@ -205,12 +249,12 @@ export function TagPicker({ label, choices, selected, onChange, onCreate, disabl
               {/* A tag's own colour, with black or white text for contrast; without one, and read-only, Carbon's gray. */}
               <DismissibleTag
                 size="md"
-                type={c.color && !disabled ? undefined : "gray"}
+                type={c.color && !chipsDisabled ? undefined : "gray"}
                 text={c.name}
                 title={t.removeChoice(c.name)}
                 dismissTooltipLabel={t.removeChoice(c.name)}
-                disabled={disabled}
-                style={c.color && !disabled ? { backgroundColor: c.color, color: chipInk(c.color) } : undefined}
+                disabled={chipsDisabled}
+                style={c.color && !chipsDisabled ? { backgroundColor: c.color, color: chipInk(c.color) } : undefined}
                 onClose={() => remove(c.id)}
               />
             </li>

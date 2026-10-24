@@ -636,9 +636,9 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
                   <TextInput id={fieldId("asn")} labelText={t.fieldASN} inputMode="numeric" value={form.asn} maxLength={10} onChange={(e) => set("asn", e.target.value)} {...invalid("asn")} />
                 </div>
                 {metaError && <InlineNotification className="notification--full" kind="error" lowContrast hideCloseButton role="alert" statusIconDescription={t.carbon.status.error} subtitle={metaError} />}
-                <NamedPicker label={t.fieldCorrespondent} choices={options?.correspondents ?? []} selected={form.correspondentId} disabled={!options} onChange={(id) => set("correspondentId", id)} onCreate={creator("correspondents")} />
-                <NamedPicker label={t.fieldType} choices={options?.types ?? []} selected={form.documentTypeId} disabled={!options} onChange={(id) => set("documentTypeId", id)} onCreate={creator("document-types")} />
-                <TagPicker label={t.tags} choices={options?.tags ?? []} selected={form.tagIds} disabled={!options} onChange={(ids) => set("tagIds", ids)} onCreate={creator("tags")} />
+                <NamedPicker label={t.fieldCorrespondent} choices={options?.correspondents ?? []} selected={form.correspondentId} disabled={!options} onChange={(id) => set("correspondentId", id)} onCreate={creator("correspondents")} onEscape={close} />
+                <NamedPicker label={t.fieldType} choices={options?.types ?? []} selected={form.documentTypeId} disabled={!options} onChange={(id) => set("documentTypeId", id)} onCreate={creator("document-types")} onEscape={close} />
+                <TagPicker label={t.tags} choices={options?.tags ?? []} selected={form.tagIds} disabled={!options} readOnly={trashed} onChange={(ids) => set("tagIds", ids)} onCreate={creator("tags")} onEscape={close} />
                 <div className="doc-notes">
                   <div className="doc-notes__head">
                     {/* The field's own label is Carbon's (hidden); this one names the rendered notes. */}
