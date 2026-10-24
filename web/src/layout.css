@@ -151,12 +151,431 @@ body,
   min-inline-size: 0;
   overflow-y: auto;
 }
-/* The open document (DocumentDetail, a fixed layer until part 4 of #150):
-   from lg right of the rail and the column. */
+/* The open document (DocumentDetail.tsx): a layer over the list below the
+   header (which reaches under the notch), the whole width on phones; from
+   lg right of the rail and the column. The header row, then the preview
+   and the panel: one scrolling column on phones, two columns from md. */
+.doc-detail {
+  position: fixed;
+  z-index: 20;
+  inset: calc(3rem + env(safe-area-inset-top)) 0 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: var(--cds-background);
+  color: var(--cds-text-primary);
+  font-size: 0.875rem;
+  line-height: 1.42857;
+  letter-spacing: 0.16px;
+}
 @media (min-width: 66rem) {
-  .app-detail {
+  .doc-detail {
     inset-inline-start: calc(3rem + 18rem);
   }
+}
+.doc-detail__head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.25rem;
+  min-block-size: 3rem;
+  padding-inline: 0.25rem;
+  border-block-end: 1px solid var(--cds-border-subtle-01);
+}
+.doc-detail__title {
+  /* heading-compact-02 */
+  flex: 1;
+  min-inline-size: 0;
+  margin: 0;
+  padding-inline: 0.25rem;
+  overflow: hidden;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.375;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  outline: none;
+}
+.doc-detail__notice {
+  padding: 1rem;
+}
+.doc-detail__body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+.doc-detail__preview {
+  flex: none;
+  block-size: 60dvh;
+}
+.doc-detail__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem;
+}
+@media (min-width: 48rem) {
+  .doc-detail__body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 24rem;
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+  }
+  .doc-detail__preview {
+    block-size: auto;
+    min-block-size: 0;
+  }
+  .doc-detail__panel {
+    min-block-size: 0;
+    overflow-y: auto;
+    border-inline-start: 1px solid var(--cds-border-subtle-01);
+  }
+}
+.doc-detail__owner {
+  margin: 0;
+}
+/* The trash banner: a warning notification with its two actions under it. */
+.doc-trash {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.doc-trash__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+/* The form: Carbon's fields one below the other. The fieldset keeps the
+   browser's look away, and stays as narrow as its column (a fieldset is
+   otherwise at least as wide as its content: a long code line in the
+   rendered notes would widen it). */
+.doc-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.doc-form__fields {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.doc-form__row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+.doc-form__picker {
+  display: contents;
+}
+.doc-form__tags {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.doc-form__chosen {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.doc-form__chosen .cds--tag {
+  margin: 0;
+}
+.doc-form__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 1.5rem;
+}
+.doc-form__flags .cds--form-item.cds--checkbox-wrapper {
+  flex: none;
+}
+/* The checkbox's input covers its label (as in the list), so a pointer and a test hit the control it names. */
+.doc-form__flags .cds--checkbox {
+  inset: 0;
+  z-index: 1;
+  margin: 0;
+  block-size: 100%;
+  inline-size: 100%;
+  clip: auto;
+  opacity: 0;
+  cursor: pointer;
+}
+@media (pointer: coarse) {
+  .doc-form__flags .cds--checkbox-label {
+    min-block-size: 2.75rem;
+    align-items: center;
+  }
+}
+.doc-form__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.doc-form__state {
+  padding-inline: 0.25rem;
+}
+.doc-form__delete {
+  margin-inline-start: auto;
+}
+/* The notes: the label with the Edit/Preview switcher, then the field or the rendered text. */
+.doc-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.doc-notes__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.doc-notes__head .cds--label {
+  margin: 0;
+}
+.doc-notes__head .cds--content-switcher {
+  inline-size: auto;
+}
+.doc-notes__head .cds--content-switcher-btn {
+  min-inline-size: 5rem;
+}
+/* The rendered notes (markdown.ts): Carbon's type tokens for the Markdown
+   elements, and overflow kept inside the column. Dimmed like the disabled
+   fields around them for a document in the trash. */
+.notes-rendered {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.875rem;
+  line-height: 1.42857;
+  letter-spacing: 0.16px;
+}
+.notes-rendered--disabled {
+  padding: 0.5rem 1rem;
+  background-color: var(--cds-field-01);
+  color: var(--cds-text-disabled);
+}
+.notes-rendered p,
+.notes-rendered__raw {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.notes-rendered h3,
+.notes-rendered h4,
+.notes-rendered h5 {
+  margin: 0;
+  font-weight: 600;
+  line-height: 1.375;
+  letter-spacing: 0;
+}
+.notes-rendered h3 {
+  /* heading-03 */
+  font-size: 1.25rem;
+  font-weight: 400;
+  line-height: 1.4;
+}
+.notes-rendered h4 {
+  /* heading-02 */
+  font-size: 1rem;
+  line-height: 1.5;
+}
+.notes-rendered h5 {
+  /* heading-01 */
+  font-size: 0.875rem;
+  line-height: 1.42857;
+  letter-spacing: 0.16px;
+}
+.notes-rendered a {
+  color: var(--cds-link-primary);
+  text-decoration: underline;
+}
+.notes-rendered a:hover {
+  color: var(--cds-link-primary-hover);
+}
+.notes-rendered a:focus-visible {
+  outline: 1px solid var(--cds-focus);
+}
+.notes-rendered strong {
+  font-weight: 600;
+}
+.notes-rendered code {
+  padding-inline: 0.25rem;
+  background-color: var(--cds-layer-02);
+  font-family: "IBM Plex Mono", "Menlo", "DejaVu Sans Mono", "Bitstream Vera Sans Mono", Courier, monospace;
+  font-size: 0.75rem;
+  letter-spacing: 0.32px;
+}
+.notes-rendered pre {
+  margin: 0;
+  padding: 0.5rem;
+  overflow-x: auto;
+  background-color: var(--cds-layer-02);
+  font-family: "IBM Plex Mono", "Menlo", "DejaVu Sans Mono", "Bitstream Vera Sans Mono", Courier, monospace;
+  font-size: 0.75rem;
+  line-height: 1.33333;
+  letter-spacing: 0.32px;
+}
+.notes-rendered pre code {
+  padding: 0;
+  background: none;
+}
+.notes-rendered blockquote {
+  margin: 0;
+  padding-inline-start: 0.75rem;
+  border-inline-start: 2px solid var(--cds-border-strong-01);
+  color: var(--cds-text-secondary);
+  white-space: pre-wrap;
+}
+.notes-rendered ul {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.notes-rendered li {
+  display: flex;
+  gap: 0.5rem;
+}
+.notes-rendered li > span:first-child {
+  flex: none;
+  color: var(--cds-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.notes-rendered li > span:last-child {
+  min-inline-size: 0;
+  white-space: pre-wrap;
+}
+.notes-rendered input[type="checkbox"] {
+  flex: none;
+  margin-block-start: 0.25rem;
+}
+.notes-rendered hr {
+  inline-size: 100%;
+  margin: 0;
+  border: 0;
+  border-block-start: 1px solid var(--cds-border-subtle-01);
+}
+/* The file's facts under the form. */
+.doc-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-block-start: 1rem;
+  border-block-start: 1px solid var(--cds-border-subtle-01);
+}
+.doc-facts__title {
+  /* heading-compact-01 */
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.28572;
+  letter-spacing: 0.16px;
+}
+.doc-facts__list {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+}
+.doc-facts__row {
+  display: contents;
+}
+.doc-facts dt,
+.doc-facts dd {
+  margin: 0;
+}
+.doc-facts dd {
+  overflow-wrap: anywhere;
+}
+.doc-facts__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+/* The preview (DocumentPreview.tsx): the PDF viewer with its toolbar, an
+   image, or a note with the download. */
+.doc-preview {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  min-block-size: 0;
+  background-color: var(--cds-layer-01);
+}
+.doc-preview--image {
+  overflow: auto;
+  padding: 0.75rem;
+}
+.doc-preview__image {
+  display: block;
+  max-inline-size: 100%;
+  margin-inline: auto;
+  background-color: #ffffff;
+  box-shadow: 0 2px 6px var(--cds-shadow, rgba(0, 0, 0, 0.3));
+}
+.doc-preview--none {
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 1.5rem;
+  color: var(--cds-text-secondary);
+  text-align: center;
+}
+.doc-preview__note {
+  margin: 0;
+}
+.doc-preview__tools {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  padding-inline: 0.25rem;
+  border-block-end: 1px solid var(--cds-border-subtle-01);
+}
+.doc-preview__pages {
+  margin-inline-start: auto;
+  padding-inline: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+.doc-preview__scroller {
+  flex: 1;
+  min-block-size: 0;
+  overflow: auto;
+}
+.doc-preview__sheet {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  inline-size: max-content;
+  min-inline-size: 100%;
+  padding: 0.75rem;
+}
+.doc-preview__page {
+  position: relative;
+  flex: none;
+  /* Pages keep a white paper in both themes. */
+  background-color: #ffffff;
+  box-shadow: 0 2px 6px var(--cds-shadow, rgba(0, 0, 0, 0.3));
+}
+.doc-preview__canvas {
+  position: absolute;
+  inset: 0;
 }
 
 /* The column (NavColumn). Below lg it is hidden until the Browse button

@@ -15,9 +15,9 @@ function editable(el: Element): boolean {
 /**
  * The floating and composite parts of Carbon components that handle keys
  * themselves: the content of an open popover (Toggletip, menus), menus,
- * list boxes, combo boxes and dialogs.
+ * list boxes, combo boxes, tab lists (ContentSwitcher, Tabs) and dialogs.
  */
-const widget = '.cds--popover-content, [role="menu"], [role="menubar"], [role="listbox"], [role="combobox"], [role="dialog"], [role="alertdialog"], .cds--modal';
+const widget = '.cds--popover-content, [role="menu"], [role="menubar"], [role="listbox"], [role="combobox"], [role="tablist"], [role="dialog"], [role="alertdialog"], .cds--modal';
 
 /**
  * Whether a key press belongs to the element it happens in, so the app's

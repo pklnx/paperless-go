@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
-import { seed, unique } from "./demo";
+import { origin, seed, unique } from "./demo";
 import { expect, test } from "./fixtures";
-import { chosen, closeDocument, detail, detailForm, discardChanges, discardQuestion, documentLink, field, keepEditing, logOut, notice, openSavedViewMenu, pdfPage, pick, pickTag, search, sheet } from "./ui";
+import { chosenNames, closeDocument, createChoice, detail, detailForm, discardChanges, discardQuestion, documentLink, field, formError, keepEditing, logOut, notice, openSavedViewMenu, pdfPage, pick, pickTag, rowTags, saveDocument, search, sheet } from "./ui";
 
 /** The open document's ID, from the URL. */
 const openID = (page: Page) => new URL(page.url()).searchParams.get("doc") ?? "";
@@ -36,8 +36,10 @@ test("edit every field, save, and the values are kept after a reload", async ({ 
   const box = detailForm(page).getByRole("combobox", { name: "Correspondent", exact: true });
   await box.fill(correspondent);
   await page.getByRole("option", { name: `Create “${correspondent}”` }).click();
+  await expect(box).toHaveValue(correspondent);
   await pick(page, "Document type", "Contract");
   await pickTag(page, "Home");
+  await expect(chosenNames(page)).toHaveText(["Home"]);
   await field(page, "Notes").fill(`Bring the **insurance card**. [Practice website](${url})`);
   await expect(page.getByText("Unsaved changes")).toBeVisible();
   await detailForm(page).getByRole("button", { name: "Save", exact: true }).click();
@@ -47,9 +49,9 @@ test("edit every field, save, and the values are kept after a reload", async ({ 
   await expect(detail(page, title)).toBeVisible();
   await expect(field(page, "Title")).toHaveValue(title);
   await expect(field(page, "Document date")).toHaveValue("2026-06-30");
-  await expect(chosen(page, "Correspondent")).toHaveText(correspondent);
-  await expect(chosen(page, "Document type")).toHaveText("Contract");
-  await expect(chosen(page, "Tags")).toHaveText("Home");
+  await expect(field(page, "Correspondent")).toHaveValue(correspondent);
+  await expect(field(page, "Document type")).toHaveValue("Contract");
+  await expect(chosenNames(page)).toHaveText(["Home"]);
   // The notes show rendered: the link is a link.
   await expect(detailForm(page).getByRole("link", { name: "Practice website" })).toHaveAttribute("href", url);
   await expect(detailForm(page).getByText("insurance card")).toBeVisible();
@@ -237,9 +239,7 @@ test("a change made elsewhere meanwhile: the save is refused and the user's edit
   expect(status).toBe(200);
 
   await detailForm(page).getByRole("button", { name: "Save", exact: true }).click();
-  await expect(detailForm(page).getByRole("alert")).toHaveText(
-    "This document was changed elsewhere meanwhile. Your changes are kept on top of the new state; check them and save again.",
-  );
+  await expect(formError(page)).toHaveText("This document was changed elsewhere meanwhile. Your changes are kept on top of the new state; check them and save again.");
   await expect(field(page, "Title")).toHaveValue(title);
   await detailForm(page).getByRole("button", { name: "Save", exact: true }).click();
   await expect(detailForm(page).getByRole("status")).toHaveText("Saved");
@@ -247,4 +247,129 @@ test("a change made elsewhere meanwhile: the save is refused and the user's edit
   await page.reload();
   await expect(field(page, "Title")).toHaveValue(title);
   await expect(detailForm(page).getByText("Changed in another tab.")).toBeVisible();
+});
+
+test("an emptied type field, left with its list closed, clears the type: the form says so and the save sends it (review B of #192)", async ({ page }) => {
+  await page.goto("/");
+  await documentLink(page, seed.water.title).click();
+  await expect(detail(page, seed.water.title)).toBeVisible();
+  const type = field(page, "Document type");
+  await expect(type).toHaveValue("Invoice");
+  // Select the text and delete it; Escape closes the list the typing opened; Tab leaves the field.
+  await type.selectText();
+  await page.keyboard.press("Delete");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Tab");
+  await expect(type).toHaveValue("");
+  await expect(page.getByText("Unsaved changes")).toBeVisible();
+  // The save would send documentTypeId: null; the document is left as it was instead.
+  const patches: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "PATCH") patches.push(r.postData() ?? "");
+  });
+  await closeDocument(page);
+  await discardChanges(page);
+  await expect(page).not.toHaveURL(/[?&]doc=/);
+  expect(patches).toEqual([]);
+});
+
+test.describe("a type created from the picker while its request is slow", () => {
+  const typeName = unique("Slow type");
+  // The warranty card (its title is never saved by another test): the type
+  // it had before, and the new type, are put back and removed again
+  // through the API, whatever happened.
+  let before: { id: string; documentTypeId: string | null } | null = null;
+  const headers = { Origin: origin, "Content-Type": "application/json" };
+  test.beforeEach(async ({ request }) => {
+    const found = ((await (await request.get(`/api/documents?q=${seed.warranty.word}`)).json()) as { documents: { id: string; title: string }[] }).documents;
+    const row = found.find((d) => d.title === seed.warranty.title);
+    expect(row, "the warranty card").toBeTruthy();
+    const doc = (await (await request.get(`/api/documents/${row!.id}`)).json()) as { documentTypeId: string | null };
+    before = { id: row!.id, documentTypeId: doc.documentTypeId };
+  });
+  test.afterEach(async ({ request }) => {
+    if (!before) return;
+    const doc = (await (await request.get(`/api/documents/${before.id}`)).json()) as { documentTypeId: string | null; modifiedAt: string };
+    if (doc.documentTypeId !== before.documentTypeId) {
+      const res = await request.patch(`/api/documents/${before.id}`, { headers, data: { documentTypeId: before.documentTypeId, expectedModifiedAt: doc.modifiedAt } });
+      expect(res.ok(), `restore the type: ${res.status()}`).toBe(true);
+    }
+    const types = ((await (await request.get("/api/document-types")).json()) as { documentTypes: { id: string; name: string }[] }).documentTypes;
+    const type = types.find((x) => x.name === typeName);
+    if (!type) return;
+    const gone = await request.delete(`/api/document-types/${type.id}`, { headers });
+    expect(gone.ok(), `delete type: ${gone.status()} ${await gone.text()}`).toBe(true);
+  });
+
+  test("Save waits for the created type, and saves it (CI on 0a3a96a)", async ({ page }) => {
+    await page.goto("/");
+    await documentLink(page, seed.warranty.title).click();
+    await expect(detail(page, seed.warranty.title)).toBeVisible();
+    // The creation's request is held back until the test lets it through.
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let seen!: () => void;
+    const seenRequest = new Promise<void>((r) => (seen = r));
+    await page.route(
+      (url) => url.pathname === "/api/document-types",
+      async (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        seen();
+        await released;
+        await route.continue();
+      },
+    );
+    await createChoice(page, "Document type", typeName, { wait: false });
+    await seenRequest;
+    const save = detailForm(page).getByRole("button", { name: "Save", exact: true });
+    await expect(save).toBeDisabled();
+    await expect(detailForm(page).getByRole("button", { name: "Done", exact: true })).toBeDisabled();
+    release();
+    await expect(field(page, "Document type")).toHaveValue(typeName);
+    await expect(save).toBeEnabled();
+    await saveDocument(page);
+    await page.reload();
+    await expect(field(page, "Document type")).toHaveValue(typeName);
+  });
+});
+
+test.describe("the tag picker on the seeded lease", () => {
+  // The lease is seed data other specs count on: whatever the test did
+  // (also on a failure or a timeout), the Bills tag comes off again through
+  // the API, with the document's modifiedAt as the precondition.
+  test.afterEach(async ({ request }) => {
+    const headers = { Origin: origin };
+    const tags = ((await (await request.get("/api/tags")).json()) as { tags: { id: string; name: string }[] }).tags;
+    const bills = tags.find((x) => x.name === "Bills");
+    const found = ((await (await request.get(`/api/documents?q=${seed.lease.word}`)).json()) as { documents: { id: string; title: string }[] }).documents;
+    const lease = found.find((d) => d.title === seed.lease.title);
+    if (!bills || !lease) return;
+    const doc = (await (await request.get(`/api/documents/${lease.id}`)).json()) as { tagIds: string[]; modifiedAt: string };
+    if (!doc.tagIds.includes(bills.id)) return;
+    const res = await request.patch(`/api/documents/${lease.id}`, { headers, data: { tagIds: doc.tagIds.filter((id) => id !== bills.id), expectedModifiedAt: doc.modifiedAt } });
+    expect(res.ok()).toBe(true);
+  });
+
+  test("a nested tag is picked by typing its own name, and the row shows it", async ({ page }) => {
+    // Bills is a sub-tag of Finance: the picker lists it as "Finance / Bills" and finds it by "Bills".
+    const { title } = seed.lease;
+    await page.goto("/");
+    await documentLink(page, title).click();
+    await expect(detail(page, title)).toBeVisible();
+    await expect(chosenNames(page)).toHaveText(["Home"]);
+    await pickTag(page, "Bills", "Finance / Bills");
+    // The chips in the order chosen.
+    await expect(chosenNames(page)).toHaveText(["Home", "Bills"]);
+    // Escape on the closed tag field is the document's Escape: it asks about the unsaved tag and keeps the chips.
+    await detailForm(page).getByRole("combobox", { name: "Tags", exact: true }).press("Escape");
+    await expect(discardQuestion(page)).toBeVisible();
+    await keepEditing(page);
+    await expect(chosenNames(page)).toHaveText(["Home", "Bills"]);
+    await saveDocument(page);
+    await closeDocument(page);
+    // The row shows both; the server lists a document's tags by their id, so their order is not the chips'.
+    const tags = rowTags(page, title).getByRole("listitem");
+    await expect(tags).toHaveCount(2);
+    expect((await tags.allTextContents()).sort()).toEqual(["Bills", "Home"]);
+  });
 });
