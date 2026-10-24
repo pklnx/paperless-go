@@ -1,14 +1,15 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { flushSync } from "react-dom";
+import { Button, Checkbox, DismissibleTag, IconButton, Link, Search, Select, SelectItem, Tag } from "@carbon/react";
+import { ArrowDown, ArrowUp, Document, Email, Search as SearchIcon, StarFilled, TrashCan } from "@carbon/icons-react";
 import { ApiError, bulkApi, bulkMatch, documentsApi, processingPending, type DocumentPage, type DocumentQuery, type DocumentSummary, type Metadata, type User } from "./api";
 import { BulkBar, bulkErrorText, type BulkTarget } from "./BulkBar";
+import { isPlainClick } from "./clicks";
 import { DocumentDetail } from "./DocumentDetail";
 import { documentName, ProcessingStatus } from "./DocumentParts";
-import { EmptyState } from "./EmptyState";
-import { ArrowIcon, CloseIcon, DocumentIcon, InboxIcon, SearchIcon, StarIcon, TrashIcon } from "./icons";
 import { lang, t } from "./i18n";
 import { clickSelect, pruneSelection, selectAll, selectionLimit, useLongPress } from "./selection";
 import { snippetParts } from "./snippet";
-import { button, input } from "./styles";
 import { chipInk } from "./tagTree";
 import type { Notice, Notify } from "./Toast";
 import { EmptyTrash, foreignOwners, PurgeConfirm, trashDay, trashErrorText } from "./Trash";
@@ -33,6 +34,8 @@ const errorText = (err: unknown) =>
       ? t.searchTooBroad
       : t.failed(err instanceof Error ? err.message : String(err));
 
+/** The list's heading: where the focus goes when a modal's opener is gone (a purged row). */
+const listHeading = () => document.getElementById("list-title");
 
 interface ListState {
   /** The request these documents answer (JSON of the DocumentQuery). */
@@ -77,7 +80,7 @@ interface Props {
  * sort, the documents with "Load more" (keyset paging), and an empty state
  * for each case. The trash (state.trash) is the same list of trashed
  * documents, with Restore and Delete permanently instead of Delete, and
- * "Empty trash".
+ * "Empty trash". Carbon components and layout.css classes (#150, part 3).
  */
 export function DocumentList({ state, update, query, user, metadata, everyone, reload, onMaxUploadSize, onChanged, notify, onUndone, undone = 0, ownTrash = null, toolbar }: Props) {
   const key = JSON.stringify(query);
@@ -277,6 +280,11 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
     setPurging({ doc: d, busy: true, error: "" });
     documentsApi.purge(d.id).then(
       () => {
+        // The row leaves in a commit of its own, before the modal closes:
+        // the closing modal then finds its opener (the row's button) gone
+        // and moves the focus to the list's heading, unless the notice
+        // takes it (keyboard users).
+        flushSync(() => removeDoc(d.id));
         if (purgeAsk.current === mine) setPurging(null);
         purged(d);
       },
@@ -456,13 +464,13 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
         onTrashError={(text) => showNotice({ text, error: true })}
       />
     )}
-    <section className="flex flex-col gap-3" aria-labelledby="list-title" inert={detail}>
+    <section className="docs-list" aria-labelledby="list-title" inert={detail}>
       <SearchField q={state.q} search={(q) => update({ q, doc: "" })} />
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 id="list-title" tabIndex={-1} className="min-w-0 font-semibold wrap-anywhere outline-none">
+      <div className="docs-list__head">
+        <h2 id="list-title" tabIndex={-1} className="docs-list__title">
           {title}
         </h2>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="docs-list__tools">
           {toolbar}
           <SortControls state={state} query={query} update={update} />
         </div>
@@ -479,29 +487,29 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
         />
       )}
       {chips.length > 0 && (
-        <div className="flex flex-wrap gap-2">
+        <div className="docs-filters">
           {chips.map(({ f, chip }) => (
-            <span
+            <DismissibleTag
               key={f.kind}
-              className="flex h-8 items-center gap-1 rounded-full border border-accent-soft bg-accent-soft pl-3 text-[13px] font-medium text-accent-soft-ink pointer-coarse:h-11"
-            >
-              <span className="wrap-anywhere">{chip}</span>
-              <button type="button" aria-label={t.removeFilter(chip)} title={t.removeFilter(chip)} className="grid size-7 place-items-center rounded-full pointer-coarse:size-11" onClick={() => update(withoutFilter(f))}>
-                <CloseIcon />
-              </button>
-            </span>
+              size="md"
+              type="purple"
+              text={chip}
+              title={t.removeFilter(chip)}
+              dismissTooltipLabel={t.removeFilter(chip)}
+              onClose={() => update(withoutFilter(f))}
+            />
           ))}
         </div>
       )}
       {chips.map(({ f, gone }) =>
         gone && f.kind !== "inbox" && f.kind !== "fav" && f.kind !== "trash" ? (
-          <p key={`gone-${f.kind}`} role="status" className="text-sm text-ink-muted">
+          <p key={`gone-${f.kind}`} role="status" className="docs-list__note app-text-secondary">
             {t.filterGone(f.kind, state.sv !== "")}
           </p>
         ) : null,
       )}
       {list.error && (
-        <p role="alert" className="text-sm text-danger">
+        <p role="alert" className="docs-list__note app-text-error">
           {list.error}
         </p>
       )}
@@ -519,7 +527,7 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
           clear={clearSelection}
         />
       )}
-      {!docs && list.loading && <p className="text-sm text-ink-muted">{t.loading}</p>}
+      {!docs && list.loading && <p className="docs-list__note app-text-secondary">{t.loading}</p>}
       {docs && docs.length === 0 && <Empty query={query} clearSearch={() => update({ q: "" })} showAll={() => update(filterPatch(null))} />}
       <PurgeConfirm
         open={purging !== null}
@@ -530,9 +538,10 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
         error={purging?.error}
         confirm={purgeDoc}
         cancel={() => askPurge(null)}
+        returnFocus={listHeading}
       />
       {docs && docs.length > 0 && (
-        <ul aria-label={title} className="flex flex-col gap-2 md:gap-0 md:divide-y md:divide-line md:rounded-lg md:border md:border-line">
+        <ul aria-label={title} className={`doc-list${selecting ? " doc-list--selecting" : ""}`}>
           {docs.map((d) => (
             <DocumentRow
               key={d.id}
@@ -543,7 +552,6 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
               href={formatState({ ...state, doc: d.id }) || "?"}
               onOpen={() => openDoc(d.id)}
               checked={allMatches !== null || selected.has(d.id)}
-              selecting={selecting}
               onPick={(shift) => pick(d.id, shift)}
               trash={trash}
               busy={busyRows.has(d.id)}
@@ -555,9 +563,11 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
         </ul>
       )}
       {docs && docs.length > 0 && list.cursor && (
-        <button type="button" className={`${button} self-start`} disabled={list.loading} onClick={loadMore}>
-          {t.loadMore}
-        </button>
+        <div className="docs-list__more">
+          <Button kind="tertiary" size="md" disabled={list.loading} onClick={loadMore}>
+            {t.loadMore}
+          </Button>
+        </div>
       )}
       {target && (
         <BulkBar
@@ -582,133 +592,121 @@ export function DocumentList({ state, update, query, user, metadata, everyone, r
   );
 }
 
-/** The search field. It searches on Enter (each search is a document.search entry in the log, so not on every key); emptying it lists everything again. */
+/**
+ * The search field (Carbon's Search). It searches on Enter (each search is
+ * a document.search entry in the log, so not on every key); emptying it,
+ * by the clear button or by hand, lists everything again.
+ */
 function SearchField({ q, search }: { q: string; search: (q: string) => void }) {
   const [text, setText] = useState(q);
   // Follow the URL when it changes from outside (back button, a cleared search).
   useEffect(() => setText(q), [q]);
+  const run = () => search(text.trim() ? text : "");
   return (
+    // The form takes the browser's implicit submission (Enter in the one
+    // field); Enter is handled below as well, so no submission happens twice.
     <form
-      role="search"
-      className="flex gap-2"
+      className="docs-search"
       onSubmit={(e) => {
         e.preventDefault();
-        search(text.trim() ? text : "");
+        run();
       }}
     >
-      <input
-        className={input}
-        type="search"
-        aria-label={t.searchLabel}
+      <Search
+        size="lg"
+        labelText={t.searchLabel}
         placeholder={t.searchPlaceholder}
-        maxLength={1000}
+        closeButtonLabelText={t.carbon.clearSearch}
         enterKeyHint="search"
+        {...({ maxLength: 1000 } as object)}
         value={text}
         onChange={(e) => {
           setText(e.target.value);
           if (e.target.value === "" && q !== "") search("");
         }}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter") return;
+          e.preventDefault();
+          run();
+        }}
       />
-      <button type="submit" className={`${button} flex items-center gap-1.5`}>
-        <SearchIcon />
-        <span className="max-sm:sr-only">{t.searchButton}</span>
-      </button>
     </form>
   );
 }
 
 /** The sort: added or document date, either direction; relevance (one direction) while searching; in the trash also deleted (newest first). */
 function SortControls({ state, query, update }: { state: ViewState; query: DocumentQuery; update: UpdateState }) {
+  const id = useId();
   const searching = query.q !== "";
   const trash = query.trashed;
   const fallback = searching ? "relevance" : trash ? "deleted" : "added";
   const sort = query.sort || fallback;
   // Relevance and deleted have one direction.
   const relevance = sort === "relevance" || sort === "deleted";
+  const direction = query.ascending ? t.sortOldestFirst : t.sortNewestFirst;
   return (
-    <div className="flex items-center gap-1">
-      <label className="flex items-center gap-1.5 text-sm text-ink-muted">
-        <span className="max-sm:sr-only">{t.sortBy}</span>
-        <select
-          className={`${input} w-auto py-1 text-ink`}
-          value={sort}
-          onChange={(e) => {
-            const v = e.target.value as ViewState["sort"];
-            // The default stays out of the URL.
-            update({ sort: v === fallback ? "" : v, order: v === "relevance" || v === "deleted" ? "" : state.order });
-          }}
-        >
-          {searching && <option value="relevance">{t.sortRelevance}</option>}
-          {trash && <option value="deleted">{t.sortDeleted}</option>}
-          <option value="added">{t.sortAdded}</option>
-          <option value="date">{t.sortDate}</option>
-        </select>
-      </label>
-      <button
-        type="button"
-        className={`${button} flex items-center gap-1 disabled:opacity-40`}
+    <div className="docs-sort">
+      <Select
+        id={id}
+        inline
+        size="md"
+        labelText={t.sortBy}
+        value={sort}
+        onChange={(e) => {
+          const v = e.target.value as ViewState["sort"];
+          // The default stays out of the URL.
+          update({ sort: v === fallback ? "" : v, order: v === "relevance" || v === "deleted" ? "" : state.order });
+        }}
+      >
+        {searching && <SelectItem value="relevance" text={t.sortRelevance} />}
+        {trash && <SelectItem value="deleted" text={t.sortDeleted} />}
+        <SelectItem value="added" text={t.sortAdded} />
+        <SelectItem value="date" text={t.sortDate} />
+      </Select>
+      <IconButton
+        kind="ghost"
+        size="md"
+        align="bottom-end"
+        label={direction}
         disabled={relevance}
-        aria-label={query.ascending ? t.sortOldestFirst : t.sortNewestFirst}
-        title={sort === "relevance" ? t.sortRelevanceOrder : query.ascending ? t.sortOldestFirst : t.sortNewestFirst}
+        title={sort === "relevance" ? t.sortRelevanceOrder : direction}
         onClick={() => update({ order: query.ascending ? "" : "asc" })}
       >
-        <ArrowIcon up={query.ascending} />
-      </button>
+        {query.ascending ? <ArrowUp /> : <ArrowDown />}
+      </IconButton>
+    </div>
+  );
+}
+
+/** Says why the list is empty and offers the next step (layout.css empty-state, as mail-archive's). */
+function EmptyState({ icon, title, text, action }: { icon: ReactNode; title: string; text: string; action?: { label: string; run: () => void } }) {
+  return (
+    <div className="empty-state">
+      <span aria-hidden className="empty-state__icon">
+        {icon}
+      </span>
+      <p className="empty-state__title">{title}</p>
+      <p className="empty-state__text app-text-secondary">{text}</p>
+      {action && (
+        <div className="empty-state__actions">
+          <Button kind="tertiary" size="sm" onClick={action.run}>
+            {action.label}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
 
 function Empty({ query, clearSearch, showAll }: { query: DocumentQuery; clearSearch: () => void; showAll: () => void }) {
-  if (query.trashed && !query.q) {
-    return (
-      <EmptyState icon={<TrashIcon />} title={t.trashEmpty}>
-        {t.trashEmptyText}
-      </EmptyState>
-    );
-  }
+  if (query.trashed && !query.q) return <EmptyState icon={<TrashCan size={32} />} title={t.trashEmpty} text={t.trashEmptyText} />;
   const filtered = query.inbox || query.favorite || query.tag !== "" || query.correspondent !== "" || query.type !== "";
-  if (query.q) {
-    return (
-      <EmptyState
-        icon={<SearchIcon />}
-        title={t.nothingFound}
-        actions={
-          <button type="button" className={button} onClick={clearSearch}>
-            {t.clearSearch}
-          </button>
-        }
-      >
-        {t.nothingFoundSearch}
-      </EmptyState>
-    );
-  }
+  if (query.q) return <EmptyState icon={<SearchIcon size={32} />} title={t.nothingFound} text={t.nothingFoundSearch} action={{ label: t.clearSearch, run: clearSearch }} />;
   if (query.inbox && !query.favorite && !query.tag && !query.correspondent && !query.type) {
-    return (
-      <EmptyState icon={<InboxIcon />} title={t.inboxEmpty}>
-        {t.inboxEmptyText}
-      </EmptyState>
-    );
+    return <EmptyState icon={<Email size={32} />} title={t.inboxEmpty} text={t.inboxEmptyText} />;
   }
-  if (filtered) {
-    return (
-      <EmptyState
-        icon={<SearchIcon />}
-        title={t.nothingFound}
-        actions={
-          <button type="button" className={button} onClick={showAll}>
-            {t.showAllDocuments}
-          </button>
-        }
-      >
-        {t.nothingFoundFilter}
-      </EmptyState>
-    );
-  }
-  return (
-    <EmptyState icon={<DocumentIcon />} title={t.noDocuments}>
-      {t.noDocumentsText}
-    </EmptyState>
-  );
+  if (filtered) return <EmptyState icon={<SearchIcon size={32} />} title={t.nothingFound} text={t.nothingFoundFilter} action={{ label: t.showAllDocuments, run: showAll }} />;
+  return <EmptyState icon={<Document size={32} />} title={t.noDocuments} text={t.noDocumentsText} />;
 }
 
 const day = (iso: string) => {
@@ -730,42 +728,39 @@ interface HeaderProps {
   clear: () => void;
 }
 
-/** "Select all loaded", the count, and "Select all matches of this search" once every loaded one is checked. */
+/** "Select all loaded" (indeterminate while some are checked), the count, and "Select all matches of this search" once every loaded one is checked. */
 function SelectionHeader({ allLoaded, some, count, capped, allMatches, moreMatches, error, toggleAll, selectMatches, clear }: HeaderProps) {
+  const id = useId();
   return (
-    <div className="flex flex-col gap-1 text-sm">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <label className="flex items-center gap-2 pointer-coarse:min-h-11">
-          <input
-            type="checkbox"
-            className="size-4 pointer-coarse:size-5"
-            checked={allMatches !== null || allLoaded}
-            ref={(el) => {
-              if (el) el.indeterminate = some && !allLoaded && allMatches === null;
-            }}
-            onChange={toggleAll}
-          />
-          {t.selectAllLoaded}
-        </label>
+    <div className="selection-head">
+      <div className="selection-head__row">
+        <Checkbox
+          id={id}
+          className="selection-head__all"
+          labelText={t.selectAllLoaded}
+          checked={allMatches !== null || allLoaded}
+          indeterminate={some && !allLoaded && allMatches === null}
+          onChange={toggleAll}
+        />
         {(some || allMatches !== null) && (
           <>
-            <span className="text-ink-muted" role="status">
+            <span className="app-text-secondary" role="status">
               {allMatches !== null ? t.allMatchesSelected(allMatches) : t.selectedCount(count)}
             </span>
             {moreMatches && (
-              <button type="button" className="text-accent-ink hover:underline pointer-coarse:min-h-11" onClick={selectMatches}>
+              <Button kind="ghost" size="sm" onClick={selectMatches}>
                 {t.selectAllMatches}
-              </button>
+              </Button>
             )}
-            <button type="button" className="text-accent-ink hover:underline pointer-coarse:min-h-11" onClick={clear}>
+            <Button kind="ghost" size="sm" onClick={clear}>
               {t.clearSelection}
-            </button>
+            </Button>
           </>
         )}
       </div>
-      {capped && <p className="text-ink-muted">{t.selectionCapped(selectionLimit.max)}</p>}
+      {capped && <p className="docs-list__note app-text-secondary">{t.selectionCapped(selectionLimit.max)}</p>}
       {error && (
-        <p role="alert" className="text-danger">
+        <p role="alert" className="docs-list__note app-text-error">
           {error}
         </p>
       )}
@@ -782,8 +777,6 @@ interface RowProps {
   href: string;
   onOpen: () => void;
   checked: boolean;
-  /** Something is selected: on phones the checkboxes show (before, a long press starts selecting). */
-  selecting: boolean;
   onPick: (shift: boolean) => void;
   /** The row is in the trash: its dates, Restore and Delete permanently instead of Delete. */
   trash: boolean;
@@ -794,9 +787,13 @@ interface RowProps {
   onPurge: () => void;
 }
 
-const rowAction = "hover:underline disabled:opacity-50 pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center";
-
-function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen, checked, selecting, onPick, trash, busy, onDelete, onRestore, onPurge }: RowProps) {
+/**
+ * One document: a structured row of Carbon primitives (decision 1 of
+ * #150). On phones the checkbox shows once something is selected (before,
+ * a long press starts selecting: the list's doc-list--selecting class).
+ */
+function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen, checked, onPick, trash, busy, onDelete, onRestore, onPurge }: RowProps) {
+  const id = useId();
   const name = documentName(d);
   const press = useLongPress(() => {
     if (!checked) onPick(false);
@@ -805,80 +802,81 @@ function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen, checked,
   const type = d.documentTypeId ? metadata?.documentTypes.find((c) => c.id === d.documentTypeId)?.name : undefined;
   const tags = (d.tagIds ?? []).flatMap((id) => metadata?.tags.find((x) => x.id === id) ?? []);
   return (
-    <li className={`flex items-start gap-3 rounded-lg border px-3 py-3 select-none [-webkit-touch-callout:none] md:rounded-none md:border-0 md:py-2 md:select-auto ${checked ? "border-accent bg-accent-soft/40" : "border-line"}`} {...press}>
-      <label className={`-m-2 flex shrink-0 items-center justify-center p-2 pointer-coarse:size-11 ${selecting ? "" : "pointer-coarse:hidden"}`}>
-        <input
-          type="checkbox"
-          className="size-4 pointer-coarse:size-5"
-          aria-label={t.selectDocument(name)}
+    <li className={`doc-row${checked ? " doc-row--checked" : ""}`} {...press}>
+      <div className="doc-row__select">
+        <Checkbox
+          id={id}
+          labelText={t.selectDocument(name)}
+          hideLabel
           checked={checked}
+          // React drives a checkbox's change by its click, so the key is there.
           onChange={(e) => onPick((e.nativeEvent as MouseEvent).shiftKey === true)}
         />
-      </label>
+      </div>
       <Thumbnail url={d.thumbnailUrl} />
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <a
+      <div className="doc-row__body">
+        <div className="doc-row__top">
+          <Link
             href={href}
             data-doc-link={d.id}
-            className="min-w-0 basis-full font-medium wrap-anywhere hover:underline sm:basis-0 sm:flex-1 pointer-coarse:min-h-11"
-            onClick={(e) => {
-              if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            className="doc-row__title"
+            onClick={(e: ReactMouseEvent<HTMLAnchorElement>) => {
+              // A modified click (new tab, window) is the browser's.
+              if (!isPlainClick(e)) return;
               e.preventDefault();
               onOpen();
             }}
           >
             {name}
-          </a>
+          </Link>
           {d.isInbox && (
-            <span className="flex items-center gap-1 text-xs text-accent-ink" title={t.inInbox}>
-              <InboxIcon />
-              <span className="sr-only">{t.inInbox}</span>
+            <span className="doc-row__flag doc-row__flag--inbox" title={t.inInbox}>
+              <Email size={16} aria-hidden />
+              <span className="cds--visually-hidden">{t.inInbox}</span>
             </span>
           )}
           {d.isFavorite && (
-            <span className="flex items-center text-warning" title={t.favorite}>
-              <StarIcon filled />
-              <span className="sr-only">{t.favorite}</span>
+            <span className="doc-row__flag doc-row__flag--fav" title={t.favorite}>
+              <StarFilled size={16} aria-hidden />
+              <span className="cds--visually-hidden">{t.favorite}</span>
             </span>
           )}
-          <span className="text-sm text-ink-muted">{day(d.documentDate)}</span>
+          <span className="doc-row__date app-text-secondary">{day(d.documentDate)}</span>
         </div>
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-ink-muted">
-          {correspondent && <span className="wrap-anywhere">{correspondent}</span>}
-          {type && <span className="wrap-anywhere">{type}</span>}
-          {owner && <span className="wrap-anywhere">{t.ownedBy(owner)}</span>}
-          <a className={`${rowAction} text-accent-ink`} href={documentsApi.fileURL(d.id)} download>
-            {t.download}
-          </a>
-          {trash ? (
-            <>
-              <button type="button" className={`${rowAction} text-accent-ink`} aria-label={t.restoreLabel(name)} disabled={busy} onClick={onRestore}>
-                {t.restore}
-              </button>
-              <button type="button" className={`${rowAction} text-danger`} aria-label={t.purgeLabel(name)} disabled={busy} onClick={onPurge}>
-                {t.purge}
-              </button>
-            </>
-          ) : (
-            <button type="button" className={`${rowAction} text-accent-ink`} aria-label={t.deleteDocumentLabel(name)} disabled={busy} onClick={onDelete}>
-              {t.deleteDocument}
-            </button>
-          )}
+        <div className="doc-row__meta app-text-secondary">
+          {correspondent && <span className="doc-row__fact">{correspondent}</span>}
+          {type && <span className="doc-row__fact">{type}</span>}
+          {owner && <span className="doc-row__fact">{t.ownedBy(owner)}</span>}
+          <span className="doc-row__actions">
+            <Button as="a" kind="ghost" size="sm" href={documentsApi.fileURL(d.id)} download>
+              {t.download}
+            </Button>
+            {trash ? (
+              <>
+                <Button kind="ghost" size="sm" aria-label={t.restoreLabel(name)} disabled={busy} onClick={onRestore}>
+                  {t.restore}
+                </Button>
+                <Button kind="danger--ghost" size="sm" aria-label={t.purgeLabel(name)} disabled={busy} onClick={onPurge}>
+                  {t.purge}
+                </Button>
+              </>
+            ) : (
+              <Button kind="ghost" size="sm" aria-label={t.deleteDocumentLabel(name)} disabled={busy} onClick={onDelete}>
+                {t.deleteDocument}
+              </Button>
+            )}
+          </span>
         </div>
         {trash && (d.deletedAt || d.purgeAt) && (
-          <p className="text-sm text-ink-muted">{[d.deletedAt ? t.deletedOn(trashDay(d.deletedAt)) : "", d.purgeAt ? t.removedOn(trashDay(d.purgeAt)) : ""].filter(Boolean).join(" · ")}</p>
+          <p className="doc-row__dates app-text-secondary">{[d.deletedAt ? t.deletedOn(trashDay(d.deletedAt)) : "", d.purgeAt ? t.removedOn(trashDay(d.purgeAt)) : ""].filter(Boolean).join(" · ")}</p>
         )}
         {tags.length > 0 && (
-          <ul aria-label={t.tags} className="flex flex-wrap gap-1">
+          <ul aria-label={t.tags} className="doc-tags">
             {tags.map((x) => (
-              <li
-                key={x.id}
-                className={`rounded-full px-2 py-0.5 text-xs font-medium wrap-anywhere ${x.color ? "" : "bg-surface-hover text-ink"}`}
-                style={x.color ? { backgroundColor: x.color, color: chipInk(x.color) } : undefined}
-              >
+              // A tag's own colour, with black or white text for contrast; without one Carbon's gray.
+              <Tag key={x.id} as="li" size="sm" type={x.color ? undefined : "gray"} className="doc-tags__tag" style={x.color ? { backgroundColor: x.color, color: chipInk(x.color) } : undefined}>
                 {x.name}
-              </li>
+              </Tag>
             ))}
           </ul>
         )}
@@ -891,9 +889,8 @@ function DocumentRow({ doc: d, metadata, owner, onChange, href, onOpen, checked,
 
 /** The thumbnail of the first page, or an empty frame until processing made one. It is decoration: the title is next to it. */
 function Thumbnail({ url }: { url?: string | null }) {
-  const frame = "h-16 w-12 shrink-0 rounded-sm border border-line";
-  if (!url) return <div aria-hidden="true" data-testid="no-thumbnail" className={`${frame} border-dashed`} />;
-  return <img src={url} alt="" loading="lazy" decoding="async" className={`${frame} bg-paper object-cover object-top`} />;
+  if (!url) return <div aria-hidden="true" data-testid="no-thumbnail" className="doc-thumb doc-thumb--none" />;
+  return <img src={url} alt="" loading="lazy" decoding="async" className="doc-thumb" />;
 }
 
 /** A search snippet: its matches as <mark>, everything else as text. */
@@ -901,10 +898,10 @@ export function Snippet({ text }: { text: string }) {
   const parts = snippetParts(text);
   if (parts.length === 0) return null;
   return (
-    <p className="text-sm wrap-anywhere text-ink-muted">
+    <p className="doc-snippet app-text-secondary">
       {parts.map((p, i) =>
         p.mark ? (
-          <mark key={i} className="rounded-sm bg-highlight px-0.5 text-ink">
+          <mark key={i} className="app-highlight">
             {p.text}
           </mark>
         ) : (

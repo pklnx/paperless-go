@@ -1,11 +1,9 @@
 import { useId, useRef, useState, type FormEvent } from "react";
-import { ContainedList, ContainedListItem, FeatureFlags, InlineNotification, MenuItem, MenuItemDivider, OverflowMenu, TextInput } from "@carbon/react";
+import { Button, ContainedList, ContainedListItem, FeatureFlags, InlineNotification, MenuItem, MenuItemDivider, OverflowMenu, TextInput } from "@carbon/react";
 import { ApiError, savedViewsApi, type SavedView } from "./api";
 import { AppModal, DangerModal } from "./DangerModal";
 import { t } from "./i18n";
 import { applyView, canSave, moveView, paramsOf, showsView, shownViews, viewKey } from "./savedViews";
-import { Sheet } from "./Sheet";
-import { button, input, primary } from "./styles";
 import type { Notify } from "./Toast";
 import type { ViewState } from "./urlState";
 
@@ -31,6 +29,10 @@ interface ListProps {
  * what the list shows now, moves it up or down, or deletes it (asked first).
  */
 export function SavedViewList({ views, error, state, admin, open, reload, notify }: ListProps) {
+  // One request at a time for the whole list: while a view's move (two
+  // PATCHes, one after the other) or update runs, every view's Move and
+  // Update are disabled, so no second move starts from stale indexes.
+  const [busy, setBusy] = useState(false);
   const shown = shownViews(views ?? []);
   if (error && !views) {
     return (
@@ -61,6 +63,8 @@ export function SavedViewList({ views, error, state, admin, open, reload, notify
                   shown={shown.map((s) => s.view)}
                   index={index}
                   state={state}
+                  busy={busy}
+                  setBusy={setBusy}
                   done={done}
                   gone={reload}
                   notify={notify}
@@ -94,6 +98,8 @@ function ViewMenu({
   shown,
   index,
   state,
+  busy,
+  setBusy,
   done,
   gone,
   notify,
@@ -102,13 +108,15 @@ function ViewMenu({
   shown: SavedView[];
   index: number;
   state: ViewState;
+  /** A request of any view's menu runs (the list's state). */
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
   done: (notice: string) => void;
   gone: () => void;
   notify?: Notify;
 }) {
   const [ask, setAsk] = useState<Ask | null>(null);
   const [name, setName] = useState(view.name);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const nameId = useId();
   const hintId = `${nameId}-hint`;
@@ -236,8 +244,10 @@ function ViewMenu({
 
 /**
  * "Save view…" in the list's toolbar, while a search, filter or sort is
- * chosen: asks for a name, then saves what the list shows. saved gets the
- * new view.
+ * chosen: asks for a name in a Carbon Modal, then saves what the list
+ * shows (POST /api/saved-views as before). saved gets the new view. A
+ * ghost button, like the toolbar's Browse: the view's one primary is
+ * "Choose files" (decision 3 of #150).
  */
 export function SaveViewButton({ state, saved }: { state: ViewState; saved: (v: SavedView) => void }) {
   const [open, setOpen] = useState(false);
@@ -250,10 +260,10 @@ export function SaveViewButton({ state, saved }: { state: ViewState; saved: (v: 
     setOpen(false);
     setError("");
   };
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
+  const submit = (e?: FormEvent) => {
+    e?.preventDefault();
     const n = name.trim();
-    if (!n) return;
+    if (!n || busy) return;
     setBusy(true);
     setError("");
     savedViewsApi.create(n, { [viewKey]: paramsOf(state) }).then(
@@ -271,31 +281,29 @@ export function SaveViewButton({ state, saved }: { state: ViewState; saved: (v: 
   };
   return (
     <>
-      <button type="button" className={button} onClick={() => setOpen(true)}>
+      <Button kind="ghost" size="md" onClick={() => setOpen(true)}>
         {t.saveView}
-      </button>
-      <Sheet open={open} onClose={close} title={t.saveViewTitle}>
-        <form className="flex flex-col gap-2" onSubmit={submit}>
-          <p className="text-sm text-ink-muted">{t.saveViewHint}</p>
-          <label htmlFor={nameId} className="text-sm font-medium">
-            {t.viewName}
-          </label>
-          <input id={nameId} className={input} value={name} maxLength={128} autoFocus onChange={(e) => setName(e.target.value)} />
-          {error && (
-            <p role="alert" className="text-sm text-danger">
-              {error}
-            </p>
-          )}
-          <div className="flex justify-end gap-2">
-            <button type="button" className={button} onClick={close}>
-              {t.cancel}
-            </button>
-            <button type="submit" className={primary} disabled={busy || !name.trim()}>
-              {t.save}
-            </button>
-          </div>
-        </form>
-      </Sheet>
+      </Button>
+      {open && (
+        <AppModal
+          size="sm"
+          modalHeading={t.saveViewTitle}
+          primaryButtonText={t.save}
+          secondaryButtonText={t.cancel}
+          primaryButtonDisabled={busy || !name.trim()}
+          preventCloseOnClickOutside
+          onRequestClose={() => {
+            if (!busy) close();
+          }}
+          onRequestSubmit={() => submit()}
+        >
+          <form className="modal-stack" onSubmit={submit} noValidate>
+            <p className="app-text-secondary">{t.saveViewHint}</p>
+            <TextInput id={nameId} data-modal-primary-focus="" labelText={t.viewName} value={name} maxLength={128} onChange={(e) => setName(e.target.value)} />
+            {error && <InlineNotification className="notification--full" kind="error" lowContrast hideCloseButton role="alert" statusIconDescription={t.carbon.status.error} subtitle={error} />}
+          </form>
+        </AppModal>
+      )}
     </>
   );
 }

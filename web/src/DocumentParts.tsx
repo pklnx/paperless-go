@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Button, Tag } from "@carbon/react";
 import { documentsApi, type DocumentSummary } from "./api";
 import { t } from "./i18n";
 import { displayName } from "./uploads";
@@ -8,11 +9,10 @@ import { displayName } from "./uploads";
 /** The title a document shows: its title, else its file name, else "Untitled". Bidi controls are dropped. */
 export const documentName = (d: Pick<DocumentSummary, "title" | "originalFileName">) => displayName(d.title) || displayName(d.originalFileName) || t.untitled;
 
-const badge = "rounded-sm px-1.5 py-0.5 text-xs font-medium";
-
 /**
- * A badge while a document is queued or being processed; when processing
- * failed, the error and a Retry button. Nothing once it is done.
+ * A badge (a Carbon Tag) while a document is queued or being processed;
+ * when processing failed, the error and a Retry button. Nothing once it
+ * is done.
  */
 export function ProcessingStatus({ doc, onChange }: { doc: DocumentSummary; onChange: (d: DocumentSummary) => void }) {
   const [busy, setBusy] = useState(false);
@@ -22,8 +22,10 @@ export function ProcessingStatus({ doc, onChange }: { doc: DocumentSummary; onCh
   if (p.state === "queued" || p.state === "running") {
     const text = p.state === "running" ? t.processingRunning : p.error ? t.processingRetrying : t.processingQueued;
     return (
-      <span role="status" className={`${badge} self-start bg-surface-hover text-ink-muted`} title={p.error}>
-        {text}
+      <span className="doc-processing" title={p.error || undefined}>
+        <Tag as="span" size="sm" type="gray" role="status">
+          {text}
+        </Tag>
       </span>
     );
   }
@@ -42,18 +44,19 @@ export function ProcessingStatus({ doc, onChange }: { doc: DocumentSummary; onCh
     );
   };
   return (
-    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
-      <span className={`${badge} bg-danger-soft text-danger`}>{t.processingFailed}</span>
-      {p.error && <span className="min-w-0 wrap-anywhere text-danger">{p.error}</span>}
-      <button type="button" className="text-accent-ink hover:underline disabled:opacity-50 pointer-coarse:min-h-11" disabled={busy} aria-label={t.retryDocument(documentName(doc))} onClick={retry}>
+    <div className="doc-processing doc-processing--failed">
+      <Tag as="span" size="sm" type="red">
+        {t.processingFailed}
+      </Tag>
+      {p.error && <span className="doc-processing__error app-text-error">{p.error}</span>}
+      <Button kind="ghost" size="sm" disabled={busy} aria-label={t.retryDocument(documentName(doc))} onClick={retry}>
         {t.retry}
-      </button>
+      </Button>
       {error && (
-        <span role="alert" className="text-danger">
+        <span role="alert" className="app-text-error">
           {error}
         </span>
       )}
     </div>
   );
 }
-

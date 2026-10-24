@@ -1,7 +1,7 @@
 import { devices } from "@playwright/test";
 import { seed } from "./demo";
 import { expect, test } from "./fixtures";
-import { browseButton, browseColumn, closeDocument, collapseTag, detail, discardChanges, discardQuestion, documentLink, documentList, expandTag, field, keepEditing, menuButton, openBrowse, openNavigation, pageEntry, shellNav, tagEntry } from "./ui";
+import { browseButton, browseColumn, bulkBar, closeDocument, collapseTag, detail, discardChanges, discardQuestion, documentLink, documentList, expandTag, field, keepEditing, menuButton, openBrowse, openNavigation, pageEntry, selectBox, shellNav, tagEntry } from "./ui";
 
 // A phone with a touch screen (below Carbon's lg): no rail and no column;
 // the SideNav is an overlay behind the menu button, the column (saved views,
@@ -142,6 +142,29 @@ test("a page (the profile) scrolls inside the shell too, not under the header", 
   const sizes = await main.evaluate((el) => ({ scroll: el.scrollHeight, client: el.clientHeight, doc: document.documentElement.scrollHeight - window.innerHeight }));
   expect(sizes.scroll).toBeGreaterThan(sizes.client);
   expect(sizes.doc).toBeLessThanOrEqual(0);
+});
+
+// A narrow screen (390px, an iPhone's width): every action of the bulk bar
+// is on screen without sideways scrolling (the actions wrap). With a fine
+// pointer, so the row's checkbox is there to check (a touch screen hides it
+// until a long press selects); the width is what this test is about.
+test.describe("on a 390px screen", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: false, isMobile: false });
+
+  test("the bulk bar shows all of its actions without horizontal scrolling", async ({ page }) => {
+    await page.goto("/");
+    await expect(documentList(page)).toBeVisible();
+    await selectBox(page, seed.incomeTax.title).check();
+    const bar = bulkBar(page);
+    await expect(bar.getByText("1 selected", { exact: true })).toBeVisible();
+    for (const name of ["Tags…", "Correspondent…", "Type…", "Remove from inbox", "Move to inbox", "Favorite", "Unfavorite", "Delete…"]) {
+      await expect(bar.getByRole("button", { name, exact: true })).toBeInViewport({ ratio: 1 });
+    }
+    const overflow = await bar.evaluate((el) => Array.from(el.querySelectorAll("*")).concat(el).some((e) => e.scrollWidth > e.clientWidth + 1));
+    expect(overflow).toBe(false);
+    const pageOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(pageOverflow).toBeLessThanOrEqual(0);
+  });
 });
 
 // Between Carbon's md (48rem) and lg (66rem): still below lg, so the

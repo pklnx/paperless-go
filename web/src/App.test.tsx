@@ -728,3 +728,24 @@ describe("the unsaved-changes question (#150, part 8)", () => {
     expect(question()).toBeNull();
   });
 });
+
+describe("the tag reveal and the metadata (#150, part 3 follow-up)", () => {
+  it("reveals the selected tag's parents once, not again when the metadata loads again", async () => {
+    localStorage.setItem("paperless-go.tags.root", JSON.stringify({ v: 1, collapsed: ["t1"] }));
+    await renderShell(true, "/?tag=t2", true);
+    const steuer = () => screen.getByRole("treeitem", { name: "Steuer 2" });
+    expect(steuer().getAttribute("aria-expanded")).toBe("true");
+    // The user collapses the parent again, then the metadata loads again
+    // (the admin's switch; a bulk change or an edit would do the same).
+    fireEvent.click(steuer().querySelector<HTMLElement>(":scope > .cds--tree-node__label .cds--tree-parent-node__toggle")!);
+    expect(steuer().getAttribute("aria-expanded")).toBe("false");
+    const tagLoads = () => apiRequests.filter((r) => r.method === "GET" && r.path === "/api/tags").length;
+    const before = tagLoads();
+    fireEvent.click(screen.getByRole("switch", { name: t.everyonesDocuments }));
+    await waitFor(() => expect(window.location.search).toBe("?tag=t2&all=1"));
+    await waitFor(() => expect(tagLoads()).toBe(before + 1));
+    await waitFor(() => expect(apiRequests.filter((r) => r.method === "GET" && r.path === "/api/documents").at(-1)!.url).not.toContain("owner=me"));
+    expect(steuer().getAttribute("aria-expanded")).toBe("false");
+    expect(JSON.parse(localStorage.getItem("paperless-go.tags.root")!)).toEqual({ v: 1, collapsed: ["t1"] });
+  });
+});

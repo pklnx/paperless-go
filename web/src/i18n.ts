@@ -51,7 +51,6 @@ const en = {
   // Search (start page)
   searchLabel: "Search documents",
   searchPlaceholder: "Search, e.g. Rechnung tag:Steuer date:2024",
-  searchButton: "Search",
   searchResults: "Search results",
   searchTooLong: "The search is too long: at most 1000 characters and 32 words or filters.",
   searchTooBroad: "The search took too long and was stopped. Use fewer or longer words, or narrow it with a filter such as tag: or date:.",
@@ -670,7 +669,6 @@ const de: Messages = {
   // Suche (Startseite)
   searchLabel: "Dokumente durchsuchen",
   searchPlaceholder: "Suchen, z. B. Rechnung tag:Steuer date:2024",
-  searchButton: "Suchen",
   searchResults: "Suchergebnisse",
   searchTooLong: "Die Suche ist zu lang: höchstens 1000 Zeichen und 32 Wörter oder Filter.",
   searchTooBroad: "Die Suche hat zu lange gedauert und wurde abgebrochen. Nimm weniger oder längere Wörter oder grenze sie mit einem Filter wie tag: oder date: ein.",
