@@ -157,13 +157,17 @@ export function NamedPicker({ label, choices, selected, onChange, onCreate, disa
   // choice's name whenever this prop changes); null while the rows load.
   // resync: a new object makes Carbon write the choice's name into the field again.
   const [resync, setResync] = useState(0);
-  const selectedItem = useMemo<Choice | null>(() => {
-    if (selected === null) return null;
-    const found = choices.find((c) => c.id === selected);
-    // No rows yet (they are loading): nothing to show; an id among rows that lack it is "unknown".
-    const item = found ?? (choices.length === 0 ? null : { id: selected, name: t.unknownEntry });
-    return item && resync > 0 ? { ...item } : item;
-  }, [choices, selected, resync]);
+  // Stable by id and name (not by the choices array, which other pickers'
+  // creations rebuild): a new object only when the choice or its name
+  // changes, or on resync, since Carbon then overwrites the field's text.
+  const found = selected === null ? undefined : choices.find((c) => c.id === selected);
+  const foundName = found?.name;
+  // No rows yet (they are loading): nothing to show; an id among rows that lack it is "unknown".
+  const shownName = found ? foundName : choices.length === 0 ? undefined : t.unknownEntry;
+  const selectedItem = useMemo<Choice | null>(
+    () => (selected === null || shownName === undefined ? null : { id: selected, name: shownName }),
+    [selected, shownName, resync],
+  );
   useRefocus(
     creator.creating,
     () => root.current,

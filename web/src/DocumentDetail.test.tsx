@@ -91,6 +91,7 @@ let order: string[];
 let user: { id: number; name: string; admin: boolean };
 let tags: Tag[];
 let correspondents: NamedRow[];
+let types: NamedRow[];
 let requests: Sent[];
 /** The answer to the next PATCH instead of a success. */
 let patchAnswer: { status: number; body: unknown } | null;
@@ -142,6 +143,7 @@ beforeEach(() => {
   order = [];
   tags = [];
   correspondents = [];
+  types = [];
   requests = [];
   patchAnswer = null;
   patchHold = null;
@@ -159,7 +161,7 @@ beforeEach(() => {
     if (path === "/api/documents/counts") return json(200, { inbox: 0, favorites: 0, total: docs.size });
     if (path === "/api/tags" && method === "GET") return json(200, { tags });
     if (path === "/api/correspondents" && method === "GET") return json(200, { correspondents });
-    if (path === "/api/document-types" && method === "GET") return json(200, { documentTypes: [] });
+    if (path === "/api/document-types" && method === "GET") return json(200, { documentTypes: types });
     if (path === "/api/tags" && method === "POST") {
       if (createHold) await createHold;
       const b = body as { name: string; ownerId?: number };
@@ -172,6 +174,7 @@ beforeEach(() => {
       const b = body as { name: string; ownerId?: number };
       const row = named(`new-${b.name}`, b.name, b.ownerId ?? 1);
       if (path === "/api/correspondents") correspondents = [...correspondents, row];
+      else types = [...types, row];
       return json(201, row);
     }
     if (path === "/api/documents" && method === "GET") {
@@ -1584,6 +1587,34 @@ describe("the Carbon pickers (#150 part 4): review A's delta follow-ups", () => 
     fireEvent.click(save);
     await waitFor(() => expect(patches()).toHaveLength(1));
     expect(patches()[0]!.body).toEqual({ correspondentId: "new-Amt", documentTypeId: "new-Vertrag", expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
+
+  it("a creation in one picker leaves the text being typed in another ComboBox alone (review B, round 2)", async () => {
+    types = [named("ty1", "Vertrag")];
+    serve(doc("d1", "A", { documentTypeId: "ty1" }));
+    await openAt("/?doc=d1");
+    const corr = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    const type = detail().getByRole("combobox", { name: t.fieldType }) as HTMLInputElement;
+    await waitFor(() => expect(type.value).toBe("Vertrag"));
+    let release: () => void = () => {};
+    createHold = new Promise<void>((r) => (release = r));
+    corr.focus();
+    fireEvent.change(corr, { target: { value: "Amt" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Amt") }));
+    await waitFor(() => expect(corr.disabled).toBe(true));
+    // Meanwhile the user types a new type over the old one.
+    type.focus();
+    fireEvent.change(type, { target: { value: "Neu" } });
+    expect(detail().getByRole("option", { name: t.createNamed("Neu") })).toBeTruthy();
+    await act(async () => {
+      createHold = null;
+      release();
+    });
+    await waitFor(() => expect(corr.value).toBe("Amt"));
+    await act(async () => {});
+    expect(type.value).toBe("Neu");
+    expect(document.activeElement).toBe(type);
+    expect(detail().getByRole("option", { name: t.createNamed("Neu") })).toBeTruthy();
   });
 
   it("the field takes the focus back after a creation only when the user has not moved on", async () => {

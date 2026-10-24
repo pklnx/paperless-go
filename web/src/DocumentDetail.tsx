@@ -568,11 +568,16 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   };
 
   const metaData = meta && doc && meta.owner === doc.ownerId ? meta.data : null;
-  const options = useMemo(() => {
-    if (!metaData) return null;
-    const named = (rows: Metadata["correspondents"]): Choice[] => sortByName(rows, (r) => r.name).map((r) => ({ id: r.id, name: r.name }));
-    return { tags: tagChoices(buildTagTree(metaData.tags)), correspondents: named(metaData.correspondents), types: named(metaData.documentTypes) };
-  }, [metaData]);
+  // Each picker's choices follow its own rows only: a row created from one
+  // picker leaves the other pickers' choices (and so their fields) alone.
+  const named = (rows: Metadata["correspondents"]): Choice[] => sortByName(rows, (r) => r.name).map((r) => ({ id: r.id, name: r.name }));
+  const tagRows = metaData?.tags;
+  const correspondentRows = metaData?.correspondents;
+  const typeRows = metaData?.documentTypes;
+  const tagChoicesNow = useMemo(() => (tagRows ? tagChoices(buildTagTree(tagRows)) : null), [tagRows]);
+  const correspondentChoices = useMemo(() => (correspondentRows ? named(correspondentRows) : null), [correspondentRows]);
+  const typeChoices = useMemo(() => (typeRows ? named(typeRows) : null), [typeRows]);
+  const options = tagChoicesNow && correspondentChoices && typeChoices ? { tags: tagChoicesNow, correspondents: correspondentChoices, types: typeChoices } : null;
 
   const name = doc ? documentName({ title: form?.title ?? doc.title, originalFileName: doc.originalFileName }) : "";
   const foreignOwner = doc && user.admin && doc.ownerName && doc.ownerId !== user.id ? doc.ownerName : "";
