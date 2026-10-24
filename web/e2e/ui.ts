@@ -181,26 +181,55 @@ export function detailForm(page: Page): Locator {
   return page.getByRole("form", { name: "Edit document" });
 }
 
-/** A field of the detail's form by its label. */
+/** A field of the detail's form by its label: the control itself (a picker's label also names its list box). */
 export function field(page: Page, label: string): Locator {
-  return detailForm(page).getByLabel(label, { exact: true });
+  return detailForm(page)
+    .getByLabel(label, { exact: true })
+    .and(page.locator("input, textarea"));
 }
 
-/** The chosen entries of a picker ("Chosen: Tags"). */
-export function chosen(page: Page, label: string): Locator {
+/**
+ * The chosen tags of the detail's tag picker: the list of chips under the
+ * field ("Chosen: Tags"). The correspondent and the type show their choice
+ * in the ComboBox itself: field(page, "Correspondent") has it as its value.
+ */
+export function chosen(page: Page, label = "Tags"): Locator {
   return detailForm(page).getByRole("list", { name: `Chosen: ${label}` });
 }
 
-/** Chooses name in the picker labelled label (correspondent, type or tags). */
-export async function pick(page: Page, label: string, name: string): Promise<void> {
-  const box = detailForm(page).getByRole("combobox", { name: label, exact: true });
-  await box.fill(name);
-  await page.getByRole("listbox", { name: label }).getByRole("option", { name, exact: true }).click();
+/**
+ * The names of the chosen tags, one locator per chip, in their order. A
+ * chip's text alone: its remove button carries a tooltip with its name,
+ * which the chip's text content would include (the class is Carbon's).
+ */
+export function chosenNames(page: Page): Locator {
+  return chosen(page).locator(".cds--tag__label");
 }
 
-/** Chooses a tag in the detail's tag picker. */
-export function pickTag(page: Page, name: string): Promise<void> {
-  return pick(page, "Tags", name);
+/**
+ * Chooses the option named option (name itself unless given) in the picker
+ * labelled label (correspondent, type or tags), by typing name. A Carbon
+ * ComboBox or FilterableMultiSelect: its list box is named after the label
+ * (the tag picker's name continues with how many are chosen).
+ */
+export async function pick(page: Page, label: string, name: string, option = name): Promise<void> {
+  const box = detailForm(page).getByRole("combobox", { name: label, exact: true });
+  await box.fill(name);
+  const list = page.getByRole("listbox", { name: new RegExp(`^${label}\\b`) });
+  await list.getByRole("option", { name: option, exact: true }).click();
+  // The tag picker keeps its list open for more choices: Escape closes it,
+  // as a user would before moving on. (While it is open, Carbon's
+  // FilterableMultiSelect takes the focus back from a field focused by
+  // script or by Tab; a click elsewhere closes it first.)
+  if (await list.isVisible()) {
+    await box.press("Escape");
+    await expect(list).toBeHidden();
+  }
+}
+
+/** Chooses a tag in the detail's tag picker by typing name; a nested tag's option is its path ("Finance / Bills"). */
+export function pickTag(page: Page, name: string, option = name): Promise<void> {
+  return pick(page, "Tags", name, option);
 }
 
 /** The PDF viewer's page n: a group named "Page n" with pdf.js's text layer. */
@@ -366,16 +395,37 @@ export function rowTags(page: Page, title: string): Locator {
   return documentRow(page, title).getByRole("list", { name: "Tags", exact: true });
 }
 
-/** Creates name (it must not exist yet) in the picker labelled label (correspondent, type or tags) and chooses it. */
-export async function createChoice(page: Page, label: string, name: string): Promise<void> {
+/**
+ * Creates name (it must not exist yet) in the picker labelled label
+ * (correspondent, type or tags) and chooses it: the list's "Create “name”"
+ * item. Returns once the row is created and chosen (the ComboBox shows it,
+ * the tag picker has its chip), so the next step does not race the request.
+ */
+export async function createChoice(page: Page, label: string, name: string, { wait = true } = {}): Promise<void> {
   await detailForm(page).getByRole("combobox", { name: label, exact: true }).fill(name);
   await page.getByRole("option", { name: `Create “${name}”` }).click();
+  if (!wait) return;
+  if (label === "Tags") await expect(chosenNames(page).filter({ hasText: name })).toHaveCount(1);
+  else await expect(field(page, label)).toHaveValue(name);
 }
 
-/** Saves the open document's form and waits for "Saved". */
+/** Saves the open document's form (its primary button) and waits for "Saved" (the form's status). */
 export async function saveDocument(page: Page): Promise<void> {
   await detailForm(page).getByRole("button", { name: "Save", exact: true }).click();
   await expect(detailForm(page).getByRole("status")).toHaveText("Saved");
+}
+
+/**
+ * The detail form's error message: the text of its Carbon notification.
+ * Carbon's fields keep an empty alert region each, so the alert with text
+ * is the one; its message sits below the status icon, whose description
+ * is not part of the message (the class is Carbon's, known here only).
+ */
+export function formError(page: Page): Locator {
+  return detailForm(page)
+    .getByRole("alert")
+    .filter({ hasText: /\S/ })
+    .locator(".cds--inline-notification__subtitle");
 }
 
 /** The entry of the "Saved views" list in the navigation: its button, which opens the view. */

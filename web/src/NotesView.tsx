@@ -24,7 +24,7 @@ export class NotesBoundary extends Component<BoundaryProps, { failed: boolean; t
   }
 
   render() {
-    if (this.state.failed) return <p className="whitespace-pre-wrap wrap-anywhere">{this.props.text}</p>;
+    if (this.state.failed) return <p className="notes-rendered__raw">{this.props.text}</p>;
     return this.props.children;
   }
 }

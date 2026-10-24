@@ -39,6 +39,8 @@ describe("ownedByWidget", () => {
     for (const key of ["j", "k", "u", "Escape"]) {
       expect(press('<ul role="menu"><li><button role="menuitem" id="m">Copy</button></li></ul>', "#m", key), key).toBe(true);
       expect(press('<div role="listbox"><div role="option" id="o">a</div></div>', "#o", key), key).toBe(true);
+      // A ContentSwitcher's tabs move with the arrow keys.
+      expect(press('<div role="tablist"><button role="tab" id="s">Edit</button></div>', "#s", key), key).toBe(true);
       expect(press('<span class="cds--popover--open"><span class="cds--popover-content"><button id="p">x</button></span></span>', "#p", key), key).toBe(true);
       expect(press('<div class="cds--modal is-visible"><div role="dialog"><button id="d">x</button></div></div>', "#d", key), key).toBe(true);
     }

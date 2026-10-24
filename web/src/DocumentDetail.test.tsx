@@ -1,3 +1,5 @@
+/// <reference types="node" />
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { documentsApi, type DocumentDetail, type NamedRow, type Tag } from "./api";
@@ -89,6 +91,7 @@ let order: string[];
 let user: { id: number; name: string; admin: boolean };
 let tags: Tag[];
 let correspondents: NamedRow[];
+let types: NamedRow[];
 let requests: Sent[];
 /** The answer to the next PATCH instead of a success. */
 let patchAnswer: { status: number; body: unknown } | null;
@@ -96,6 +99,8 @@ let patchAnswer: { status: number; body: unknown } | null;
 let patchHold: Promise<void> | null;
 /** While set, a DELETE or purge waits for it before it answers. */
 let trashHold: Promise<void> | null;
+/** While set, a POST that creates a tag, correspondent or type waits for it before it answers. */
+let createHold: Promise<void> | null;
 /** Each saved change gets a new modifiedAt with microseconds, as the server's. */
 let stamp: number;
 
@@ -138,10 +143,12 @@ beforeEach(() => {
   order = [];
   tags = [];
   correspondents = [];
+  types = [];
   requests = [];
   patchAnswer = null;
   patchHold = null;
   trashHold = null;
+  createHold = null;
   stamp = 0;
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
@@ -154,11 +161,20 @@ beforeEach(() => {
     if (path === "/api/documents/counts") return json(200, { inbox: 0, favorites: 0, total: docs.size });
     if (path === "/api/tags" && method === "GET") return json(200, { tags });
     if (path === "/api/correspondents" && method === "GET") return json(200, { correspondents });
-    if (path === "/api/document-types" && method === "GET") return json(200, { documentTypes: [] });
+    if (path === "/api/document-types" && method === "GET") return json(200, { documentTypes: types });
     if (path === "/api/tags" && method === "POST") {
+      if (createHold) await createHold;
       const b = body as { name: string; ownerId?: number };
       const row = tag(`new-${b.name}`, b.name, { ownerId: b.ownerId ?? 1 });
       tags = [...tags, row];
+      return json(201, row);
+    }
+    if ((path === "/api/correspondents" || path === "/api/document-types") && method === "POST") {
+      if (createHold) await createHold;
+      const b = body as { name: string; ownerId?: number };
+      const row = named(`new-${b.name}`, b.name, b.ownerId ?? 1);
+      if (path === "/api/correspondents") correspondents = [...correspondents, row];
+      else types = [...types, row];
       return json(201, row);
     }
     if (path === "/api/documents" && method === "GET") {
@@ -225,6 +241,15 @@ function serve(...ds: DocumentDetail[]) {
 }
 
 const detail = () => within(screen.getByTestId("document-detail"));
+
+/** layout.css, whose rules jsdom does not apply: tests pin the ones a layout depends on (Vitest runs in web/). */
+const layoutCSS = () => readFileSync("src/layout.css", "utf8");
+/** The declarations of the first rule whose selector list is exactly selector. */
+function rule(css: string, selector: string): string {
+  const m = new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(css);
+  if (!m) throw new Error(`no rule for ${selector} in layout.css`);
+  return m[1]!;
+}
 const patches = () => requests.filter((r) => r.method === "PATCH");
 const docParam = () => new URLSearchParams(window.location.search).get("doc");
 
@@ -406,11 +431,21 @@ describe("editing", () => {
     fireEvent.focus(box);
     fireEvent.change(box, { target: { value: "fin" } });
     fireEvent.keyDown(box, { key: "Enter" });
-    expect(detail().getByRole("button", { name: t.removeChoice("Finanzamt") })).toBeTruthy();
-    // Escape in the picker closes its list, not the document.
-    fireEvent.change(box, { target: { value: "x" } });
+    // The ComboBox shows the choice in its field, with a clear button.
+    expect((box as HTMLInputElement).value).toBe("Finanzamt");
+    expect(detail().getByRole("button", { name: t.carbon.ids["clear.selection"] })).toBeTruthy();
+    // Escape in the picker belongs to the picker (its list, its text), never closes the document:
+    // with the list closed (after Enter)...
     fireEvent.keyDown(box, { key: "Escape" });
     expect(screen.getByTestId("document-detail")).toBeTruthy();
+    expect(docParam()).toBe("d1");
+    // ...and with it open (typed text: Carbon closes the list; the document stays).
+    fireEvent.change(box, { target: { value: "x" } });
+    expect(detail().getByRole("listbox", { name: /Correspondent|Korrespondent/ })).toBeTruthy();
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect(screen.getByTestId("document-detail")).toBeTruthy();
+    expect(docParam()).toBe("d1");
+    await waitFor(() => expect(box.closest(".cds--list-box")?.classList.contains("cds--list-box--expanded")).toBe(false));
     fireEvent.click(detail().getByRole("button", { name: t.save }));
     await waitFor(() => expect(patches()[0]?.body).toEqual({ correspondentId: "c1", expectedModifiedAt: "2026-10-21T10:00:00Z" }));
   });
@@ -801,12 +836,12 @@ describe("notes in Markdown (#12)", () => {
     expect(links[0]!.getAttribute("rel")).toBe("noopener noreferrer");
     expect(rendered().textContent).toContain("böse");
 
-    fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
+    fireEvent.click(detail().getByRole("tab", { name: t.notesEditLabel }));
     expect(notesArea()!.value).toBe(notes);
     expect(document.activeElement).toBe(notesArea());
     // The preview shows the text as edited, unsaved.
     fireEvent.change(notesArea()!, { target: { value: "*neu*" } });
-    fireEvent.click(detail().getByRole("button", { name: t.notesPreviewLabel }));
+    fireEvent.click(detail().getByRole("tab", { name: t.notesPreviewLabel }));
     expect(notesArea()).toBeNull();
     expect(rendered().querySelector("em")?.textContent).toBe("neu");
     expect(detail().getByText(t.unsaved)).toBeTruthy();
@@ -818,7 +853,7 @@ describe("notes in Markdown (#12)", () => {
     await openAt("/?doc=d1");
     expect(detail().queryByTestId("notes-rendered")).toBeNull();
     // Nothing to preview yet.
-    expect(detail().queryByRole("button", { name: t.notesPreviewLabel })).toBeNull();
+    expect(detail().queryByRole("tab", { name: t.notesPreviewLabel })).toBeNull();
     fireEvent.change(notesArea()!, { target: { value: "- eins\n  - zwei" } });
     // Typing keeps the textarea.
     expect(notesArea()!.value).toBe("- eins\n  - zwei");
@@ -844,7 +879,7 @@ describe("notes in Markdown (#12)", () => {
       expect(rendered().textContent).toBe("Portal: https://portal.example/login, Fragen an müller@example.com\nhttps://code.example & Müller\njavascript:alert(1) javascript:alert(1)"),
     );
     // Edit shows the text as written.
-    fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
+    fireEvent.click(detail().getByRole("tab", { name: t.notesEditLabel }));
     expect(notesArea()!.value).toBe(notes);
   });
 
@@ -853,7 +888,7 @@ describe("notes in Markdown (#12)", () => {
     serve(doc("d1", "A", { notes }));
     await openAt("/?doc=d1");
     expect(rendered().querySelector("em")).not.toBeNull();
-    fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
+    fireEvent.click(detail().getByRole("tab", { name: t.notesEditLabel }));
     expect(notesArea()!.value).toBe(notes);
     expect(detail().queryByTestId("notes-rendered")).toBeNull();
   });
@@ -863,23 +898,32 @@ describe("notes in Markdown (#12)", () => {
     await openAt("/?doc=d1");
     const pre = rendered().querySelector("pre")!;
     expect(pre.textContent).toBe("x".repeat(200));
-    expect(pre.className).toContain("overflow-x-auto");
-    // A fieldset is at least as wide as its content unless told otherwise.
+    // The rendered notes and the fieldset above them carry the layout
+    // classes whose rules (layout.css) let the code scroll and keep the
+    // fieldset as narrow as its column: a fieldset is otherwise at least
+    // as wide as its content.
+    expect(rendered().classList.contains("notes-rendered")).toBe(true);
+    let fieldset: HTMLElement | null = null;
     for (let el: HTMLElement | null = pre; el && el.tagName !== "FORM"; el = el.parentElement) {
-      if (el.tagName === "FIELDSET") expect(el.className.split(" ")).toContain("min-w-0");
+      if (el.tagName === "FIELDSET") fieldset = el;
     }
-    expect(rendered().className.split(" ")).toContain("min-w-0");
+    expect(fieldset?.classList.contains("doc-form__fields")).toBe(true);
+    const css = layoutCSS();
+    expect(rule(css, ".notes-rendered pre")).toContain("overflow-x: auto");
+    expect(rule(css, ".doc-form__fields")).toContain("min-inline-size: 0");
+    expect(rule(css, ".notes-rendered")).toContain("min-inline-size: 0");
   });
 
   it("shows the textarea again when the server refuses the notes", async () => {
     serve(doc("d1", "A", { notes: "alt" }));
     await openAt("/?doc=d1");
-    fireEvent.click(detail().getByRole("button", { name: t.notesEditLabel }));
+    fireEvent.click(detail().getByRole("tab", { name: t.notesEditLabel }));
     fireEvent.change(notesArea()!, { target: { value: "neu" } });
-    fireEvent.click(detail().getByRole("button", { name: t.notesPreviewLabel }));
+    fireEvent.click(detail().getByRole("tab", { name: t.notesPreviewLabel }));
     patchAnswer = { status: 400, body: { error: "bad", code: "invalid_notes" } };
     fireEvent.click(detail().getByRole("button", { name: t.save }));
-    expect((await detail().findByText(t.invalidNotes)).id).toBe(notesArea()!.getAttribute("aria-describedby"));
+    // Carbon's TextArea names its error text as aria-errormessage.
+    expect((await detail().findByText(t.invalidNotes)).id).toBe(notesArea()!.getAttribute("aria-errormessage"));
     expect(notesArea()!.value).toBe("neu");
     expect(notesArea()!.getAttribute("aria-invalid")).toBe("true");
   });
@@ -934,9 +978,9 @@ describe("the trash (#12)", () => {
     serve(doc("d1", "Rechnung", trashed));
     await openAt("/?doc=d1&trash=1");
     const banner = within(detail().getByRole("region", { name: t.trash }));
-    expect(detail().getByRole("region", { name: t.trash }).textContent).toBe(
-      `${t.trashBanner(trashDay(trashed.deletedAt))} ${t.trashBannerRemoved(trashDay(trashed.purgeAt))}${t.restore}${t.purge}`,
-    );
+    expect(banner.getByText(t.trashBanner(trashDay(trashed.deletedAt)))).toBeTruthy();
+    expect(banner.getByText(t.trashBannerRemoved(trashDay(trashed.purgeAt)))).toBeTruthy();
+    expect(banner.getByRole("button", { name: t.purge })).toBeTruthy();
     expect(titleField().matches(":disabled")).toBe(true);
     expect(detail().queryByRole("button", { name: t.save })).toBeNull();
     expect(detail().queryByRole("button", { name: t.deleteDocumentLabel("Rechnung") })).toBeNull();
@@ -968,23 +1012,21 @@ describe("the trash (#12)", () => {
     serve(doc("d1", "Rechnung", { ...trashed, notes: "Bezahlt" }), doc("d2", "Brief", trashed));
     await openAt("/?doc=d1&trash=1");
     const rendered = detail().getByTestId("notes-rendered");
-    expect(rendered.className).toContain("bg-surface-hover");
-    expect(rendered.className).toContain("text-ink-muted");
-    const edit = detail().getByRole("button", { name: t.notesEditLabel });
+    expect(rendered.classList.contains("notes-rendered--disabled")).toBe(true);
+    expect(rule(layoutCSS(), ".notes-rendered--disabled")).toContain("var(--cds-text-disabled)");
+    // The switcher's tabs are in the disabled fieldset.
+    const edit = detail().getByRole("tab", { name: t.notesEditLabel });
     expect(edit.matches(":disabled")).toBe(true);
-    expect(edit.className).toContain("disabled:opacity-50");
-    // Empty notes: the textarea, disabled and with the fields' disabled style.
+    // Empty notes: Carbon's textarea, disabled (its disabled style is Carbon's).
     fireEvent.click(detail().getByRole("button", { name: t.nextDocument }));
     await waitFor(() => expect(titleField().value).toBe("Brief"));
     const area = detail().getByRole("textbox", { name: t.fieldNotes });
     expect(area.matches(":disabled")).toBe(true);
-    expect(area.className).toContain("disabled:bg-surface-hover");
-    expect(area.className).toContain("disabled:text-ink-muted");
     // A live document's rendered notes are not dimmed.
     cleanup();
     serve(doc("d3", "Lebt", { notes: "Offen" }));
     await openAt("/?doc=d3");
-    expect(detail().getByTestId("notes-rendered").className).not.toContain("bg-surface-hover");
+    expect(detail().getByTestId("notes-rendered").classList.contains("notes-rendered--disabled")).toBe(false);
   });
 
   it("asks before Delete permanently, and closes once it is done", async () => {
@@ -1054,7 +1096,7 @@ describe("the trash (#12)", () => {
     patchAnswer = { status: 409, body: { error: "the document is in the trash", code: "in_trash" } };
     fireEvent.click(detail().getByRole("button", { name: t.save }));
     const countsBefore = requests.filter((r) => r.url.startsWith("/api/documents/counts")).length;
-    expect((await detail().findByText(t.inTrashEditsKept)).getAttribute("role")).toBe("alert");
+    expect((await detail().findByText(t.inTrashEditsKept)).closest("[role=alert]")).not.toBeNull();
     await waitFor(() => expect(detail().getByRole("region", { name: t.trash })).toBeTruthy());
     expect(titleField().matches(":disabled")).toBe(true);
     // The edit is kept, not dropped for the server's state.
@@ -1084,8 +1126,11 @@ describe("the trash (#12)", () => {
   it("makes the read-only fields of a trashed document look disabled", async () => {
     serve(doc("d1", "Rechnung", trashed));
     await openAt("/?doc=d1&trash=1");
-    expect(titleField().className).toContain("disabled:bg-surface-hover");
-    expect(titleField().className).toContain("disabled:text-ink-muted");
+    // Carbon's fields in a disabled fieldset: disabled, with Carbon's disabled style.
+    expect(titleField().matches(":disabled")).toBe(true);
+    expect(titleField().classList.contains("cds--text-input")).toBe(true);
+    expect(detail().getByRole("combobox", { name: t.tags }).matches(":disabled")).toBe(true);
+    expect(detail().getByRole("checkbox", { name: t.inInbox }).matches(":disabled")).toBe(true);
   });
 
   it("says when the archive serial number is taken by a document in the trash", async () => {
@@ -1179,5 +1224,575 @@ describe("a delete or purge answered after the detail was left (#135 review B)",
     expect((await screen.findByTestId("notice")).textContent).toContain(t.purgedDocument("Rechnung"));
     await waitFor(() => expect(screen.queryByRole("link", { name: "Rechnung" })).toBeNull());
     expect(screen.getByRole("link", { name: "Bleibt" })).toBeTruthy();
+  });
+});
+
+describe("the Carbon pickers (#150 part 4)", () => {
+  const tagBox = async () => {
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    return box;
+  };
+  const optionNames = () => detail().getAllByRole("option").map((o) => o.getAttribute("aria-label"));
+
+  it("lists the tags in tree order with their path, and finds a nested tag by its own name and by its parent's", async () => {
+    tags = [tag("t3", "Home"), tag("t1", "Finance"), tag("t2", "Bills", { parentId: "t1" })];
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    const box = await tagBox();
+    fireEvent.click(box);
+    expect(optionNames()).toEqual(["Finance", "Finance / Bills", "Home"]);
+    // Its own name.
+    fireEvent.change(box, { target: { value: "bills" } });
+    expect(optionNames()).toEqual(["Finance / Bills"]);
+    // Its parent's name shows the parent and the child.
+    fireEvent.change(box, { target: { value: "Finance" } });
+    expect(optionNames()).toEqual(["Finance", "Finance / Bills"]);
+    fireEvent.click(detail().getByRole("option", { name: "Finance / Bills" }));
+    // Chosen: the tag by its own name, as a chip with its remove button.
+    const chosen = within(await detail().findByRole("list", { name: t.chosenIn(t.tags) }));
+    expect(chosen.getAllByRole("listitem")).toHaveLength(1);
+    expect(chosen.getByText("Bills")).toBeTruthy();
+    expect(chosen.getByRole("button", { name: t.removeChoice("Bills") })).toBeTruthy();
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ tagIds: ["t2"], expectedModifiedAt: "2026-10-21T10:00:00Z" });
+    // The chip removes it again.
+    fireEvent.click(chosen.getByRole("button", { name: t.removeChoice("Bills") }));
+    await waitFor(() => expect(detail().queryByRole("list", { name: t.chosenIn(t.tags) })).toBeNull());
+    expect((detail().getByRole("button", { name: t.save }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("offers Create only for a name that is no tag yet, and a created tag is chosen at once", async () => {
+    tags = [tag("t1", "Steuer")];
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    const box = await tagBox();
+    fireEvent.change(box, { target: { value: "steuer" } });
+    expect(optionNames()).toEqual(["Steuer"]);
+    fireEvent.change(box, { target: { value: "Steuern" } });
+    expect(optionNames()).toEqual([t.createNamed("Steuern")]);
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Steuern") }));
+    expect(await detail().findByRole("button", { name: t.removeChoice("Steuern") })).toBeTruthy();
+    expect(requests.find((r) => r.method === "POST" && r.url === "/api/tags")!.body).toEqual({ name: "Steuern" });
+    // Created, it is a tag like any other: no Create for it any more.
+    fireEvent.change(box, { target: { value: "Steuern" } });
+    expect(optionNames()).toEqual(["Steuern"]);
+  });
+
+  it("shows why a tag could not be created, at the field", async () => {
+    tags = [tag("t1", "Steuer")];
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    vi.spyOn(documentsApi, "get");
+    const realFetch = fetch;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url === "/api/tags" && init?.method === "POST") return json(409, { error: "taken", code: "name_taken" });
+      return realFetch(url, init);
+    });
+    const box = await tagBox();
+    fireEvent.change(box, { target: { value: "Neu" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Neu") }));
+    expect(await detail().findByText(t.nameTaken)).toBeTruthy();
+    expect(detail().queryByRole("button", { name: t.removeChoice("Neu") })).toBeNull();
+  });
+
+  it("keeps the arrow keys inside an open list box and the notes switcher: they never change the document", async () => {
+    tags = [tag("t1", "Steuer"), tag("t2", "Arzt")];
+    serve(doc("d1", "A", { notes: "x" }), doc("d2", "B"), doc("d3", "C"));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "B" }));
+    await waitFor(() => expect(titleField().value).toBe("B"));
+    const box = await tagBox();
+    fireEvent.click(box);
+    const list = detail().getByRole("listbox", { name: /Tags/ });
+    // In the field with the list open, and on an option of the list.
+    fireEvent.keyDown(box, { key: "ArrowRight" });
+    fireEvent.keyDown(box, { key: "ArrowLeft" });
+    fireEvent.keyDown(within(list).getAllByRole("option")[0]!, { key: "ArrowRight" });
+    expect(docParam()).toBe("d2");
+    // Escape in the picker: the list closes, the document stays open.
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect(docParam()).toBe("d2");
+    expect(screen.getByTestId("document-detail")).toBeTruthy();
+    // The notes switcher moves between Edit and Preview with the arrows.
+    fireEvent.click(detail().getByRole("button", { name: t.previousDocument }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    const preview = detail().getByRole("tab", { name: t.notesPreviewLabel });
+    fireEvent.keyDown(preview, { key: "ArrowLeft" });
+    expect(docParam()).toBe("d1");
+    await waitFor(() => expect(detail().getByRole("textbox", { name: t.fieldNotes })).toBeTruthy());
+    // Outside, the keys still move between documents.
+    fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    expect(docParam()).toBe("d2");
+  });
+
+  it("chooses and clears the correspondent with the ComboBox, with Create for a new name", async () => {
+    correspondents = [named("c1", "Finanzamt")];
+    serve(doc("d1", "A", { correspondentId: "c1" }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(box.value).toBe("Finanzamt"));
+    fireEvent.click(detail().getByRole("button", { name: t.carbon.ids["clear.selection"] }));
+    await waitFor(() => expect(box.value).toBe(""));
+    fireEvent.change(box, { target: { value: "Arzt" } });
+    expect(detail().getAllByRole("option").map((o) => o.textContent)).toEqual([t.createNamed("Arzt")]);
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Arzt") }));
+    await waitFor(() => expect(box.value).toBe("Arzt"));
+    expect(requests.find((r) => r.method === "POST" && r.url === "/api/correspondents")!.body).toEqual({ name: "Arzt" });
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ correspondentId: "new-Arzt", expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
+});
+
+describe("the Carbon pickers (#150 part 4): the keys that would clear a choice (review A, blocking 1)", () => {
+  const chips = () => within(detail().getByRole("list", { name: t.chosenIn(t.tags) })).getAllByRole("listitem").length;
+
+  it("Escape on the focused tag field with its list closed keeps the chips, changes nothing and closes the document", async () => {
+    tags = [tag("t1", "Steuer"), tag("t2", "Arzt")];
+    serve(doc("d1", "A", { tagIds: ["t1", "t2"] }), doc("d2", "B"));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "A" }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    expect(chips()).toBe(2);
+    box.focus();
+    fireEvent.keyDown(box, { key: "Escape" });
+    // Nothing unsaved: no question; the document closes, as from any other field.
+    await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
+    expect(docParam()).toBeNull();
+    expect(discardQuestion()).toBeNull();
+    expect(patches()).toHaveLength(0);
+    // Opened again, both tags are still there.
+    fireEvent.click(await screen.findByRole("link", { name: "A" }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    await waitFor(() => expect(chips()).toBe(2));
+  });
+
+  it("Backspace or Delete in the empty tag field removes the last chosen tag only, and the save sends the rest", async () => {
+    tags = [tag("t1", "Steuer"), tag("t2", "Arzt"), tag("t3", "Bank")];
+    serve(doc("d1", "A", { tagIds: ["t1", "t2", "t3"] }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    box.focus();
+    fireEvent.keyDown(box, { key: "Backspace" });
+    await waitFor(() => expect(chips()).toBe(2));
+    fireEvent.keyDown(box, { key: "Delete" });
+    await waitFor(() => expect(chips()).toBe(1));
+    expect(detail().getByRole("button", { name: t.removeChoice("Steuer") })).toBeTruthy();
+    expect(screen.getByTestId("document-detail")).toBeTruthy();
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ tagIds: ["t1"], expectedModifiedAt: "2026-10-21T10:00:00Z" });
+    // With text in the field, Delete edits the text and keeps the chip.
+    fireEvent.change(box, { target: { value: "x" } });
+    fireEvent.keyDown(box, { key: "Delete" });
+    expect(chips()).toBe(1);
+  });
+
+  it("Escape on a closed correspondent field keeps its text and its value, and closes the document (review A, follow-up 1)", async () => {
+    correspondents = [named("c1", "Finanzamt")];
+    serve(doc("d1", "A", { correspondentId: "c1" }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(box.value).toBe("Finanzamt"));
+    box.focus();
+    fireEvent.keyDown(box, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
+    expect(discardQuestion()).toBeNull();
+    expect(patches()).toHaveLength(0);
+    await openAt("/?doc=d1");
+    const again = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(again.value).toBe("Finanzamt"));
+  });
+
+  it("greys the chosen tags' chips of a document in the trash (review A, follow-up 3)", async () => {
+    tags = [tag("t1", "Steuer", { color: "#ff0000" })];
+    serve(doc("d1", "A", { tagIds: ["t1"], deletedAt: "2026-10-01T08:00:00Z", purgeAt: "2026-10-31T08:00:00Z" }));
+    await openAt("/?doc=d1&trash=1");
+    await waitFor(() => expect(chips()).toBe(1));
+    const chip = within(detail().getByRole("list", { name: t.chosenIn(t.tags) })).getByRole("listitem").firstElementChild as HTMLElement;
+    expect(chip.getAttribute("style")).toBeNull();
+    expect(chip.className).toContain("cds--tag--gray");
+  });
+});
+
+describe("the Carbon pickers (#150 part 4): the ComboBox's field and the form agree (review B, blocking 1)", () => {
+  // The field with its choice shown, and Carbon's own follow-up of a changed
+  // choice (it selects the item in downshift in a later effect) flushed, so
+  // the test's keys and blur meet a settled field.
+  const corrBox = async () => {
+    const box = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(box.value).toBe("Finanzamt"));
+    await act(async () => {});
+    return box;
+  };
+
+  // The field was emptied and left: the choice is cleared, the form is dirty, the save sends null.
+  for (const [how, leave] of [
+    ["with its list still open", (box: HTMLInputElement) => fireEvent.blur(box)],
+    [
+      "with its list closed",
+      async (box: HTMLInputElement) => {
+        // Typing opened the list; Escape closes it (the text stays), then the focus leaves.
+        await waitFor(() => expect(box.getAttribute("aria-expanded")).toBe("true"));
+        fireEvent.keyDown(box, { key: "Escape" });
+        await waitFor(() => expect(box.getAttribute("aria-expanded")).toBe("false"));
+        fireEvent.blur(box);
+      },
+    ],
+  ] as const) {
+    it(`an emptied correspondent field, left ${how}, clears the choice: the form is dirty and the save sends null`, async () => {
+      correspondents = [named("c1", "Finanzamt")];
+      serve(doc("d1", "A", { correspondentId: "c1" }));
+      await openAt("/?doc=d1");
+      const box = await corrBox();
+      box.focus();
+      fireEvent.change(box, { target: { value: "" } });
+      await waitFor(() => expect(box.value).toBe(""));
+      await leave(box);
+      await waitFor(() => expect((detail().getByRole("button", { name: t.save }) as HTMLButtonElement).disabled).toBe(false));
+      await waitFor(() => expect(box.value).toBe(""));
+      expect(detail().getByText(t.unsaved)).toBeTruthy();
+      fireEvent.click(detail().getByRole("button", { name: t.save }));
+      await waitFor(() => expect(patches()).toHaveLength(1));
+      expect(patches()[0]!.body).toEqual({ correspondentId: null, expectedModifiedAt: "2026-10-21T10:00:00Z" });
+    });
+  }
+
+  it("Escape on an emptied correspondent field with its list closed clears the choice first, so the document's Escape asks (review B, round 3)", async () => {
+    correspondents = [named("c1", "Finanzamt")];
+    serve(doc("d1", "A", { correspondentId: "c1" }));
+    await openAt("/?doc=d1");
+    const box = await corrBox();
+    box.focus();
+    fireEvent.change(box, { target: { value: "" } });
+    await waitFor(() => expect(box.getAttribute("aria-expanded")).toBe("true"));
+    // The first Escape closes the list only.
+    fireEvent.keyDown(box, { key: "Escape" });
+    await waitFor(() => expect(box.getAttribute("aria-expanded")).toBe("false"));
+    await act(async () => {});
+    expect(screen.getByTestId("document-detail")).toBeTruthy();
+    expect(box.value).toBe("");
+    // The second one is the document's Escape: the clear is an edit, so it asks.
+    fireEvent.keyDown(box, { key: "Escape" });
+    await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    await keepEditing();
+    await waitFor(() => expect(discardQuestion()).toBeNull());
+    expect(docParam()).toBe("d1");
+    expect(box.value).toBe("");
+    expect(detail().getByText(t.unsaved)).toBeTruthy();
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ correspondentId: null, expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
+
+  it("other text left in the field with its list closed gives way to the choice's name again, nothing changes", async () => {
+    correspondents = [named("c1", "Finanzamt"), named("c2", "Arzt")];
+    serve(doc("d1", "A", { correspondentId: "c1" }));
+    await openAt("/?doc=d1");
+    const box = await corrBox();
+    box.focus();
+    fireEvent.change(box, { target: { value: "Arzt" } });
+    fireEvent.keyDown(box, { key: "Escape" });
+    fireEvent.blur(box);
+    await waitFor(() => expect(box.value).toBe("Finanzamt"));
+    expect((detail().getByRole("button", { name: t.save }) as HTMLButtonElement).disabled).toBe(true);
+    expect(detail().queryByText(t.unsaved)).toBeNull();
+  });
+});
+
+describe("the Carbon pickers (#150 part 4): a creation still pending (CI on 0a3a96a)", () => {
+  function holdCreates(): () => Promise<void> {
+    let release: () => void = () => {};
+    createHold = new Promise<void>((r) => (release = r));
+    return async () => {
+      createHold = null;
+      await act(async () => release());
+    };
+  }
+  const typeBox = async () => {
+    const box = detail().getByRole("combobox", { name: t.fieldType }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    return box;
+  };
+
+  it("neither Save nor Done nor previous/next go on while a type is being created; the save then has the new type", async () => {
+    serve(doc("d1", "A"), doc("d2", "B"));
+    await openAt("/?doc=d1");
+    fireEvent.change(titleField(), { target: { value: "A2" } });
+    const box = await typeBox();
+    const release = holdCreates();
+    fireEvent.change(box, { target: { value: "Neu" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Neu") }));
+    await waitFor(() => expect(requests.some((r) => r.method === "POST" && r.url === "/api/document-types")).toBe(true));
+    const save = detail().getByRole("button", { name: t.save }) as HTMLButtonElement;
+    const done = detail().getByRole("button", { name: t.done }) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(true));
+    expect(done.disabled).toBe(true);
+    expect((detail().getByRole("button", { name: t.nextDocument }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(save);
+    fireEvent.click(done);
+    fireEvent.submit(detail().getByRole("form", { name: t.editDocument }));
+    fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    expect(patches()).toHaveLength(0);
+    expect(docParam()).toBe("d1");
+    await release();
+    await waitFor(() => expect(box.value).toBe("Neu"));
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ title: "A2", documentTypeId: "new-Neu", expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
+
+  it("a creation that answers after another document was opened changes nothing there", async () => {
+    serve(doc("d1", "A"), doc("d2", "B"));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "A" }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    const box = await typeBox();
+    const release = holdCreates();
+    fireEvent.change(box, { target: { value: "Neu" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Neu") }));
+    await waitFor(() => expect(requests.some((r) => r.method === "POST" && r.url === "/api/document-types")).toBe(true));
+    // Nothing is unsaved yet: a Forward to B (history) goes without a question; the detail stays mounted and shows B.
+    act(() => {
+      window.history.pushState(null, "", "/?doc=d2");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await waitFor(() => expect(titleField().value).toBe("B"));
+    expect(docParam()).toBe("d2");
+    await release();
+    await act(async () => {});
+    expect((detail().getByRole("combobox", { name: t.fieldType }) as HTMLInputElement).value).toBe("");
+    expect((detail().getByRole("button", { name: t.save }) as HTMLButtonElement).disabled).toBe(true);
+    expect(detail().queryByText(t.unsaved)).toBeNull();
+    expect(patches()).toHaveLength(0);
+  });
+});
+
+describe("the Carbon pickers (#150 part 4): review A's delta follow-ups", () => {
+  it("a held Backspace (auto-repeat) in the empty tag field removes no chip", async () => {
+    tags = [tag("t1", "Steuer"), tag("t2", "Arzt")];
+    serve(doc("d1", "A", { tagIds: ["t1", "t2"] }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    const chips = () => within(detail().getByRole("list", { name: t.chosenIn(t.tags) })).getAllByRole("listitem").length;
+    box.focus();
+    fireEvent.keyDown(box, { key: "Backspace", repeat: true });
+    fireEvent.keyDown(box, { key: "Backspace", repeat: true });
+    await act(async () => {});
+    expect(chips()).toBe(2);
+    fireEvent.keyDown(box, { key: "Backspace" });
+    await waitFor(() => expect(chips()).toBe(1));
+  });
+
+  it("typing in the next picker while a creation settles keeps focus and text there, and both choices are saved (review B)", async () => {
+    correspondents = [];
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    const corr = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(corr.disabled).toBe(false));
+    let release: () => void = () => {};
+    createHold = new Promise<void>((r) => (release = r));
+    corr.focus();
+    fireEvent.change(corr, { target: { value: "Amt" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Amt") }));
+    await waitFor(() => expect(corr.disabled).toBe(true));
+    // Meanwhile the user is in the type field, typing a new type.
+    const type = detail().getByRole("combobox", { name: t.fieldType }) as HTMLInputElement;
+    type.focus();
+    fireEvent.change(type, { target: { value: "Ver" } });
+    await act(async () => {
+      createHold = null;
+      release();
+    });
+    await waitFor(() => expect(corr.value).toBe("Amt"));
+    expect(document.activeElement).toBe(type);
+    expect(type.value).toBe("Ver");
+    fireEvent.change(type, { target: { value: "Vertrag" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Vertrag") }));
+    await waitFor(() => expect(type.value).toBe("Vertrag"));
+    const save = detail().getByRole("button", { name: t.save }) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ correspondentId: "new-Amt", documentTypeId: "new-Vertrag", expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
+
+  it("a creation in one picker leaves the text being typed in another ComboBox alone (review B, round 2)", async () => {
+    types = [named("ty1", "Vertrag")];
+    serve(doc("d1", "A", { documentTypeId: "ty1" }));
+    await openAt("/?doc=d1");
+    const corr = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    const type = detail().getByRole("combobox", { name: t.fieldType }) as HTMLInputElement;
+    await waitFor(() => expect(type.value).toBe("Vertrag"));
+    let release: () => void = () => {};
+    createHold = new Promise<void>((r) => (release = r));
+    corr.focus();
+    fireEvent.change(corr, { target: { value: "Amt" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Amt") }));
+    await waitFor(() => expect(corr.disabled).toBe(true));
+    // Meanwhile the user types a new type over the old one.
+    type.focus();
+    fireEvent.change(type, { target: { value: "Neu" } });
+    expect(detail().getByRole("option", { name: t.createNamed("Neu") })).toBeTruthy();
+    await act(async () => {
+      createHold = null;
+      release();
+    });
+    await waitFor(() => expect(corr.value).toBe("Amt"));
+    await act(async () => {});
+    expect(type.value).toBe("Neu");
+    expect(document.activeElement).toBe(type);
+    expect(detail().getByRole("option", { name: t.createNamed("Neu") })).toBeTruthy();
+  });
+
+  it("the field takes the focus back after a creation only when the user has not moved on", async () => {
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.fieldType }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    let release: () => void = () => {};
+    createHold = new Promise<void>((r) => (release = r));
+    box.focus();
+    fireEvent.change(box, { target: { value: "Neu" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Neu") }));
+    await waitFor(() => expect(box.disabled).toBe(true));
+    // Meanwhile the user is in the title.
+    titleField().focus();
+    expect(document.activeElement).toBe(titleField());
+    await act(async () => {
+      createHold = null;
+      release();
+    });
+    await waitFor(() => expect(box.value).toBe("Neu"));
+    expect(document.activeElement).toBe(titleField());
+  });
+});
+
+describe("the Carbon pickers (#150 part 4): review B's follow-ups", () => {
+  it("the tag field's clear button removes every chosen tag at once, as a deliberate clear (follow-up 4)", async () => {
+    tags = [tag("t1", "Steuer"), tag("t2", "Arzt")];
+    serve(doc("d1", "A", { tagIds: ["t1", "t2"] }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    fireEvent.click(detail().getByRole("button", { name: t.carbon.ids["clear.all"] }));
+    await waitFor(() => expect(detail().queryByRole("list", { name: t.chosenIn(t.tags) })).toBeNull());
+    expect(detail().getByText(t.unsaved)).toBeTruthy();
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ tagIds: [], expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
+
+  it("the tag field takes the focus back after a tag was created from it by keyboard (follow-up 2)", async () => {
+    tags = [tag("t1", "Steuer")];
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    let release: () => void = () => {};
+    createHold = new Promise<void>((r) => (release = r));
+    box.focus();
+    fireEvent.change(box, { target: { value: "Neu" } });
+    // Enter takes the highlighted item: the only one, "Create “Neu”".
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(requests.some((r) => r.method === "POST" && r.url === "/api/tags")).toBe(true));
+    await waitFor(() => expect(box.disabled).toBe(true));
+    // A browser drops the focus from the disabled field (jsdom keeps it, and ignores blur()): the body takes it.
+    document.body.tabIndex = -1;
+    document.body.focus();
+    document.body.removeAttribute("tabindex");
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => {
+      createHold = null;
+      release();
+    });
+    await detail().findByRole("button", { name: t.removeChoice("Neu") });
+    await waitFor(() => expect(document.activeElement).toBe(detail().getByRole("combobox", { name: t.tags })));
+  });
+
+  it("offers no Create item for a typed path of an existing nested tag (follow-up 3)", async () => {
+    tags = [tag("t1", "Finance"), tag("t2", "Bills", { parentId: "t1" })];
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    fireEvent.change(box, { target: { value: "finance / bills" } });
+    expect(detail().getAllByRole("option").map((o) => o.getAttribute("aria-label"))).toEqual(["Finance / Bills"]);
+  });
+});
+
+describe("the Carbon pickers (#150 part 4): changing a choice", () => {
+  it("keeps what is typed over a chosen correspondent, and Enter takes the match", async () => {
+    correspondents = [named("c1", "Finanzamt"), named("c2", "Arzt")];
+    serve(doc("d1", "A", { correspondentId: "c1" }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(box.value).toBe("Finanzamt"));
+    fireEvent.change(box, { target: { value: "ar" } });
+    fireEvent.change(box, { target: { value: "arz" } });
+    await act(async () => {});
+    expect(box.value).toBe("arz");
+    // The match, and Create for the typed name (no row is named exactly so).
+    expect(detail().getAllByRole("option").map((o) => o.textContent)).toEqual(["Arzt", t.createNamed("arz")]);
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(box.value).toBe("Arzt"));
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ correspondentId: "c2", expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
+});
+
+describe("the detail in German", () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it("names the header, the fields, the pickers, the notes switcher and the actions in German, nothing in English", async () => {
+    vi.resetModules();
+    vi.stubGlobal("navigator", { ...navigator, languages: ["de-DE", "en-US"], language: "de-DE" });
+    const { App: GermanApp } = await import("./App");
+    const { messagesFor } = await import("./i18n");
+    const de = messagesFor("de");
+    tags = [tag("t1", "Steuer")];
+    correspondents = [named("c1", "Finanzamt")];
+    serve(doc("d1", "Rechnung", { tagIds: ["t1"], correspondentId: "c1", notes: "Bezahlt" }));
+    window.history.replaceState(null, "", "/?doc=d1");
+    render(<GermanApp />);
+    const d = within(await screen.findByTestId("document-detail"));
+    await waitFor(() => expect(d.getByLabelText(de.fieldTitle)).toBeTruthy());
+    // The header row and the viewer's toolbar.
+    for (const name of [de.closeDocument, de.previousDocument, de.nextDocument, de.zoomFit, de.zoomIn, de.zoomOut]) expect(d.getByRole("button", { name })).toBeTruthy();
+    expect(d.getByRole("toolbar", { name: de.viewerTools })).toBeTruthy();
+    // The fields and the pickers, with Carbon's texts.
+    for (const name of [de.fieldDate, de.fieldASN]) expect(d.getByLabelText(name)).toBeTruthy();
+    const corr = d.getByRole("combobox", { name: de.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(corr.value).toBe("Finanzamt"));
+    // The correspondent's clear button; the tag picker has one of its own.
+    expect(d.getAllByRole("button", { name: de.carbon.ids["clear.selection"] }).length).toBeGreaterThanOrEqual(1);
+    expect(d.getAllByRole("button", { name: de.carbon.ids["open.menu"] }).length).toBeGreaterThanOrEqual(2);
+    expect(d.getByRole("combobox", { name: de.tags })).toBeTruthy();
+    const chosen = within(d.getByRole("list", { name: de.chosenIn(de.tags) }));
+    expect(chosen.getByRole("button", { name: de.removeChoice("Steuer") })).toBeTruthy();
+    // The notes switcher, the flags, the actions and the facts.
+    expect(d.getByRole("tab", { name: de.notesEditLabel })).toBeTruthy();
+    expect(d.getByRole("tab", { name: de.notesPreviewLabel })).toBeTruthy();
+    expect(d.getByRole("checkbox", { name: de.inInbox })).toBeTruthy();
+    expect(d.getByRole("checkbox", { name: de.favorite })).toBeTruthy();
+    expect(d.getByRole("button", { name: de.save })).toBeTruthy();
+    expect(d.getByRole("button", { name: de.done })).toBeTruthy();
+    expect(d.getByRole("button", { name: de.deleteDocumentLabel("Rechnung") })).toBeTruthy();
+    expect(d.getByRole("region", { name: de.fileFacts })).toBeTruthy();
+    expect(d.getByRole("link", { name: de.downloadOriginal })).toBeTruthy();
+    const html = document.body.innerHTML;
+    for (const s of ["Open menu", "Close menu", "Clear selected", "Total items selected", "To clear selection", "Zoom in", "Zoom out", "Fit width", "Close document", "Next document", ">Save<", ">Done<", "Edit notes", "Choose an item"]) {
+      expect(html, s).not.toContain(s);
+    }
   });
 });
