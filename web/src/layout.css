@@ -141,10 +141,12 @@ body,
     grid-template-columns: 18rem minmax(0, 1fr);
   }
 }
-/* The page scrolls inside its cell. Positioned, so an absolutely placed
-   element in it (a screen-reader-only span of a row) stays inside it and
-   cannot make the document taller than the screen. */
-.docs-pane {
+/* The page scrolls inside its cell (the documents pane, and the other pages'
+   main). Positioned, so an absolutely placed element in it (a
+   screen-reader-only span of a row) stays inside it and cannot make the
+   document taller than the screen. */
+.docs-pane,
+.app-page {
   position: relative;
   min-inline-size: 0;
   overflow-y: auto;
@@ -256,13 +258,33 @@ body,
 .nav-views .cds--contained-list__header {
   padding-inline-start: 1rem;
 }
+/* The view's button fills its item (the item's own padding goes to the button). */
 .nav-views .cds--contained-list-item__content {
+  padding: 0;
+}
+.nav-views__open {
+  display: block;
+  inline-size: 100%;
   overflow: hidden;
-  padding-inline-start: 1rem;
+  border: 0;
+  margin: 0;
+  padding: 0.5rem 1rem;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
 }
-.nav-views__item--current .cds--contained-list-item__content {
+.nav-views__open:hover {
+  background-color: var(--cds-layer-hover-01);
+}
+.nav-views__open:focus-visible {
+  outline: 2px solid var(--cds-focus);
+  outline-offset: -2px;
+}
+.nav-views__item--current .nav-views__open {
   box-shadow: inset 3px 0 0 var(--cds-border-interactive);
   font-weight: 600;
 }

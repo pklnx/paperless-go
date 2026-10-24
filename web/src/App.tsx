@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type MouseEvent } from "react";
 import { Header, HeaderGlobalAction, HeaderGlobalBar, HeaderMenuButton, HeaderName, IconButton, InlineNotification } from "@carbon/react";
 import { Folders, Logout } from "@carbon/icons-react";
 import { documentsApi, metadataApi, savedViewsApi, type DocumentCounts, type Metadata, type SavedView, type User } from "./api";
@@ -15,6 +15,7 @@ import { columnFocusTarget, NavColumn, type Loaded } from "./NavColumn";
 import { ProductMark } from "./ProductMark";
 import { ProfilePage } from "./Profile";
 import { SaveViewButton, SavedViewList } from "./SavedViews";
+import { showsView, shownViews } from "./savedViews";
 import { listPatch, pagePatch, ShellNav } from "./ShellNav";
 import { ThemeToggle } from "./ThemeToggle";
 import { Toast, useNotice } from "./Toast";
@@ -113,6 +114,19 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
     return () => ctl.abort();
   }, [viewEdits]);
   const collapsed = useCollapsedTags(user.name, metadata.data?.tags ?? null);
+  // The selected tag stays visible: its parents are expanded once when the
+  // selection changes, or when the tag first shows up in the data. Here, not
+  // in the column, which remounts with the documents view: a parent the user
+  // collapsed again stays collapsed on the way back.
+  const { reveal } = collapsed;
+  const revealed = useRef("");
+  useEffect(() => {
+    const tags = metadata.data?.tags;
+    if (!state.tag || !tags || revealed.current === state.tag) return;
+    if (!tags.some((x) => x.id === state.tag)) return;
+    revealed.current = state.tag;
+    reveal(state.tag);
+  }, [state.tag, metadata.data, reveal]);
   // Opening the trash counts again: a document may have been deleted elsewhere.
   const inTrashView = state.trash === "1" && state.view === "";
   useEffect(() => {
@@ -187,9 +201,6 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
   const aside = useRef<HTMLElement>(null);
   const sideNav = useRef<HTMLElement>(null);
   const opener = useRef<HTMLElement | null>(null);
-  // An overlay just gave the focus back to its button: a page change in the
-  // same step leaves it there instead of moving it to the page heading.
-  const returned = useRef(false);
   const overlay = menuOpen ? "menu" : browseOpen ? "browse" : "";
   useEffect(() => {
     if (overlay) {
@@ -199,45 +210,43 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
     } else if (opener.current) {
       opener.current.focus();
       opener.current = null;
-      returned.current = true;
     }
   }, [overlay]);
   // Focus moves to the page heading on a view change, so the keyboard and
-  // screen readers start at the new page.
+  // screen readers start at the new page (after the overlay effect above,
+  // so a page chosen from the SideNav overlay ends on its heading, not on
+  // the menu button).
   const shownView = useRef(view);
   useEffect(() => {
-    const back = returned.current;
-    returned.current = false;
     if (shownView.current === view) return;
     shownView.current = view;
-    if (back) return;
     document.querySelector<HTMLElement>('main :is(h1, h2)[tabindex="-1"]')?.focus();
   });
   const pageInert = overlay !== "" || undefined;
   const closeBrowse = useCallback(() => setBrowseOpen(false), []);
-  // Escape closes the column overlay. In the capture phase: Carbon's
-  // TreeView keeps the keys it gets from bubbling.
-  const browseKey = (e: ReactKeyboardEvent) => {
-    if (browseOpen && e.key === "Escape") {
+  // Escape closes the open overlay. A window listener in the capture phase:
+  // before any component sees the key (Carbon's TreeView keeps the keys it
+  // gets from bubbling), and also with the focus on the body after a click
+  // on a blank part of the overlay. A key inside a Carbon Menu or Modal
+  // (portals outside the aside: a view's menu and its Rename and Delete)
+  // belongs to that widget, which closes itself. The detail's own Escape
+  // stays off while an overlay is open (dialogs.ts).
+  useEffect(() => {
+    if (!overlay) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      const el = e.target instanceof Element ? e.target : null;
+      const onBody = !el || el === document.body || el === document.documentElement;
+      if (overlay === "browse" && !onBody && !aside.current?.contains(el)) return;
+      if (overlay === "menu" && !onBody && !sideNav.current?.contains(el) && !el.closest(".cds--header")) return;
       e.preventDefault();
       e.stopPropagation();
-      closeBrowse();
-    }
-  };
-  // Escape closes the SideNav overlay. Before any component sees the key
-  // (capture); the detail's own Escape stays off while an overlay is open
-  // (dialogs.ts).
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented) {
-        e.preventDefault();
-        setMenuOpen(false);
-      }
+      if (overlay === "menu") setMenuOpen(false);
+      else closeBrowse();
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [menuOpen]);
+  }, [overlay, closeBrowse]);
 
   const column = (
     <NavColumn
@@ -295,7 +304,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
           <button
             type="button"
             className="app-header__user"
-            aria-label={t.profile}
+            aria-label={`${user.name}, ${t.profile}`}
             title={`${t.loggedInAs(user.name)} · ${t.profile}`}
             aria-current={view === "profile" ? "page" : undefined}
             onClick={() => openView(pagePatch("profile"))}
@@ -309,11 +318,15 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
         </HeaderGlobalBar>
       </Header>
       <ShellNav
+        // Carbon keeps its hover state across a change of isRail: a rail expanded by
+        // hover or focus would stay an inert overlay when the window narrows below lg.
+        key={wide ? "rail" : "overlay"}
         ref={sideNav}
         id={navId}
         state={state}
         admin={user.admin}
         counts={counts}
+        viewShown={shownViews(views.data ?? []).some(({ view: v, params }) => showsView(state, v.id, params, user.admin))}
         rail={wide}
         expanded={menuOpen && !wide}
         onClose={() => setMenuOpen(false)}
@@ -348,7 +361,6 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
               role={browseOpen ? "dialog" : undefined}
               aria-modal={browseOpen || undefined}
               aria-label={browseOpen ? t.browse : undefined}
-              onKeyDownCapture={browseKey}
             >
               {column}
             </aside>
@@ -404,7 +416,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
             </main>
           </div>
         ) : (
-          <main inert={pageInert} className="app-view">
+          <main inert={pageInert} className="app-view app-page">
             {view === "metadata" && <MetadataPage metadata={metadata} userId={user.id} onChanged={onChanged} open={select} />}
             {view === "profile" && <ProfilePage user={user} />}
             {view === "log" && <LogPage admin={user.admin} />}

@@ -55,8 +55,6 @@ export function SavedViewList({ views, error, state, admin, open, reload, notify
             <ContainedListItem
               key={view.id}
               className={on ? "nav-views__item--current" : undefined}
-              aria-current={on ? "page" : undefined}
-              onClick={() => open(applyView(view.id, params, admin))}
               action={
                 <ViewMenu
                   view={view}
@@ -69,7 +67,10 @@ export function SavedViewList({ views, error, state, admin, open, reload, notify
                 />
               }
             >
-              {view.name}
+              {/* The item's own button, so aria-current sits on the control that takes the focus. */}
+              <button type="button" className="nav-views__open" aria-current={on ? "page" : undefined} onClick={() => open(applyView(view.id, params, admin))}>
+                {view.name}
+              </button>
             </ContainedListItem>
           );
         })}
@@ -115,6 +116,11 @@ function ViewMenu({
   // menu item that opened it is gone by then.
   const menu = useRef<HTMLDivElement>(null);
   const returnFocus = () => menu.current?.querySelector<HTMLButtonElement>("button");
+  /** Opens a modal from the menu: the focus goes to the menu's button first, so the modal returns it there (the menu item is gone by then). */
+  const openModal = (which: Ask) => {
+    returnFocus()?.focus();
+    setAsk(which);
+  };
   const close = () => {
     setAsk(null);
     setError("");
@@ -160,7 +166,7 @@ function ViewMenu({
           label={t.renameView}
           onClick={() => {
             setName(view.name);
-            setAsk("rename");
+            openModal("rename");
           }}
         />
         <MenuItem
@@ -168,15 +174,15 @@ function ViewMenu({
           // Only with a search, a filter or a sort to save; the hint (below the
           // menu, read with the item) says so. Carbon's MenuItem has no text of
           // its own for it and sets the item's title itself.
-          disabled={!updatable}
+          disabled={busy || !updatable}
           aria-describedby={updatable ? undefined : hintId}
           // Only the web's part: the server keeps the app's keys as they are now, not as loaded.
           onClick={() => run(savedViewsApi.patch(view.id, { paperlessGo: { ...paramsOf(state) } }), t.viewUpdated(view.name), false)}
         />
-        <MenuItem label={t.moveViewUp} disabled={index === 0} onClick={() => move(-1)} />
-        <MenuItem label={t.moveViewDown} disabled={index === shown.length - 1} onClick={() => move(1)} />
+        <MenuItem label={t.moveViewUp} disabled={busy || index === 0} onClick={() => move(-1)} />
+        <MenuItem label={t.moveViewDown} disabled={busy || index === shown.length - 1} onClick={() => move(1)} />
         <MenuItemDivider />
-        <MenuItem label={t.deleteView} kind="danger" onClick={() => setAsk("delete")} />
+        <MenuItem label={t.deleteView} kind="danger" onClick={() => openModal("delete")} />
       </OverflowMenu>
       {!updatable && (
         <span id={hintId} className="cds--visually-hidden">

@@ -1,6 +1,6 @@
 import { seed, unique } from "./demo";
 import { expect, test } from "./fixtures";
-import { documentList, documentRow, documentRows, notice, openList, openSavedViewMenu, savedViewEntry, savedViewRow, search, sheet } from "./ui";
+import { documentList, documentRow, documentRows, notice, openList, openSavedViewMenu, savedViewEntry, search, sheet } from "./ui";
 
 test("a search is saved as a view, opened from the sidebar, renamed and deleted", async ({ page }) => {
   const name = unique("Water");
@@ -15,7 +15,7 @@ test("a search is saved as a view, opened from the sidebar, renamed and deleted"
   await save.getByLabel("Name", { exact: true }).fill(name);
   await save.getByRole("button", { name: "Save", exact: true }).click();
   await expect(notice(page, `View “${name}” saved.`)).toBeVisible();
-  await expect(savedViewRow(page, name)).toHaveAttribute("aria-current", "page");
+  await expect(savedViewEntry(page, name)).toHaveAttribute("aria-current", "page");
   await expect(page).toHaveURL(/[?&]sv=[0-9a-f-]{36}/);
 
   // Another list, then the view from the sidebar: its search comes back.

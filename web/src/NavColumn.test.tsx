@@ -128,13 +128,11 @@ describe("NavColumn", () => {
     expect(screen.queryAllByRole("treeitem", { selected: true })).toHaveLength(0);
   });
 
-  it("reveals the selected tag's parents once, not on every load of the data", () => {
+  it("shows the selection inside a collapsed parent without expanding it (the shell reveals it once, App.test)", () => {
     localStorage.setItem("paperless-go.tags.alice", JSON.stringify({ v: 1, collapsed: ["t1"] }));
     const { rerender } = render(<Harness state={parseState("?tag=t2")} />);
-    expect(expanded("Steuer 5")).toBe("true");
-    expect(node("2024 3").getAttribute("aria-selected")).toBe("true");
-    // The user collapses the parent again; new data arrives.
-    fireEvent.click(caret("Steuer 5"));
+    expect(expanded("Steuer 5")).toBe("false");
+    expect(node("Steuer 5").className).toContain("nav-tree__node--within");
     act(() => rerender(<Harness state={parseState("?tag=t2")} d={data()} />));
     expect(expanded("Steuer 5")).toBe("false");
     expect(JSON.parse(localStorage.getItem("paperless-go.tags.alice")!)).toEqual({ v: 1, collapsed: ["t1"] });
@@ -207,7 +205,7 @@ describe("NavColumn", () => {
     cleanup();
     localStorage.setItem("paperless-go.tags.alice", JSON.stringify({ v: 1, collapsed: ["t1"] }));
     render(<Harness state={parseState("?tag=t2")} />);
-    fireEvent.click(caret("Steuer 5"));
+    expect(expanded("Steuer 5")).toBe("false");
     expect(columnFocusTarget(screen.getByRole("navigation", { name: t.browse }))).toBe(node(t.tags));
   });
 });

@@ -372,7 +372,7 @@ export function savedViewsList(page: Page): Locator {
   return browseColumn(page).getByRole("list", { name: "Saved views", exact: true });
 }
 
-/** A saved view's row (the list item that holds its button and its menu): aria-current marks the view the list shows. */
+/** A saved view's row: the list item that holds its button and its menu. */
 export function savedViewRow(page: Page, name: string): Locator {
   return savedViewsList(page)
     .getByRole("listitem")

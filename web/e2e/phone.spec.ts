@@ -109,6 +109,17 @@ test("the upload button is reachable and the page does not scroll sideways or un
   expect(overflow.y).toBeLessThanOrEqual(0);
 });
 
+test("a page (the profile) scrolls inside the shell too, not under the header", async ({ page }) => {
+  await page.goto("/?view=profile");
+  await expect(page.getByRole("heading", { name: "Profile", exact: true })).toBeVisible();
+  // The profile is taller than a phone screen: its main scrolls, the document does not.
+  const main = page.getByRole("main");
+  await expect(main).toBeVisible();
+  const sizes = await main.evaluate((el) => ({ scroll: el.scrollHeight, client: el.clientHeight, doc: document.documentElement.scrollHeight - window.innerHeight }));
+  expect(sizes.scroll).toBeGreaterThan(sizes.client);
+  expect(sizes.doc).toBeLessThanOrEqual(0);
+});
+
 // Between Carbon's md (48rem) and lg (66rem): still below lg, so the
 // SideNav and the column are overlays, as on a phone, with a mouse.
 test.describe("on a desktop of 1024px", () => {

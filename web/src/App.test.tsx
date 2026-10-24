@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App } from "./App";
 import { firstAdminCommand } from "./Auth";
 import { lg } from "./breakpoints";
 import { t } from "./i18n";
+import { dialogOpen } from "./dialogs";
 import { doc, named, page, savedView, stubServer as stubApi, tag, type Server } from "./testServer";
 
 // The shell against a fake server: the login gate, the Carbon header, the
@@ -219,7 +220,8 @@ describe("the header", () => {
     loggedIn();
     render(<App />);
     await screen.findByRole("banner", { name: t.appName });
-    const me = header().getByRole("button", { name: t.profile });
+    // Named by its visible text and the page it opens (label in name).
+    const me = header().getByRole("button", { name: `alice, ${t.profile}` });
     expect(me.textContent).toBe("alice");
     expect(me.getAttribute("aria-current")).toBeNull();
     fireEvent.click(me);
@@ -254,9 +256,30 @@ describe("the header", () => {
   });
 });
 
-/** matchMedia that answers Carbon's lg query (66rem) with wide; everything else is false. */
+/** The listeners of the stubbed matchMedia with their query, told by resize(). */
+let mediaListeners = new Set<{ query: string; fn: (e: { matches: boolean; media: string }) => void }>();
+let wideNow = false;
+
+/** matchMedia that answers Carbon's lg query (66rem) with wide; everything else is false. resize() changes the answer and tells the listeners. */
 function screenWidth(wide: boolean) {
-  vi.stubGlobal("matchMedia", (query: string) => ({ matches: query === lg && wide, media: query, addEventListener: () => {}, removeEventListener: () => {} }));
+  wideNow = wide;
+  mediaListeners = new Set();
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    get matches() {
+      return query === lg && wideNow;
+    },
+    media: query,
+    addEventListener: (_: string, fn: (e: { matches: boolean; media: string }) => void) => mediaListeners.add({ query, fn }),
+    removeEventListener: (_: string, fn: (e: { matches: boolean; media: string }) => void) => {
+      for (const l of mediaListeners) if (l.fn === fn) mediaListeners.delete(l);
+    },
+  }));
+}
+
+/** The window crosses lg: the media query answers wide from now on, and every listener hears it (Carbon's too). */
+function resize(wide: boolean) {
+  wideNow = wide;
+  act(() => mediaListeners.forEach(({ query, fn }) => fn({ matches: query === lg && wideNow, media: query })));
 }
 
 let api: Server;
@@ -308,19 +331,22 @@ describe("phone navigation (below lg)", () => {
     expect(browseButton().closest("[inert]")).toBeNull();
   });
 
-  it("goes to a page from the SideNav and closes it, with the focus back on the menu button", async () => {
+  it("goes to a page from the SideNav and closes it, with the focus on the page's heading; a list leaves it on the menu button", async () => {
     await renderShell(false);
+    // A list from the SideNav is no view change: the focus returns to the menu button.
     menuButton().focus();
-    fireEvent.click(menuButton());
-    fireEvent.click(within(sideNav()).getByRole("link", { name: t.log }));
-    expect(window.location.search).toBe("?view=log");
-    expect(sideNav().className).not.toContain("cds--side-nav--expanded");
-    expect(document.activeElement).toBe(menuButton());
-    // A list from the SideNav: the Browse button is on the documents page.
     fireEvent.click(menuButton());
     fireEvent.click(within(sideNav()).getByRole("link", { name: /^Inbox/ }));
     expect(window.location.search).toBe("?inbox=1");
+    expect(sideNav().className).not.toContain("cds--side-nav--expanded");
+    expect(document.activeElement).toBe(menuButton());
     expect(browseButton()).toBeTruthy();
+    // A page: the new page starts at its heading, not at the menu button.
+    fireEvent.click(menuButton());
+    fireEvent.click(within(sideNav()).getByRole("link", { name: t.log }));
+    expect(window.location.search).toBe("?inbox=1&view=log");
+    expect(sideNav().className).not.toContain("cds--side-nav--expanded");
+    expect(document.activeElement).toBe(await screen.findByRole("heading", { name: t.logTitle }));
   });
 
   it("opens the column as a modal overlay from Browse: focus trapped, Escape closes, focus returns", async () => {
@@ -365,6 +391,69 @@ describe("phone navigation (below lg)", () => {
     expect(window.location.search).toBe("?tag=t2");
     expect(browseDialog()).toBeNull();
     expect(document.activeElement).toBe(browseButton());
+  });
+
+  it("closes the column overlay with Escape also while the focus is on the body (a tap on a blank part)", async () => {
+    await renderShell(false);
+    browseButton().focus();
+    fireEvent.click(browseButton());
+    expect(browseDialog()).not.toBeNull();
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+    key(document.body, "Escape");
+    expect(browseDialog()).toBeNull();
+    expect(document.activeElement).toBe(browseButton());
+  });
+
+  it("leaves Escape to a view's menu and modal inside the column overlay, then closes the overlay", async () => {
+    await renderShell(false, "/", false, (s) => {
+      s.savedViews = [savedView("v1", "Steuern", { filter: { "paperless-go": { v: 1, q: "Steuer" } } })];
+    });
+    browseButton().focus();
+    fireEvent.click(browseButton());
+    const dialog = browseDialog()!;
+    // (b) Escape on the open menu closes the menu; the overlay stays.
+    const trigger = within(dialog).getByRole("button", { name: t.viewActions("Steuern") });
+    fireEvent.click(trigger);
+    const menu = await screen.findByRole("menu", { name: t.viewActions("Steuern") });
+    key(menu, "Escape");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(browseDialog()).not.toBeNull();
+    // (a) Escape in the delete modal closes the modal only: the overlay stays, the focus is on the view's menu button, nothing was sent.
+    fireEvent.click(trigger);
+    fireEvent.click(within(await screen.findByRole("menu", { name: t.viewActions("Steuern") })).getByRole("menuitem", { name: t.deleteView }));
+    const ask = await screen.findByRole("dialog", { name: t.deleteViewTitle("Steuern") });
+    key(within(ask).getByRole("button", { name: t.cancel }), "Escape");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.deleteViewTitle("Steuern") })).toBeNull());
+    expect(browseDialog()).not.toBeNull();
+    expect(document.activeElement).toBe(within(browseDialog()!).getByRole("button", { name: t.viewActions("Steuern") }));
+    expect(apiRequests.filter((r) => r.method !== "GET")).toHaveLength(0);
+    // (c) A further Escape closes the overlay, and the focus is back on Browse.
+    key(document.activeElement!, "Escape");
+    expect(browseDialog()).toBeNull();
+    expect(document.activeElement).toBe(browseButton());
+  });
+
+  it("leaves Escape to a Carbon Modal over the SideNav overlay too", async () => {
+    await renderShell(false);
+    fireEvent.click(screen.getByRole("link", { name: "Rechnung" }));
+    await screen.findByTestId("document-detail");
+    // The detail's Delete asks in a native dialog; a Carbon Modal elsewhere (the trash's purge) is the same case:
+    // the key goes to the widget, not to the overlay.
+    fireEvent.click(menuButton());
+    expect(sideNav().className).toContain("cds--side-nav--expanded");
+    const modal = document.createElement("div");
+    modal.className = "cds--modal is-visible";
+    modal.innerHTML = '<div role="dialog"><button id="in-modal">x</button></div>';
+    document.body.appendChild(modal);
+    try {
+      key(modal.querySelector("#in-modal")!, "Escape");
+      expect(sideNav().className).toContain("cds--side-nav--expanded");
+    } finally {
+      modal.remove();
+    }
+    key(menuButton(), "Escape");
+    expect(sideNav().className).not.toContain("cds--side-nav--expanded");
   });
 
   it("focuses the selected node when the overlay opens", async () => {
@@ -414,6 +503,55 @@ describe("desktop navigation (lg and up)", () => {
     expect(browseDialog()).toBeNull();
   });
 
+  it("drops the rail's hover expansion when the window narrows below lg, instead of leaving an inert overlay", async () => {
+    await renderShell(true);
+    const link = within(sideNav()).getByRole("link", { name: t.log });
+    fireEvent.focus(link);
+    await waitFor(() => expect(sideNav().className).toContain("cds--side-nav--expanded"));
+    resize(false);
+    const nav = sideNav();
+    expect(nav.className).not.toContain("cds--side-nav--rail");
+    expect(nav.className).not.toContain("cds--side-nav--expanded");
+    expect(document.querySelector(".cds--side-nav__overlay-active")).toBeNull();
+    expect(dialogOpen()).toBe(false);
+    // The overlay works as usual afterwards.
+    fireEvent.click(menuButton());
+    expect(sideNav().className).toContain("cds--side-nav--expanded");
+    key(document.activeElement!, "Escape");
+    expect(sideNav().className).not.toContain("cds--side-nav--expanded");
+  });
+
+  it("reveals the selected tag's parents once, not again when the column remounts", async () => {
+    localStorage.setItem("paperless-go.tags.alice", JSON.stringify({ v: 1, collapsed: ["t1"] }));
+    await renderShell(true, "/?tag=t2");
+    const steuer = () => screen.getByRole("treeitem", { name: "Steuer 2" });
+    expect(steuer().getAttribute("aria-expanded")).toBe("true");
+    // The user collapses the parent again, goes to a page (the URL keeps the tag) and comes back.
+    fireEvent.click(steuer().querySelector<HTMLElement>(":scope > .cds--tree-node__label .cds--tree-parent-node__toggle")!);
+    expect(steuer().getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(within(sideNav()).getByRole("link", { name: t.log }));
+    await screen.findByRole("heading", { name: t.logTitle });
+    expect(screen.queryByRole("tree")).toBeNull();
+    act(() => window.history.back());
+    await waitFor(() => expect(window.location.search).toBe("?tag=t2"));
+    expect((await screen.findByRole("treeitem", { name: "Steuer 2" })).getAttribute("aria-expanded")).toBe("false");
+    expect(JSON.parse(localStorage.getItem("paperless-go.tags.alice")!)).toEqual({ v: 1, collapsed: ["t1"] });
+  });
+
+  it("marks one place as current: a shown saved view's button, and no list of the SideNav", async () => {
+    await renderShell(true, "/", false, (s) => {
+      s.savedViews = [savedView("v1", "Steuern", { filter: { "paperless-go": { v: 1, q: "Steuer" } } })];
+    });
+    const current = () => Array.from(document.querySelectorAll('[aria-current="page"]'));
+    expect(current().map((e) => e.textContent)).toEqual([expect.stringMatching(/^All documents/)]);
+    fireEvent.click(await screen.findByRole("button", { name: "Steuern" }));
+    await waitFor(() => expect(window.location.search).toContain("sv=v1"));
+    const marked = current();
+    expect(marked).toHaveLength(1);
+    expect(marked[0]!.tagName).toBe("BUTTON");
+    expect(marked[0]!.textContent).toBe("Steuern");
+  });
+
   it("expands the rail on focus and collapses it again when focus leaves", async () => {
     await renderShell(true);
     const nav = sideNav();
@@ -436,10 +574,11 @@ describe("desktop navigation (lg and up)", () => {
     fireEvent.click(within(await screen.findByRole("menu", { name: t.viewActions("Steuern") })).getByRole("menuitem", { name: t.deleteView }));
     const ask = await screen.findByRole("dialog", { name: t.deleteViewTitle("Steuern") });
     expect(screen.getByTestId("document-detail")).toBeTruthy();
-    // Escape goes to the Modal (dialogs.ts), which closes; the document stays open.
+    // Escape goes to the Modal (dialogs.ts), which closes; the document stays open, the focus returns to the view's menu button.
     key(within(ask).getByRole("button", { name: t.cancel }), "Escape");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: t.deleteViewTitle("Steuern") })).toBeNull());
     expect(screen.getByTestId("document-detail")).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: t.viewActions("Steuern") }));
     expect(new URLSearchParams(window.location.search).get("doc")).toBe("d1");
     expect(apiRequests.filter((r) => r.method === "DELETE")).toHaveLength(0);
   });

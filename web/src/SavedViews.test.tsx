@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App } from "./App";
 import { t } from "./i18n";
+import type { SavedView } from "./api";
 import { viewKey } from "./savedViews";
 import { findAlert } from "./test/alerts";
-import { named, page, savedView, stubServer, tag, type Request, type Server } from "./testServer";
+import { held, named, page, savedView, stubServer, tag, type Request, type Server } from "./testServer";
 
 // Saved views in the web UI (#12, part 4) against a fake server: what the
 // navigation column shows, what opening a view requests, and what saving,
@@ -28,8 +29,8 @@ afterEach(() => {
 
 /** The navigation column (saved views, tags, correspondents, types). */
 const column = () => within(screen.getByRole("navigation", { name: t.browse }));
-/** The row of a view (the listitem that holds its button): aria-current marks the one the list shows. */
-const rowOf = (name: string) => column().getByRole("button", { name }).closest("li")!;
+/** The button of a view: aria-current marks the one the list shows. */
+const rowOf = (name: string) => column().getByRole("button", { name });
 /** A request as method, path and body only. */
 const pin = (r: Request | undefined) => (r ? { method: r.method, path: r.path, body: r.body } : undefined);
 const lists = () => requests.filter((r) => r.method === "GET" && r.path === "/api/documents").map((r) => new URLSearchParams(r.url.split("?")[1]));
@@ -291,6 +292,25 @@ describe("a view's menu", () => {
       { method: "PATCH", path: "/api/saved-views/v1", body: { sortIndex: 8 } },
     ]);
     expect(requests.filter((r) => r.method !== "GET")).toHaveLength(4);
+  });
+
+  it("offers no move or update while a request runs", async () => {
+    const answer = held();
+    server.savedView = () => answer.promise;
+    await start("/?q=x");
+    let menu = await menuOf("First");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.moveViewDown }));
+    await waitFor(() => expect(sent("PATCH")).toHaveLength(1));
+    menu = await menuOf("First");
+    for (const name of [t.moveViewDown, t.updateView]) expect(menu.getByRole("menuitem", { name }).getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.updateView }));
+    expect(sent("PATCH")).toHaveLength(1);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    server.savedView = (_m, path, body) => ({ status: 200, body: savedView(path.split("/").pop()!, "x", body as Partial<SavedView>) });
+    await act(async () => answer.release({ status: 200, body: savedView("v1", "First", { sortIndex: 8 }) }));
+    await waitFor(() => expect(sent("PATCH")).toHaveLength(2));
+    menu = await menuOf("First");
+    await waitFor(() => expect(menu.getByRole("menuitem", { name: t.updateView }).getAttribute("aria-disabled")).not.toBe("true"));
   });
 
   it("stops moving after a failed PATCH and says why", async () => {

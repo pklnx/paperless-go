@@ -14,6 +14,8 @@ interface Props {
   admin: boolean;
   /** The lists' counts; none while they load or failed to load. */
   counts: DocumentCounts | null;
+  /** The list shows a saved view (its row is current): no list is. */
+  viewShown?: boolean;
   /** lg and up: Carbon's rail, which expands on hover and focus. */
   rail: boolean;
   /** Below lg: the overlay opened by the header's menu button. */
@@ -45,7 +47,7 @@ export function pagePatch(view: string): Partial<ViewState> {
  * pages. Saved views, tags, correspondents and types are page navigation,
  * in the documents view's column (NavColumn).
  */
-export const ShellNav = forwardRef<HTMLElement, Props>(function ShellNav({ id, state, admin, counts, rail, expanded, onClose, go }, ref) {
+export const ShellNav = forwardRef<HTMLElement, Props>(function ShellNav({ id, state, admin, counts, viewShown = false, rail, expanded, onClose, go }, ref) {
   const docs = state.view === "";
   const current = docs ? activeFilter(state) : null;
   const link = (patch: Partial<ViewState>, isCurrent: boolean, icon: ComponentType, label: ReactNode) => (
@@ -68,7 +70,7 @@ export const ShellNav = forwardRef<HTMLElement, Props>(function ShellNav({ id, s
   const list = (f: Filter | null, label: string, icon: ComponentType, n: number | undefined) =>
     link(
       listPatch(f),
-      docs && sameFilter(current, f),
+      docs && !viewShown && sameFilter(current, f),
       icon,
       n === undefined ? (
         label

@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { unique, work } from "./demo";
 import { expect, test } from "./fixtures";
-import { closeDocument, createChoice, detail, detailForm, documentLink, field, listEntry, metadataRow, metadataTab, navigation, pageEntry, saveDocument, search, sheet, subTagsToggle } from "./ui";
+import { closeDocument, createChoice, detail, detailForm, documentLink, field, listEntry, metadataRow, metadataTab, navigation, pageEntry, saveDocument, search, sheet, subTagsToggle, tagEntry } from "./ui";
 
 const metadataPage = "Tags, correspondents & types";
 
@@ -56,6 +56,8 @@ test("a tag is created with a document, put under another tag, renamed and delet
   await expect(metadataRow(page, "Tags", renamed)).toHaveCount(0);
 
   await listEntry(navigation(page), "All documents").click();
+  // The tree is there (Home shows) and Home has no sub-tags any more.
+  await expect(tagEntry(nav, "Home")).toBeVisible();
   await expect(subTagsToggle(nav, "Home")).toHaveCount(0);
   await search(page, work.metadata.word);
   await documentLink(page, work.metadata.title).click();

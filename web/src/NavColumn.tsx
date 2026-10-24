@@ -2,7 +2,7 @@
 // views, and one tree of the tags (nested), the correspondents and the
 // document types. From lg up it is the first column of the view; below lg
 // it opens as a modal overlay from the list toolbar's Browse button (App).
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from "react";
+import { useId, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from "react";
 import { FeatureFlags, IconButton, Toggle, TreeNode, TreeView } from "@carbon/react";
 import { Close } from "@carbon/icons-react";
 import type { Metadata, NamedRow, User } from "./api";
@@ -77,17 +77,6 @@ export function NavColumn({ state, select, user, metadata, collapsed, everyone, 
   const [closedGroups, setClosedGroups] = useState<Group[]>([]);
   const groupOpen = (g: Group) => !closedGroups.includes(g);
   const toggleGroup = (g: Group) => setClosedGroups((c) => (c.includes(g) ? c.filter((x) => x !== g) : [...c, g]));
-
-  // The selected tag stays visible: its parents are expanded once when the
-  // selection changes, or when the tag first shows up in the data.
-  const { reveal } = collapsed;
-  const revealed = useRef("");
-  useEffect(() => {
-    if (!state.tag || !data || revealed.current === state.tag) return;
-    if (!data.tags.some((x) => x.id === state.tag)) return;
-    revealed.current = state.tag;
-    reveal(state.tag);
-  }, [state.tag, data, reveal]);
 
   const selected = !current ? "" : current.kind === "tag" ? ids.tag(current.id) : current.kind === "corr" || current.kind === "type" ? ids.named(current.kind, current.id) : "";
   const selectedTag = current?.kind === "tag" ? current.id : null;
