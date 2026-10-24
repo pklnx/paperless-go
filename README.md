@@ -39,6 +39,9 @@ see the [roadmap](https://pklnx.github.io/paperless-go/development/roadmap).
 - **Correspondents, document types, nested tags, ASN** and matching rules for
   automatic assignment, as in the app.
 - **Full-text search** with German and English stemming.
+- **iPhone scanning.** Scan with Files or Notes and send the PDF to the
+  server with a Shortcut and an upload-only API key; see the
+  [guide](https://pklnx.github.io/paperless-go/guide/iphone).
 - **Users and login** with passkeys, TOTP and API keys, as in
   [mail-archive](https://github.com/pklnx/mail-archive).
 - **Docker Compose** setup with images for amd64 and arm64 (Apple Silicon).
