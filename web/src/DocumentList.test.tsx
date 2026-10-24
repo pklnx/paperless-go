@@ -593,7 +593,9 @@ describe("processing status", () => {
     fireEvent.click(await screen.findByRole("button", { name: t.retryDocument("Failed doc") }));
     await waitFor(() => expect(within(row("Failed doc")).getByRole("status").textContent).toBe(t.processingQueued));
     expect(screen.queryByText("Broken.")).toBeNull();
-    expect(live().map((x) => x.ms)).toEqual([pollDelay]);
+    // The effect that arms the poll timer runs after the commit the wait
+    // above saw: wait for the timer, not for the row.
+    await waitFor(() => expect(live().map((x) => x.ms)).toEqual([pollDelay]));
   });
 
   it("loads the first page again while its documents are processed, keeping later pages, and stops when they are done", async () => {
@@ -620,7 +622,8 @@ describe("processing status", () => {
     expect(lists.length).toBe(before + 1);
     expect(lists.at(-1)!.has("cursor")).toBe(false);
     expect(screen.getByText("Later")).toBeTruthy();
-    expect(live()).toHaveLength(0);
+    // The effect that clears the timer runs after the commit the wait above saw.
+    await waitFor(() => expect(live()).toHaveLength(0));
   });
 
   it("does not poll a typed search, which would log a search each time", async () => {
