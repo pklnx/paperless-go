@@ -13,10 +13,16 @@
 # It fails when it finds no image or a FROM it cannot read (a variable, a line
 # continuation), so a new Dockerfile form does not slip by silently.
 #
+# `FROM scratch` is not an image to pull and is not listed; as a stage name it
+# still counts, so `FROM final` after `FROM scratch AS final` lists nothing.
+#
+# CI_PULL_IMAGES_ROOT replaces the repository root for the Dockerfile and
+# docker-compose.yml. It exists only for scripts/ci-pull-images-test.sh.
+#
 # Usage: scripts/ci-pull-images.sh [--list]   (--list prints the images only)
 set -eu
 
-repo=$(cd "$(dirname "$0")/.." && pwd)
+repo=${CI_PULL_IMAGES_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 
 list_only=false
 case ${1:-} in
@@ -54,7 +60,8 @@ dockerfile_images() {
 			}
 			if (image == "") fail("FROM without an image")
 			if (image ~ /[$\\]/) fail("cannot read FROM image " image)
-			if (!(tolower(image) in stages)) print image
+			# scratch is reserved: nothing to pull, but its stage name is kept.
+			if (!(tolower(image) in stages) && tolower(image) != "scratch") print image
 			if (stage != "") stages[stage] = 1
 		}
 		END { if (bad) exit 1 }

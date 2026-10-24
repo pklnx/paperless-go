@@ -174,8 +174,11 @@ Changes start as an issue with an approved plan; see
 [Issues, plans and releases](./process).
 
 `main` is protected: changes go through pull requests, which can only be
-squash-merged when the required CI checks pass (all checks except `audit` and
-`docs-audit`, see [Dependencies](#dependencies)). A pull request is merged (squash) after
+squash-merged when the required CI checks pass. The `main` ruleset (repository
+settings) is the authority for which checks are required; on 2026-10-24 they
+were `test`, `lint`, `vulncheck`, `docker`, `compose`, `web`, `toolstest`,
+`secret-scan` and `web-e2e`. `audit` and `docs-audit` are not required (see
+[Dependencies](#dependencies)). A pull request is merged (squash) after
 an approving review and green checks; auto-merge is not used. Agent rules are
 in `CLAUDE.md` at the repository root.
 
@@ -199,9 +202,10 @@ file changes on `main`.
   docs workflow queues its `main` runs instead, so deploys stay in order.
 - Every job has a timeout (`timeout-minutes`), about two to three times its
   longest run so far.
-- `web-e2e` runs the end-to-end tests on every pull request except those
-  that change documentation only (`docs/`, `.claude/`, `*.md`; the `changes`
-  job decides, and runs the tests whenever it fails). It installs only
+- `web-e2e` is a required check. It runs the end-to-end tests on every pull
+  request except those that change documentation only (`docs/`, `.claude/`,
+  `*.md`; the `changes` job decides, and runs the tests whenever it fails). It
+  installs only
   Playwright's headless Chromium, without apt, and checks its libraries
   (`scripts/ci-playwright-chromium.sh`): the runner image has them. If one
   is missing, the run shows a warning and installs them with apt, which can
@@ -252,7 +256,7 @@ the narrow allowlist in `.gitleaks.toml`:
   clone, scans only its last commit and says so in the log.
 
 The workflow has no `paths` filter, so the check runs on every pull request;
-the maintainer adds it to the required checks of the `main` ruleset. Secret
+it is a required check of the `main` ruleset. Secret
 values are redacted in the log. Pull request runs cancel older runs of the
 same pull request; push runs are never cancelled.
 

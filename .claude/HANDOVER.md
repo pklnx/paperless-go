@@ -71,8 +71,9 @@ State of the work for the next session. Update before a session ends.
 - #1 foundation; #22–#25 document model (#2); #29 users and sessions (#16); #37 Debian image with OCR tools (#33); #38 audit log (#17); #40 TOTP and secret key (#18, `breaking`); #41 store hardening (#27); #42 processing queue (#34); #43 ingest (#28); #44 CLI import (#30); #45 passkeys (#19); #46 upload API and UI (#32); #47 consume folder (#31).
 
 ## Manual checks for the maintainer
-- Ruleset for `main` with the required checks (test, lint, vulncheck, docker, compose, web; `toolstest` recommended): part of the public-switch steps; confirm it is active. `audit` and `docs-audit` (`pnpm audit`, #151) stay off the required list.
-- After #158 part 1 is green on `main`: add `web-e2e` to the required checks of the `main` ruleset. Then note the Chromium setup step's time of the next 10 runs here; if the apt fallback never ran, lower the job's timeout from 20 to 15.
+- Ruleset for `main` with the required checks (test, lint, vulncheck, docker, compose, web, toolstest, secret-scan, web-e2e; read from the live ruleset 2026-10-24): active. If it changes, update the list in `docs/development/index.md` (Pull requests and labels). `audit` and `docs-audit` (`pnpm audit`, #151) stay off the required list.
+- `web-e2e` is required (#158 part 1). Note the Chromium setup step's time of the next 10 runs here; if the apt fallback never ran, lower the job's timeout from 20 to 15.
+- Docker Hub 429 watch (#159): if a `compose` or `docker` job fails with `429 Too Many Requests` or `toomanyrequests` on a fallback pull, add a read-only Docker Hub token (option (a) of the #151 plan). None seen on `main` since #157.
 - Trusted proxies behind Tailscale or Caddy (`PAPERLESS_GO_TRUSTED_PROXIES`) so the `__Host-` cookie is kept (#51).
 - After updating: `./pgo keygen` into `.env`, then `./pgo migrate`. Try TOTP with a real authenticator app, and a passkey at an HTTPS `PAPERLESS_GO_PUBLIC_URL`.
 - Drag and drop in Safari and Firefox; a ~100 MB upload through a reverse proxy.

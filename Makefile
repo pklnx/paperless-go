@@ -42,8 +42,9 @@ build:
 	$(GO) build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN) ./cmd/paperless-go
 
 ## test: all tests, including PostgreSQL integration tests
+# keep in step with ci.yml's test job (-timeout)
 test:
-	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" $(GO) test -race -shuffle=on -count=1 ./...
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" $(GO) test -race -shuffle=on -count=1 -timeout 15m ./...
 
 ## test-unit: tests that need no database
 test-unit:
