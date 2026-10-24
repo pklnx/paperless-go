@@ -292,6 +292,9 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
 
   const set = <K extends keyof DocumentForm>(k: K, v: DocumentForm[K]) => {
     setForm((f) => (f ? { ...f, [k]: v } : f));
+    // The guard reads formRef at once: a navigation in the same event (a
+    // picker's Escape after it cleared its choice) must see the edit.
+    if (formRef.current) formRef.current = { ...formRef.current, [k]: v };
     setSaved(false);
     if (k === "title" || k === "date" || k === "asn" || k === "notes") setErrors((e) => ({ ...e, [k]: undefined }));
   };

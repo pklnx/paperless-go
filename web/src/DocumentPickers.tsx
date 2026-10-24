@@ -183,8 +183,15 @@ export function NamedPicker({ label, choices, selected, onChange, onCreate, disa
     if (e.target.value === "") onChange(null);
     else if (e.target.value !== selectedItem.name) setResync((n) => n + 1);
   };
+  // Escape with the list closed: an emptied field clears the choice first
+  // (as leaving it would), so the document's Escape finds the form dirty
+  // and asks instead of dropping the clear silently (review B of #192).
+  const onKeyDownCapture = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Escape" && e.target instanceof HTMLInputElement && e.target.value === "" && selectedItem !== null && !listOpen(root.current)) onChange(null);
+    escapeClosed(e, root.current, onEscape);
+  };
   return (
-    <div ref={root} className="doc-form__picker" onKeyDownCapture={(e) => escapeClosed(e, root.current, onEscape)} onBlurCapture={onBlurCapture}>
+    <div ref={root} className="doc-form__picker" onKeyDownCapture={onKeyDownCapture} onBlurCapture={onBlurCapture}>
       <ComboBox<Choice>
         id={`${id}-combo`}
         titleText={label}

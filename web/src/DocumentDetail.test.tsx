@@ -1421,9 +1421,13 @@ describe("the Carbon pickers (#150 part 4): the keys that would clear a choice (
 });
 
 describe("the Carbon pickers (#150 part 4): the ComboBox's field and the form agree (review B, blocking 1)", () => {
+  // The field with its choice shown, and Carbon's own follow-up of a changed
+  // choice (it selects the item in downshift in a later effect) flushed, so
+  // the test's keys and blur meet a settled field.
   const corrBox = async () => {
     const box = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
     await waitFor(() => expect(box.value).toBe("Finanzamt"));
+    await act(async () => {});
     return box;
   };
 
@@ -1432,8 +1436,11 @@ describe("the Carbon pickers (#150 part 4): the ComboBox's field and the form ag
     ["with its list still open", (box: HTMLInputElement) => fireEvent.blur(box)],
     [
       "with its list closed",
-      (box: HTMLInputElement) => {
+      async (box: HTMLInputElement) => {
+        // Typing opened the list; Escape closes it (the text stays), then the focus leaves.
+        await waitFor(() => expect(box.getAttribute("aria-expanded")).toBe("true"));
         fireEvent.keyDown(box, { key: "Escape" });
+        await waitFor(() => expect(box.getAttribute("aria-expanded")).toBe("false"));
         fireEvent.blur(box);
       },
     ],
@@ -1445,7 +1452,8 @@ describe("the Carbon pickers (#150 part 4): the ComboBox's field and the form ag
       const box = await corrBox();
       box.focus();
       fireEvent.change(box, { target: { value: "" } });
-      leave(box);
+      await waitFor(() => expect(box.value).toBe(""));
+      await leave(box);
       await waitFor(() => expect((detail().getByRole("button", { name: t.save }) as HTMLButtonElement).disabled).toBe(false));
       await waitFor(() => expect(box.value).toBe(""));
       expect(detail().getByText(t.unsaved)).toBeTruthy();
@@ -1454,6 +1462,33 @@ describe("the Carbon pickers (#150 part 4): the ComboBox's field and the form ag
       expect(patches()[0]!.body).toEqual({ correspondentId: null, expectedModifiedAt: "2026-10-21T10:00:00Z" });
     });
   }
+
+  it("Escape on an emptied correspondent field with its list closed clears the choice first, so the document's Escape asks (review B, round 3)", async () => {
+    correspondents = [named("c1", "Finanzamt")];
+    serve(doc("d1", "A", { correspondentId: "c1" }));
+    await openAt("/?doc=d1");
+    const box = await corrBox();
+    box.focus();
+    fireEvent.change(box, { target: { value: "" } });
+    await waitFor(() => expect(box.getAttribute("aria-expanded")).toBe("true"));
+    // The first Escape closes the list only.
+    fireEvent.keyDown(box, { key: "Escape" });
+    await waitFor(() => expect(box.getAttribute("aria-expanded")).toBe("false"));
+    await act(async () => {});
+    expect(screen.getByTestId("document-detail")).toBeTruthy();
+    expect(box.value).toBe("");
+    // The second one is the document's Escape: the clear is an edit, so it asks.
+    fireEvent.keyDown(box, { key: "Escape" });
+    await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    await keepEditing();
+    await waitFor(() => expect(discardQuestion()).toBeNull());
+    expect(docParam()).toBe("d1");
+    expect(box.value).toBe("");
+    expect(detail().getByText(t.unsaved)).toBeTruthy();
+    fireEvent.click(detail().getByRole("button", { name: t.save }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ correspondentId: null, expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
 
   it("other text left in the field with its list closed gives way to the choice's name again, nothing changes", async () => {
     correspondents = [named("c1", "Finanzamt"), named("c2", "Arzt")];
