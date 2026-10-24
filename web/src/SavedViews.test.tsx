@@ -97,7 +97,7 @@ describe("the Saved views section", () => {
     expect(rowOf("Steuern 2026").getAttribute("aria-current")).toBe("page");
     // Another search: the list no longer shows the view, which is no longer marked.
     fireEvent.change(screen.getByRole("searchbox", { name: t.searchLabel }), { target: { value: "other" } });
-    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: t.searchLabel }), { key: "Enter" });
     await waitFor(() => expect(rowOf("Steuern 2026").getAttribute("aria-current")).toBeNull());
     // Another navigation entry forgets the view.
     fireEvent.click(screen.getByRole("treeitem", { name: /^Bank/ }));
@@ -165,7 +165,10 @@ describe("Save view…", () => {
     const sheet = within(await screen.findByRole("dialog", { name: t.saveViewTitle }));
     fireEvent.change(sheet.getByLabelText(t.viewName), { target: { value: "X" } });
     fireEvent.click(sheet.getByRole("button", { name: t.save }));
-    expect((await sheet.findByRole("alert")).textContent).toBe(t.failed("invalid filter: query too long"));
+    // Carbon's TextInput keeps an empty alert region of its own; the one with text is the app's.
+    const alert = await findAlert();
+    expect(alert.textContent).toContain(t.failed("invalid filter: query too long"));
+    expect(screen.getByRole("dialog", { name: t.saveViewTitle }).contains(alert)).toBe(true);
   });
 });
 
@@ -397,5 +400,71 @@ describe("the menu in German", () => {
     expect(ask.getByRole("button", { name: de.carbon.closeModal })).toBeTruthy();
     const html = document.body.innerHTML;
     for (const s of ["Options", "Rename", "Move up", "Delete", "Cancel", ">Close<", "Focus sentinel", ">danger<"]) expect(html, s).not.toContain(s);
+  });
+});
+
+describe("the list's shared busy state and Save view's modal (#150, part 3)", () => {
+  beforeEach(() => {
+    server.savedViews = [savedView("v1", "First", { sortIndex: 3, filter: web({ q: "old" }) }), savedView("v2", "Second", { sortIndex: 8, filter: web({ inbox: true }) })];
+  });
+
+  it("offers no move or update of any view while one view's request runs", async () => {
+    const answer = held();
+    server.savedView = () => answer.promise;
+    await start("/?q=x");
+    let menu = await menuOf("First");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.moveViewDown }));
+    await waitFor(() => expect(sent("PATCH")).toHaveLength(1));
+    // The other view's menu is disabled too, and a click there sends nothing.
+    menu = await menuOf("Second");
+    for (const name of [t.moveViewUp, t.updateView]) expect(menu.getByRole("menuitem", { name }).getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.moveViewUp }));
+    fireEvent.click(menu.getByRole("menuitem", { name: t.updateView }));
+    expect(sent("PATCH")).toHaveLength(1);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    server.savedView = (_m, path, body) => ({ status: 200, body: savedView(path.split("/").pop()!, "x", body as Partial<SavedView>) });
+    await act(async () => answer.release({ status: 200, body: savedView("v1", "First", { sortIndex: 8 }) }));
+    await waitFor(() => expect(sent("PATCH")).toHaveLength(2));
+    menu = await menuOf("Second");
+    await waitFor(() => expect(menu.getByRole("menuitem", { name: t.moveViewUp }).getAttribute("aria-disabled")).not.toBe("true"));
+  });
+
+  it("sends nothing from Save view's modal on Cancel, Escape or the close button, and keeps the name only while open", async () => {
+    await start("/?q=x");
+    const open = () => screen.getByRole("button", { name: t.saveView });
+    open().focus();
+    fireEvent.click(open());
+    let sheet = within(await screen.findByRole("dialog", { name: t.saveViewTitle }));
+    expect(document.activeElement).toBe(sheet.getByLabelText(t.viewName));
+    fireEvent.change(sheet.getByLabelText(t.viewName), { target: { value: "Steuern" } });
+    fireEvent.click(sheet.getByRole("button", { name: t.cancel }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.saveViewTitle })).toBeNull());
+    expect(document.activeElement).toBe(open());
+    fireEvent.click(open());
+    sheet = within(await screen.findByRole("dialog", { name: t.saveViewTitle }));
+    fireEvent.change(sheet.getByLabelText(t.viewName), { target: { value: "Steuern" } });
+    fireEvent.keyDown(sheet.getByLabelText(t.viewName), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.saveViewTitle })).toBeNull());
+    fireEvent.click(open());
+    sheet = within(await screen.findByRole("dialog", { name: t.saveViewTitle }));
+    fireEvent.click(sheet.getByRole("button", { name: t.carbon.closeModal }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.saveViewTitle })).toBeNull());
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(0);
+  });
+
+  it("saves with Enter in the name field: the same POST as the Save button", async () => {
+    server.savedView = (_method, _path, body) => ({ status: 201, body: savedView("new", String(body?.name), { filter: body?.filter as Record<string, unknown> }) });
+    await start("/?q=Rechnung");
+    fireEvent.click(screen.getByRole("button", { name: t.saveView }));
+    const sheet = within(await screen.findByRole("dialog", { name: t.saveViewTitle }));
+    fireEvent.change(sheet.getByLabelText(t.viewName), { target: { value: "Steuern" } });
+    fireEvent.submit(sheet.getByLabelText(t.viewName).closest("form")!);
+    await waitFor(() => expect(sent("POST")).toHaveLength(1));
+    expect(pin(sent("POST")[0])).toEqual({
+      method: "POST",
+      path: "/api/saved-views",
+      body: { name: "Steuern", filter: { [viewKey]: { v: 1, q: "Rechnung", tag: [], correspondent: [], type: [], inbox: null, favorite: null, sort: "", order: "", everyone: false } } },
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.saveViewTitle })).toBeNull());
   });
 });

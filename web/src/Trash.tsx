@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { Button, InlineNotification } from "@carbon/react";
 import { ApiError, bulkApi, type BulkMatch, type DocumentSummary, type User } from "./api";
 import { bulkErrorText } from "./BulkBar";
+import { DangerModal } from "./DangerModal";
 import { lang, t } from "./i18n";
-import { Sheet } from "./Sheet";
-import { button, danger } from "./styles";
 import type { Notify } from "./Toast";
 
 // Parts of the trash (#12) shared by the list, the bulk bar and the detail.
@@ -42,7 +42,14 @@ export function foreignOwners(docs: readonly DocumentSummary[], user: User): str
   return [...names].sort((a, b) => a.localeCompare(b, lang));
 }
 
-/** The confirmation of a permanent delete: always asked (maintainer decision 4 on #12), naming other users' documents' owners. */
+/**
+ * The confirmation of a permanent delete: always asked (maintainer
+ * decision 4 on #12), naming other users' documents' owners. A Carbon
+ * danger Modal, mounted only while open; Cancel, Escape and the close
+ * button send nothing (cancel), also while the request runs, so a late
+ * failure goes to the caller's notice. Carbon's transactional Modal
+ * ignores a click outside.
+ */
 export function PurgeConfirm({
   open,
   title,
@@ -53,6 +60,7 @@ export function PurgeConfirm({
   note,
   confirm,
   cancel,
+  returnFocus,
 }: {
   open: boolean;
   title: string;
@@ -64,30 +72,30 @@ export function PurgeConfirm({
   note?: string;
   confirm: () => void;
   cancel: () => void;
+  /** Where the focus goes when the modal closes and its opener is gone (a purged row). */
+  returnFocus?: () => HTMLElement | null | undefined;
 }) {
+  if (!open) return null;
   return (
-    <Sheet open={open} onClose={cancel} title={title}>
-      {note && (
-        <p role="status" className="text-sm font-medium">
-          {note}
-        </p>
-      )}
-      <p className="text-sm">{t.purgeText(n)}</p>
-      {owners.length > 0 && <p className="text-sm font-medium wrap-anywhere">{t.purgeOwners(owners.join(", "))}</p>}
-      {error && (
-        <p role="alert" className="text-sm text-danger">
-          {error}
-        </p>
-      )}
-      <div className="flex justify-end gap-2">
-        <button type="button" className={button} onClick={cancel}>
-          {t.cancel}
-        </button>
-        <button type="button" className={danger} disabled={busy} onClick={confirm}>
-          {t.purgeConfirm(n)}
-        </button>
+    <DangerModal
+      size="sm"
+      modalHeading={title}
+      primaryButtonText={t.purgeConfirm(n)}
+      secondaryButtonText={t.cancel}
+      primaryButtonDisabled={busy}
+      returnFocus={returnFocus}
+      onRequestClose={cancel}
+      onRequestSubmit={() => {
+        if (!busy) confirm();
+      }}
+    >
+      <div className="modal-stack">
+        {note && <p role="status">{note}</p>}
+        <p>{t.purgeText(n)}</p>
+        {owners.length > 0 && <p className="app-break-words">{t.purgeOwners(owners.join(", "))}</p>}
+        {error && <InlineNotification className="notification--full" kind="error" lowContrast hideCloseButton role="alert" statusIconDescription={t.carbon.status.error} subtitle={error} />}
       </div>
-    </Sheet>
+    </DangerModal>
   );
 }
 
@@ -102,12 +110,17 @@ export const ownTrash: BulkMatch = { trashed: true, owner: "me" };
  * fingerprint). If the trash changed meanwhile (409 match_changed), it
  * counts and asks again. For an admin with everyone's documents shown it
  * says "Empty my trash": other users' trashed documents are removed one by
- * one or by checking them, never by this button.
+ * one or by checking them, never by this button. A danger--tertiary
+ * button (decision 3 of #150: it is no primary).
  */
 export function EmptyTrash({ everyone, onDone, notify }: { everyone: boolean; onDone: () => void; notify?: Notify }) {
   const [confirm, setConfirm] = useState<{ n: number; fingerprint: string; changed: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<Message | null>(null);
+  // The question returns the focus here: the button is disabled while the
+  // dry run counts, and a browser drops the focus from a disabled button
+  // before the modal could record it as the opener.
+  const button = useRef<HTMLButtonElement>(null);
   const count = (changed: boolean) => {
     setBusy(true);
     setMsg({ kind: "info", text: t.bulkCounting });
@@ -155,17 +168,17 @@ export function EmptyTrash({ everyone, onDone, notify }: { everyone: boolean; on
   };
 
   return (
-    <div className="flex flex-col items-end gap-1">
-      <button type="button" className={button} disabled={busy} onClick={() => count(false)}>
+    <div className="trash-actions">
+      <Button ref={button} kind="danger--tertiary" size="md" disabled={busy} onClick={() => count(false)}>
         {everyone ? t.emptyMyTrash : t.emptyTrash}
-      </button>
+      </Button>
       {msg && (
-        <p role={msg.kind === "error" ? "alert" : "status"} className={`text-right text-sm ${msg.kind === "error" ? "text-danger" : "text-ink-muted"}`}>
+        <p role={msg.kind === "error" ? "alert" : "status"} className={`trash-actions__msg ${msg.kind === "error" ? "app-text-error" : "app-text-secondary"}`}>
           {msg.text}
           {msg.kind === "error" && msg.retry && (
-            <button type="button" className="ml-2 text-accent-ink hover:underline pointer-coarse:min-h-11" onClick={msg.retry}>
+            <Button kind="ghost" size="sm" onClick={msg.retry}>
               {t.tryAgain}
-            </button>
+            </Button>
           )}
         </p>
       )}
@@ -177,6 +190,7 @@ export function EmptyTrash({ everyone, onDone, notify }: { everyone: boolean; on
         note={confirm?.changed ? t.bulkMatchChanged(confirm.n) : everyone ? t.emptyTrashOwnOnly : undefined}
         confirm={() => confirm && purge(confirm.fingerprint)}
         cancel={() => setConfirm(null)}
+        returnFocus={() => button.current}
       />
     </div>
   );

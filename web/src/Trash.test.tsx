@@ -72,6 +72,13 @@ const notice = () => screen.findByTestId("notice");
 const noticeSays = (text: string) => waitFor(() => expect(screen.getByTestId("notice").textContent).toContain(text));
 const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
+/** What a browser does when the focused button is disabled: the focus falls to the body (jsdom keeps it on the button and ignores blur()). */
+function dropFocus() {
+  document.body.tabIndex = -1;
+  document.body.focus();
+  document.body.removeAttribute("tabindex");
+}
+
 async function start(url = "/") {
   window.history.replaceState(null, "", url);
   render(<App />);
@@ -122,7 +129,7 @@ describe("the Trash entry and list", () => {
     await start("/?trash=1&tag=t1&inbox=1");
     expect(params(lists().at(-1)!)).toBe("trashed=true&sort=deleted");
     fireEvent.change(screen.getByRole("searchbox", { name: t.searchLabel }), { target: { value: "Rechnung" } });
-    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: t.searchLabel }), { key: "Enter" });
     await waitFor(() => expect(params(lists().at(-1)!)).toBe("q=Rechnung&trashed=true"));
     expect(screen.getByRole("heading", { name: t.trash })).toBeTruthy();
   });
@@ -681,5 +688,83 @@ describe("bulkErrorText for the trash", () => {
     expect(bulkErrorText(new ApiError(409, "x", { code: "not_in_trash" }))).toEqual({ text: t.bulkNotInTrash, retry: false });
     expect(bulkErrorText(new ApiError(503, "x", {}, 5))).toEqual({ text: t.tryAgainIn(5), retry: true });
     expect(bulkErrorText(new ApiError(503, "x", {}))).toEqual({ text: t.serverBusy, retry: true });
+  });
+});
+
+describe("the trash's Carbon modals (#150, part 3)", () => {
+  const dialog = (name: string) => screen.findByRole("dialog", { name });
+  const gone = (name: string) => waitFor(() => expect(screen.queryByRole("dialog", { name })).toBeNull());
+
+  it("sends nothing from Empty trash's question on Cancel, Escape or the close button: the dry runs are the only requests", async () => {
+    put(doc("2", "Alt", deleted));
+    const counted = { body: { matched: 1, owners: 1, limit: 5000, fingerprint: "v2.f" } };
+    let hold: ReturnType<typeof held> | null = null;
+    server.bulk = (b) => (b.dryRun ? (hold ? hold.promise : counted) : { body: { updated: 1 } });
+    await start("/?trash=1");
+    const empty = () => screen.getByRole("button", { name: t.emptyTrash });
+    // While the dry run counts, the button is disabled; a browser drops the
+    // focus from a disabled button (jsdom keeps it, so the blur is
+    // simulated), and the modal mounts with the focus on the body.
+    hold = held();
+    empty().focus();
+    fireEvent.click(empty());
+    expect(empty().hasAttribute("disabled")).toBe(true);
+    act(() => dropFocus());
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => hold!.release(counted));
+    hold = null;
+    let ask = within(await dialog(t.emptyTrashTitle));
+    expect(ask.getByText(t.purgeText(1))).toBeTruthy();
+    expect(document.activeElement).toBe(ask.getByRole("button", { name: t.cancel }));
+    fireEvent.click(ask.getByRole("button", { name: t.cancel }));
+    await gone(t.emptyTrashTitle);
+    // The focus is back on the button that asked.
+    expect(document.activeElement).toBe(empty());
+    fireEvent.click(empty());
+    ask = within(await dialog(t.emptyTrashTitle));
+    fireEvent.keyDown(ask.getByRole("button", { name: t.purgeConfirm(1) }), { key: "Escape" });
+    await gone(t.emptyTrashTitle);
+    fireEvent.click(empty());
+    ask = within(await dialog(t.emptyTrashTitle));
+    fireEvent.click(ask.getByRole("button", { name: t.carbon.closeModal }));
+    await gone(t.emptyTrashTitle);
+    const dryRun = { match: { trashed: true, owner: "me" }, dryRun: true, action: "purge" };
+    expect(bulks()).toEqual([dryRun, dryRun, dryRun]);
+    expect(requests.filter((r) => r.method !== "GET" && !(r.body && r.body.dryRun === true))).toHaveLength(0);
+    expect(screen.getByText("Alt")).toBeTruthy();
+  });
+
+  it("sends nothing from a row's Delete permanently on Escape or the close button, and returns the focus to the row's button", async () => {
+    put(doc("2", "Alt", deleted));
+    await start("/?trash=1");
+    const purge = () => screen.getByRole("button", { name: t.purgeLabel("Alt") });
+    purge().focus();
+    fireEvent.click(purge());
+    let ask = within(await dialog(t.purgeTitle("Alt")));
+    fireEvent.keyDown(ask.getByRole("button", { name: t.purgeConfirm(1) }), { key: "Escape" });
+    await gone(t.purgeTitle("Alt"));
+    expect(document.activeElement).toBe(purge());
+    fireEvent.click(purge());
+    ask = within(await dialog(t.purgeTitle("Alt")));
+    fireEvent.click(ask.getByRole("button", { name: t.carbon.closeModal }));
+    await gone(t.purgeTitle("Alt"));
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(0);
+    expect(screen.getByText("Alt")).toBeTruthy();
+  });
+
+  it("moves the focus to the list's heading after a purge whose row is gone (a pointer user)", async () => {
+    put(doc("2", "Alt", deleted), doc("3", "Bleibt", deleted));
+    await start("/?trash=1");
+    const purge = screen.getByRole("button", { name: t.purgeLabel("Alt") });
+    // A pointer click: the notice takes no focus then (Toast), and the row with its button is gone.
+    fireEvent.pointerDown(purge);
+    purge.focus();
+    fireEvent.click(purge);
+    const ask = within(await dialog(t.purgeTitle("Alt")));
+    fireEvent.pointerDown(ask.getByRole("button", { name: t.purgeConfirm(1) }));
+    fireEvent.click(ask.getByRole("button", { name: t.purgeConfirm(1) }));
+    await waitFor(() => expect(screen.queryByText("Alt")).toBeNull());
+    expect(sent("POST", "/api/documents/2/purge")).toHaveLength(1);
+    await waitFor(() => expect(document.activeElement).toBe(document.getElementById("list-title")));
   });
 });

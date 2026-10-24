@@ -55,7 +55,7 @@ describe("DocumentsUpload", () => {
 
     act(() => FakeXHR.all[0]!.progress(3, 10));
     expect(within(rows()[0]!).getByRole("status").textContent).toBe("30 %");
-    expect((within(rows()[0]!).getByRole("progressbar") as HTMLProgressElement).value).toBe(30);
+    expect(within(rows()[0]!).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("30");
 
     await act(async () => FakeXHR.all[0]!.respond(201, doc("1", "a")));
     expect(within(rows()[0]!).getByRole("status").textContent).toBe(t.uploadImported);

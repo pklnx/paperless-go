@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type MouseEvent } from "react";
+import { Button, Checkbox, CheckboxGroup, RadioButton, RadioButtonGroup } from "@carbon/react";
+import { ErrorFilled } from "@carbon/icons-react";
 import { ApiError, bulkApi, type BulkAction, type BulkChange, type BulkMatch, type BulkSelection, type Metadata, type NamedRow } from "./api";
 import { sortByName } from "./collate";
+import { AppModal, DangerModal } from "./DangerModal";
 import { t } from "./i18n";
-import { Sheet } from "./Sheet";
-import { button, danger, primary } from "./styles";
 import { flatTagTree } from "./tagTree";
 import type { Notify } from "./Toast";
 import { PurgeConfirm } from "./Trash";
@@ -78,6 +79,12 @@ export function bulkErrorText(err: unknown): { text: string; retry: boolean } {
 
 type Message = { kind: "ok" | "info"; text: string } | { kind: "error"; text: string; retry?: () => void };
 
+/** Where the focus goes when a modal closes: the bar's button that asked (a ref, since the button is disabled while a dry run counts, and a disabled button has already lost the focus when the modal mounts). */
+type ReturnFocus = () => HTMLElement | null | undefined;
+
+/** Carbon's Modal focuses its primary button by default; a confirmation of a change to every match focuses Cancel instead, so a second Enter confirms nothing. */
+const focusCancel = ".cds--modal-footer .cds--btn--secondary";
+
 /** Whether c links documents to one owner's rows, which needs documents of a single owner. */
 function needsOneOwner(c: BulkChange): boolean {
   return (c.addTags?.length ?? 0) > 0 || (c.removeTags?.length ?? 0) > 0 || typeof c.correspondent === "string" || typeof c.documentType === "string";
@@ -118,6 +125,14 @@ const actionDone: Record<BulkAction, (n: number) => string> = {
  * the matches (dry run) and asks before it sends the change. Deleting
  * asks with the count, also for checked documents; deleting permanently
  * always asks (#12); restoring checked documents does not.
+ *
+ * The look of Carbon's batch-action bar (decision 1 of #150): a bar on the
+ * brand colour, sticky at the bottom of the list, with the count and the
+ * actions as primary buttons (they blend into the bar, as in Carbon's
+ * TableBatchActions). Carbon's own component sits absolutely inside a
+ * table toolbar of one row, so the bar is layout.css markup instead. Its
+ * forms and confirmations are Carbon Modals; Cancel, Escape and the close
+ * button of each send nothing.
  */
 export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = false, ownerNames = [], purgeByMatch = true, notify }: Props) {
   const [sheet, setSheet] = useState<"" | "tags" | "corr" | "type">("");
@@ -142,6 +157,12 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = fal
   // Another selection: forget the old one's error, so going back to it does not show it again.
   useEffect(() => setShown((s) => (s && s.msg.kind !== "ok" && s.key !== targetKey ? null : s)), [targetKey]);
   const several = owners > 1;
+  // The bar's button that opened the current modal: the modal returns the
+  // focus there. While a dry run counts, the buttons are disabled, and a
+  // browser drops the focus from a disabled button, so the modal cannot
+  // find its opener by itself (AppModal falls back to this).
+  const opener = useRef<HTMLButtonElement | null>(null);
+  const returnFocus: ReturnFocus = () => opener.current;
 
   const own = <T extends { ownerId: number }>(rows: readonly T[]) => (ownerId === null ? rows : rows.filter((r) => r.ownerId === ownerId));
 
@@ -304,56 +325,66 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = fal
       ];
 
   const count = "ids" in target ? target.ids.length : target.matched;
+  const closeSheet = () => setSheet("");
+  // The modal's own forms and confirmations: Cancel, Escape and the close button close without sending anything (Carbon's transactional Modal ignores a click outside).
   return (
-    <div role="region" aria-label={t.bulkActions} className="sticky bottom-0 z-10 -mx-4 flex flex-col gap-2 border-t border-line bg-surface-raised px-4 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] shadow-lg md:mx-0 md:rounded-lg md:border">
-      <div className="flex gap-2 max-sm:overflow-x-auto sm:flex-wrap">
-        <span className="shrink-0 self-center text-sm font-medium">{t.selectedCount(count)}</span>
-        {actions.map(([label, run]) => (
-          <button key={label} type="button" className={`${button} shrink-0`} disabled={busy} onClick={run}>
-            {label}
-          </button>
-        ))}
+    <div role="region" aria-label={t.bulkActions} className="bulk-bar">
+      <div className="bulk-bar__row">
+        <span className="bulk-bar__count">{t.selectedCount(count)}</span>
+        <div className="bulk-bar__actions">
+          {actions.map(([label, run]) => (
+            <Button
+              key={label}
+              kind="primary"
+              size="md"
+              disabled={busy}
+              onClick={(e: MouseEvent<HTMLButtonElement>) => {
+                opener.current = e.currentTarget;
+                run();
+              }}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
       </div>
       {msg && (
-        <p role={msg.kind === "error" ? "alert" : "status"} className={`text-sm ${msg.kind === "error" ? "text-danger" : "text-ink-muted"}`}>
-          {msg.text}
+        <p role={msg.kind === "error" ? "alert" : "status"} className={`bulk-bar__msg${msg.kind === "error" ? " bulk-bar__msg--error" : ""}`}>
+          {msg.kind === "error" && <ErrorFilled size={16} aria-hidden className="bulk-bar__icon" />}
+          <span>{msg.text}</span>
           {msg.kind === "error" && msg.retry && (
-            <button type="button" className="ml-2 text-accent-ink hover:underline pointer-coarse:min-h-11" onClick={msg.retry}>
+            <Button kind="primary" size="sm" onClick={msg.retry}>
               {t.tryAgain}
-            </button>
+            </Button>
           )}
         </p>
       )}
-      <Sheet open={sheet === "tags"} onClose={() => setSheet("")} title={t.bulkTagsTitle}>
-        <TagsForm tags={own(metadata?.tags ?? [])} onApply={run} />
-      </Sheet>
-      <Sheet open={sheet === "corr"} onClose={() => setSheet("")} title={t.bulkCorrespondentTitle}>
-        <NamedForm rows={several ? [] : own(metadata?.correspondents ?? [])} onlyClear={several} clearLabel={t.bulkClearCorrespondent} onApply={(id) => run({ correspondent: id })} />
-      </Sheet>
-      <Sheet open={sheet === "type"} onClose={() => setSheet("")} title={t.bulkTypeTitle}>
-        <NamedForm rows={several ? [] : own(metadata?.documentTypes ?? [])} onlyClear={several} clearLabel={t.bulkClearType} onApply={(id) => run({ documentType: id })} />
-      </Sheet>
-      <Sheet open={ask !== null && ask.action !== "purge"} onClose={() => setAsk(null)} title={ask?.action === "restore" ? t.bulkRestoreTitle : t.bulkTrashTitle}>
-        {ask && (
-          <>
-            {askNote && (
-              <p role="status" className="text-sm font-medium">
-                {askNote}
-              </p>
-            )}
-            <p className="text-sm">{ask.action === "restore" ? t.bulkRestoreText(ask.n) : t.bulkTrashText(ask.n)}</p>
-            {askOwners.length > 0 && <p className="text-sm font-medium wrap-anywhere">{t.purgeOwners(askOwners.join(", "))}</p>}
-            <div className="flex justify-end gap-2">
-              <button type="button" className={button} onClick={() => setAsk(null)}>
-                {t.cancel}
-              </button>
-              <button type="button" className={ask.action === "trash" ? danger : primary} onClick={confirmAsk}>
-                {ask.action === "restore" ? t.bulkRestoreConfirm(ask.n) : t.bulkTrashConfirm(ask.n)}
-              </button>
-            </div>
-          </>
-        )}
-      </Sheet>
+      {sheet === "tags" && <TagsModal tags={own(metadata?.tags ?? [])} onApply={run} onClose={closeSheet} returnFocus={returnFocus} />}
+      {sheet === "corr" && (
+        <NamedModal
+          title={t.bulkCorrespondentTitle}
+          rows={several ? [] : own(metadata?.correspondents ?? [])}
+          onlyClear={several}
+          clearLabel={t.bulkClearCorrespondent}
+          onApply={(id) => run({ correspondent: id })}
+          onClose={closeSheet}
+          returnFocus={returnFocus}
+        />
+      )}
+      {sheet === "type" && (
+        <NamedModal
+          title={t.bulkTypeTitle}
+          rows={several ? [] : own(metadata?.documentTypes ?? [])}
+          onlyClear={several}
+          clearLabel={t.bulkClearType}
+          onApply={(id) => run({ documentType: id })}
+          onClose={closeSheet}
+          returnFocus={returnFocus}
+        />
+      )}
+      {ask && ask.action !== "purge" && (
+        <AskModal ask={ask} note={askNote} owners={askOwners} confirm={confirmAsk} cancel={() => setAsk(null)} returnFocus={returnFocus} />
+      )}
       <PurgeConfirm
         open={ask !== null && ask.action === "purge"}
         title={t.purgeBulkTitle}
@@ -362,131 +393,195 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = fal
         note={askNote}
         confirm={confirmAsk}
         cancel={() => setAsk(null)}
+        returnFocus={returnFocus}
       />
-      <Sheet open={confirm !== null} onClose={() => setConfirm(null)} title={t.bulkConfirmTitle}>
-        {confirm && (
-          <>
-            {confirm.changed && (
-              <p role="status" className="text-sm font-medium">
-                {t.bulkMatchChanged(confirm.n)}
-              </p>
-            )}
-            <p className="text-sm">{t.bulkConfirmText(confirm.n)}</p>
-            <div className="flex justify-end gap-2">
-              <button type="button" className={button} onClick={() => setConfirm(null)}>
-                {t.cancel}
-              </button>
-              <button
-                type="button"
-                className={primary}
-                onClick={() => {
-                  setConfirm(null);
-                  // A retry counts again and asks again: the matches may
-                  // have changed. Only exactly the counted set is changed
-                  // (the fingerprint); if it changed, count and ask again.
-                  const change = confirm.change;
-                  apply({ match: confirm.match, fingerprint: confirm.fingerprint }, change, () => run(change), () => run(change, true));
-                }}
-              >
-                {t.bulkConfirm(confirm.n)}
-              </button>
-            </div>
-          </>
-        )}
-      </Sheet>
+      {confirm && (
+        <AppModal
+          size="sm"
+          modalHeading={t.bulkConfirmTitle}
+          primaryButtonText={t.bulkConfirm(confirm.n)}
+          secondaryButtonText={t.cancel}
+          selectorPrimaryFocus={focusCancel}
+          returnFocus={returnFocus}
+          onRequestClose={() => setConfirm(null)}
+          onRequestSubmit={() => {
+            setConfirm(null);
+            // A retry counts again and asks again: the matches may
+            // have changed. Only exactly the counted set is changed
+            // (the fingerprint); if it changed, count and ask again.
+            const change = confirm.change;
+            apply({ match: confirm.match, fingerprint: confirm.fingerprint }, change, () => run(change), () => run(change, true));
+          }}
+        >
+          <div className="modal-stack">
+            {confirm.changed && <p role="status">{t.bulkMatchChanged(confirm.n)}</p>}
+            <p>{t.bulkConfirmText(confirm.n)}</p>
+          </div>
+        </AppModal>
+      )}
     </div>
   );
 }
 
-/** Tags to add and tags to remove, in tree order. A tag checked in both is refused before anything is sent. */
-function TagsForm({ tags, onApply }: { tags: readonly NonNullable<Metadata["tags"]>[number][]; onApply: (c: BulkChange) => void }) {
+/** The question before checked or matched documents are moved to the trash (a danger modal) or every match is restored. Both open with the focus on Cancel. */
+function AskModal({ ask, note, owners, confirm, cancel, returnFocus }: { ask: Ask; note?: string; owners: readonly string[]; confirm: () => void; cancel: () => void; returnFocus: ReturnFocus }) {
+  const Modal = ask.action === "trash" ? DangerModal : AppModal;
+  return (
+    <Modal
+      size="sm"
+      modalHeading={ask.action === "restore" ? t.bulkRestoreTitle : t.bulkTrashTitle}
+      primaryButtonText={ask.action === "restore" ? t.bulkRestoreConfirm(ask.n) : t.bulkTrashConfirm(ask.n)}
+      secondaryButtonText={t.cancel}
+      selectorPrimaryFocus={focusCancel}
+      returnFocus={returnFocus}
+      onRequestClose={cancel}
+      onRequestSubmit={confirm}
+    >
+      <div className="modal-stack">
+        {note && <p role="status">{note}</p>}
+        <p>{ask.action === "restore" ? t.bulkRestoreText(ask.n) : t.bulkTrashText(ask.n)}</p>
+        {owners.length > 0 && <p className="app-break-words">{t.purgeOwners(owners.join(", "))}</p>}
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Tags to add and tags to remove, two columns of checkboxes in tree order.
+ * A tag checked in both is refused before anything is sent. The focus
+ * starts on the first checkbox (Apply, Carbon's default, is disabled until
+ * something is chosen and would take no focus); with no tags, on Close.
+ */
+function TagsModal({ tags, onApply, onClose, returnFocus }: { tags: readonly NonNullable<Metadata["tags"]>[number][]; onApply: (c: BulkChange) => void; onClose: () => void; returnFocus: ReturnFocus }) {
   const [add, setAdd] = useState<Set<string>>(new Set());
   const [remove, setRemove] = useState<Set<string>>(new Set());
+  const base = useId();
   const rows = flatTagTree(tags);
-  if (rows.length === 0) return <p className="text-sm text-ink-muted">{t.bulkNoTags}</p>;
   const both = [...add].some((id) => remove.has(id));
+  const nothing = add.size === 0 && remove.size === 0;
   const toggle = (set: Set<string>, put: (s: Set<string>) => void, id: string) => {
     const next = new Set(set);
     if (next.has(id)) next.delete(id);
     else next.add(id);
     put(next);
   };
-  const column = (legend: string, set: Set<string>, put: (s: Set<string>) => void) => (
-    <fieldset className="flex min-w-0 flex-1 flex-col gap-0.5">
-      <legend className="mb-1 text-sm font-semibold">{legend}</legend>
-      {rows.map(({ tag, depth }) => (
-        <label key={tag.id} className="flex items-center gap-2 text-sm pointer-coarse:min-h-11" style={{ paddingLeft: `${Math.min(depth, 6) * 0.75}rem` }}>
-          <input type="checkbox" checked={set.has(tag.id)} onChange={() => toggle(set, put, tag.id)} />
-          <span className="min-w-0 wrap-anywhere">{tag.name}</span>
-        </label>
+  const submit = () => {
+    if (both || nothing) return;
+    const c: BulkChange = {};
+    if (add.size > 0) c.addTags = [...add];
+    if (remove.size > 0) c.removeTags = [...remove];
+    onApply(c);
+  };
+  const column = (which: "add" | "remove", legend: string, set: Set<string>, put: (s: Set<string>) => void) => (
+    <CheckboxGroup legendText={legend} className="bulk-tags__column">
+      {rows.map(({ tag, depth }, i) => (
+        <div key={tag.id} className="bulk-tags__row" style={{ paddingInlineStart: `${Math.min(depth, 6) * 0.75}rem` }}>
+          <Checkbox
+            id={`${base}-${which}-${tag.id}`}
+            labelText={tag.name}
+            checked={set.has(tag.id)}
+            onChange={() => toggle(set, put, tag.id)}
+            {...(which === "add" && i === 0 ? { "data-modal-primary-focus": "" } : {})}
+          />
+        </div>
       ))}
-    </fieldset>
+    </CheckboxGroup>
   );
   return (
-    <form
-      className="flex flex-col gap-3"
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (both || (add.size === 0 && remove.size === 0)) return;
-        const c: BulkChange = {};
-        if (add.size > 0) c.addTags = [...add];
-        if (remove.size > 0) c.removeTags = [...remove];
-        onApply(c);
-      }}
+    <AppModal
+      modalHeading={t.bulkTagsTitle}
+      primaryButtonText={t.apply}
+      secondaryButtonText={t.cancel}
+      primaryButtonDisabled={both || nothing}
+      hasScrollingContent
+      selectorPrimaryFocus={rows.length === 0 ? ".cds--modal-close" : undefined}
+      returnFocus={returnFocus}
+      onRequestClose={onClose}
+      onRequestSubmit={submit}
     >
-      <div className="flex gap-4">
-        {column(t.bulkAddTags, add, setAdd)}
-        {column(t.bulkRemoveTags, remove, setRemove)}
-      </div>
-      {both && (
-        <p role="alert" className="text-sm text-danger">
-          {t.bulkTagAddAndRemove}
-        </p>
+      {rows.length === 0 ? (
+        <p className="app-text-secondary">{t.bulkNoTags}</p>
+      ) : (
+        <form
+          className="modal-stack"
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit();
+          }}
+        >
+          <div className="bulk-tags">
+            {column("add", t.bulkAddTags, add, setAdd)}
+            {column("remove", t.bulkRemoveTags, remove, setRemove)}
+          </div>
+          {both && (
+            <p role="alert" className="app-text-error">
+              {t.bulkTagAddAndRemove}
+            </p>
+          )}
+        </form>
       )}
-      <button type="submit" className={`${primary} self-end`} disabled={both || (add.size === 0 && remove.size === 0)}>
-        {t.apply}
-      </button>
-    </form>
+    </AppModal>
   );
 }
 
-/** One correspondent or type, or none (clears it). */
-function NamedForm({
+/** One correspondent or type, or none (clears it): a radio group. The focus starts on the first radio button (Apply is disabled until one is chosen). */
+function NamedModal({
+  title,
   rows,
   onlyClear,
   clearLabel,
   onApply,
+  onClose,
+  returnFocus,
 }: {
+  title: string;
   rows: readonly NamedRow[];
   /** Documents of several owners: only clearing is offered, and the form says why. */
   onlyClear?: boolean;
   clearLabel: string;
   onApply: (id: string | null) => void;
+  onClose: () => void;
+  returnFocus: ReturnFocus;
 }) {
   // "" is nothing chosen yet; "-" is the clearing choice.
   const [choice, setChoice] = useState("");
-  const option = (value: string, label: string) => (
-    <label key={value} className="flex items-center gap-2 text-sm pointer-coarse:min-h-11">
-      <input type="radio" name="bulk-named" value={value} checked={choice === value} onChange={() => setChoice(value)} />
-      <span className="min-w-0 wrap-anywhere">{label}</span>
-    </label>
-  );
+  const base = useId();
+  const submit = () => {
+    if (choice) onApply(choice === "-" ? null : choice);
+  };
   return (
-    <form
-      className="flex flex-col gap-3"
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (choice) onApply(choice === "-" ? null : choice);
-      }}
+    <AppModal
+      modalHeading={title}
+      primaryButtonText={t.apply}
+      secondaryButtonText={t.cancel}
+      primaryButtonDisabled={!choice}
+      hasScrollingContent
+      returnFocus={returnFocus}
+      onRequestClose={onClose}
+      onRequestSubmit={submit}
     >
-      {onlyClear && <p className="text-sm text-ink-muted">{t.bulkOnlyClearSeveralOwners}</p>}
-      <div className="flex flex-col gap-0.5">
-        {option("-", clearLabel)}
-        {sortByName(rows, (r) => r.name).map((r) => option(r.id, r.name))}
-      </div>
-      <button type="submit" className={`${primary} self-end`} disabled={!choice}>
-        {t.apply}
-      </button>
-    </form>
+      <form
+        className="modal-stack"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+      >
+        {onlyClear && <p className="app-text-secondary">{t.bulkOnlyClearSeveralOwners}</p>}
+        <RadioButtonGroup
+          className="bulk-named"
+          name={`${base}-named`}
+          orientation="vertical"
+          legendText={<span className="cds--visually-hidden">{title}</span>}
+          valueSelected={choice}
+          onChange={(value) => setChoice(String(value))}
+        >
+          <RadioButton id={`${base}-clear`} value="-" labelText={clearLabel} data-modal-primary-focus="" />
+          {sortByName(rows, (r) => r.name).map((r) => (
+            <RadioButton key={r.id} id={`${base}-${r.id}`} value={r.id} labelText={r.name} />
+          ))}
+        </RadioButtonGroup>
+      </form>
+    </AppModal>
   );
 }

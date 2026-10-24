@@ -241,7 +241,7 @@ describe("sidebar", () => {
     // Typing does not search.
     const before = lists.length;
     expect(lists).toHaveLength(before);
-    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: t.searchLabel }), { key: "Enter" });
     await waitFor(() => expect(params(lastList())).toBe("q=Rechnung"));
     fireEvent.click(await findTreeItem(/^Steuer/));
     await waitFor(() => expect(params(lastList())).toBe("q=Rechnung&tag=t1"));
@@ -413,7 +413,7 @@ describe("document list", () => {
         : page([doc("0", "Recent")]);
     await start();
     fireEvent.change(screen.getByRole("searchbox", { name: t.searchLabel }), { target: { value: "Rechnung" } });
-    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: t.searchLabel }), { key: "Enter" });
     expect(await screen.findByText("Telekom")).toBeTruthy();
     expect(screen.getByRole("heading", { level: 2, name: t.searchResults })).toBeTruthy();
     expect(lastList().get("tz")).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
@@ -444,7 +444,7 @@ describe("document list", () => {
     expect(await screen.findByText("Second")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: t.loadMore }));
     expect(await screen.findByText("Third")).toBeTruthy();
-    expect(documentRows().map((r) => r.querySelector(".font-medium")?.textContent)).toEqual(["First", "Second", "Third"]);
+    expect(documentRows().map((r) => r.querySelector("[data-doc-link]")?.textContent)).toEqual(["First", "Second", "Third"]);
     expect(lists.map((p) => p.get("cursor"))).toEqual([null, "c1", "c2"]);
     expect(screen.queryByRole("button", { name: t.loadMore })).toBeNull();
   });
@@ -472,7 +472,7 @@ describe("document list", () => {
     await waitFor(() => expect(params(lastList())).toBe("order=asc"));
 
     fireEvent.change(screen.getByRole("searchbox", { name: t.searchLabel }), { target: { value: "Rechnung" } });
-    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: t.searchLabel }), { key: "Enter" });
     // The default with a search is relevance, which has one direction.
     await waitFor(() => expect(params(lastList())).toBe("q=Rechnung"));
     expect(sort().value).toBe("relevance");
@@ -485,7 +485,7 @@ describe("document list", () => {
     server.documents = (p) => (p.get("q") ? { status: 400, body: { error: "query too long" } } : page([]));
     await start();
     fireEvent.change(screen.getByRole("searchbox", { name: t.searchLabel }), { target: { value: "a ".repeat(40) } });
-    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: t.searchLabel }), { key: "Enter" });
     expect((await screen.findByRole("alert")).textContent).toBe(t.searchTooLong);
   });
 
@@ -494,14 +494,14 @@ describe("document list", () => {
       p.get("q") ? { status: 422, body: { error: "search too broad; use fewer or longer words, or a filter", code: "search_too_broad" } } : page([]);
     await start();
     fireEvent.change(screen.getByRole("searchbox", { name: t.searchLabel }), { target: { value: "rech nung zahl trag" } });
-    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: t.searchLabel }), { key: "Enter" });
     expect((await screen.findByRole("alert")).textContent).toBe(t.searchTooBroad);
   });
 
   it("does not search for blanks", async () => {
     await start();
     fireEvent.change(screen.getByRole("searchbox", { name: t.searchLabel }), { target: { value: "   " } });
-    fireEvent.submit(screen.getByRole("search"));
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: t.searchLabel }), { key: "Enter" });
     expect(window.location.search).toBe("");
     expect(lists.every((p) => !p.has("q"))).toBe(true);
   });

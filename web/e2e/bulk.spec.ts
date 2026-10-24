@@ -1,3 +1,4 @@
+import type { Request } from "@playwright/test";
 import { bulkNames, work } from "./demo";
 import { expect, test } from "./fixtures";
 import { bulkBar, documentList, documentRow, documentRows, listEntry, navigation, rowTags, search, selectAllLoaded, selectBox, sheet } from "./ui";
@@ -10,9 +11,11 @@ test("two checked documents get a tag and a correspondent through the bulk bar",
   const bar = bulkBar(page);
   await expect(bar.getByText("2 selected", { exact: true })).toBeVisible();
 
-  // A tag: its sheet lists every tag twice, to add and to remove.
+  // A tag: its sheet lists every tag twice, to add and to remove. It opens
+  // with the focus inside, on the first checkbox (Apply is disabled).
   await bar.getByRole("button", { name: "Tags…" }).click();
   const tags = sheet(page, "Tags of the selected documents");
+  await expect(tags.getByRole("group", { name: "Add", exact: true }).getByRole("checkbox").first()).toBeFocused();
   await tags.getByRole("group", { name: "Add", exact: true }).getByRole("checkbox", { name: bulkNames.tag, exact: true }).check();
   await tags.getByRole("button", { name: "Apply", exact: true }).click();
   await expect(tags).toBeHidden();
@@ -64,4 +67,55 @@ test("every match of a search is counted, confirmed and then changed", async ({ 
   // All of them have the type, also those that were never loaded: the
   // sidebar counts them.
   await expect(listEntry(navigation(page), bulkNames.type)).toHaveAccessibleName(`${bulkNames.type} ${work.batch.count}`);
+});
+
+test("Cancel in the every-match confirmation sends no change: the dry run is the only POST, and the documents are unchanged", async ({ page }) => {
+  // Every POST to the bulk endpoint, with its body.
+  const posts: Record<string, unknown>[] = [];
+  const onRequest = (r: Request) => {
+    if (r.method() === "POST" && new URL(r.url()).pathname === "/api/documents/bulk") posts.push(r.postDataJSON() as Record<string, unknown>);
+  };
+  page.on("request", onRequest);
+  await page.goto("/");
+  await search(page, work.batch.word);
+  await expect(documentRows(documentList(page, "Search results"))).toHaveCount(50);
+  await selectAllLoaded(page).check();
+  await page.getByRole("button", { name: "Select all matches of this search", exact: true }).click();
+  await expect(page.getByText(`All ${work.batch.count} matches of this search are selected.`, { exact: true })).toBeVisible();
+  const bar = bulkBar(page);
+  await expect(bar.getByText(`${work.batch.count} selected`, { exact: true })).toBeVisible();
+
+  // The action counts again (a dry run) and asks, with the focus on Cancel
+  // (not on the primary, so a second Enter confirms nothing); Cancel sends
+  // nothing and returns the focus to the button that asked, although that
+  // button was disabled while the dry run counted.
+  const favorite = bar.getByRole("button", { name: "Favorite", exact: true });
+  await favorite.click();
+  const confirm = sheet(page, "Change all matches?");
+  await expect(confirm).toContainText(`This changes ${work.batch.count} documents: every match of this search, also those not loaded yet.`);
+  await expect(confirm.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await confirm.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(confirm).toBeHidden();
+  await expect(favorite).toBeFocused();
+  // Escape sends nothing either, and returns the focus the same way.
+  await favorite.click();
+  await expect(sheet(page, "Change all matches?")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(sheet(page, "Change all matches?")).toBeHidden();
+  await expect(favorite).toBeFocused();
+  // The selection and its count stay.
+  await expect(bar.getByText(`${work.batch.count} selected`, { exact: true })).toBeVisible();
+
+  // The dry runs (the selection's count and one per action) are the only POSTs: none without dryRun.
+  await expect.poll(() => posts.length).toBe(3);
+  expect(posts.every((b) => b.dryRun === true)).toBe(true);
+  expect(posts.some((b) => "fingerprint" in b)).toBe(false);
+  page.off("request", onRequest);
+
+  // The documents are unchanged: none is a favourite after a reload.
+  await page.reload();
+  const rows = documentRows(documentList(page, "Search results"));
+  await expect(rows).toHaveCount(50);
+  await expect(documentList(page, "Search results").getByText("Favorite", { exact: true })).toHaveCount(0);
+  await expect(posts.filter((b) => b.dryRun !== true)).toHaveLength(0);
 });
