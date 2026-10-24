@@ -184,8 +184,8 @@ the retry stores the file again. The consume folder and `./pgo import` treat it 
 ## Upgrades
 
 Back up first (see [Backups](#backups)) and read the release notes of every
-version you skip: they list database migrations and manual steps. Check
-`.env` for a `PAPERLESS_GO_IMAGE` line first (see the note below the steps).
+version you skip: they list database migrations and manual steps. Also
+check `.env` for a `PAPERLESS_GO_IMAGE` line (see the note below the steps).
 Then, in the directory that holds your `paperless-go/` directory:
 
 ```sh
@@ -209,12 +209,13 @@ while migrations are pending.
 A `PAPERLESS_GO_IMAGE` line in the kept `.env` (see [Versions](#versions))
 overrides the new bundle's image: the web server and the CLI (`./pgo`) go on
 using the image it names, and `./pgo --version` shows that image's version.
-Before `./pgo migrate`, remove the line (unless it names a newer build of
-your own) or set it to the new release's exact image, for example
-`ghcr.io/pklnx/paperless-go:X.Y.Z`. If you ran the steps above with the
-line in place, change it as described, run `./pgo migrate`, redo any manual
-steps from the release notes that ran with the old image, and run
-`docker compose up -d web` again.
+Unless it names a newer build of your own, remove the line or set it to the
+new release's exact image, for example `ghcr.io/pklnx/paperless-go:X.Y.Z`,
+before `./pgo migrate`. If you ran the steps above with the line in place,
+change it as described and repeat the upgrade from `./pgo migrate` on, with
+the manual steps from the release notes and the
+[Upgrade notes](#upgrade-notes) in their order, then
+run `docker compose up -d web`.
 
 With a clone of the repository, `git pull` replaces the download, and
 `./pgo migrate` rebuilds the image.
