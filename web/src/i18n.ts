@@ -5,10 +5,9 @@
 const en = {
   appName: "paperless-go",
   tagline: "Your documents, scanned, recognized and searchable, on your own server.",
-  serverStatus: "Server",
-  statusChecking: "checking…",
-  statusOk: "running, database connected",
-  statusDown: "not reachable or database unavailable",
+  /** The notification under the header while the health check says the server is down. */
+  serverDownTitle: "Server not reachable",
+  serverDownText: "The server does not answer or its database is unavailable. Changes cannot be saved until it is back.",
   documentation: "Documentation",
   switchTheme: (to: "light" | "dark"): string => (to === "dark" ? "Switch to dark mode" : "Switch to light mode"),
   languageName: "English",
@@ -61,6 +60,9 @@ const en = {
   navigation: "Navigation",
   openMenu: "Open menu",
   closeDialog: "Close",
+  /** The documents view's column: saved views, tags, correspondents and types. Below lg an overlay behind this button. */
+  browse: "Browse",
+  closeBrowse: "Close Browse",
   /** Texts that Carbon components bring in English; passed as props or through translateWithId. */
   carbon: {
     showPassword: "Show password",
@@ -620,10 +622,8 @@ export type Messages = typeof en;
 const de: Messages = {
   appName: "paperless-go",
   tagline: "Deine Dokumente, gescannt, erkannt und durchsuchbar, auf deinem eigenen Server.",
-  serverStatus: "Server",
-  statusChecking: "wird geprüft …",
-  statusOk: "läuft, Datenbank verbunden",
-  statusDown: "nicht erreichbar oder Datenbank nicht verfügbar",
+  serverDownTitle: "Server nicht erreichbar",
+  serverDownText: "Der Server antwortet nicht oder seine Datenbank ist nicht verfügbar. Änderungen können erst gespeichert werden, wenn er wieder da ist.",
   documentation: "Dokumentation",
   switchTheme: (to: "light" | "dark") => (to === "dark" ? "Dunkles Design" : "Helles Design"),
   languageName: "Deutsch",
@@ -675,6 +675,8 @@ const de: Messages = {
   navigation: "Navigation",
   openMenu: "Menü öffnen",
   closeDialog: "Schließen",
+  browse: "Stöbern",
+  closeBrowse: "Stöbern schließen",
   carbon: {
     showPassword: "Passwort anzeigen",
     hidePassword: "Passwort verbergen",

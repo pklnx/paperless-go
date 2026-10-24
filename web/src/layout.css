@@ -46,23 +46,6 @@ body,
   flex-direction: column;
   min-height: 0;
 }
-/* Part 1 of #150: today's sidebar next to the page, below the header. A
-   class of its own, because a utility (layer utilities) cannot override a
-   layout.css class (layer app). Part 2 replaces it with the SideNav. */
-.app-shell__row {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-}
-/* Part 1 of #150: the header's menu button opens today's navigation sheet.
-   Carbon hides the button only from lg (66rem), while today's sidebar is
-   permanent from md (48rem): hidden from md here, so no width shows both.
-   Part 2 moves the whole shell to lg and drops this rule. */
-@media (min-width: 48rem) {
-  .app-shell .cds--header__menu-toggle {
-    display: none;
-  }
-}
 /* The product mark (ProductMark.tsx), in the header and on the login
    pages: never squeezed by its flex row. app-mark--light/--dark name the
    theme's file for tests; the file itself is never recoloured. */
@@ -74,20 +57,70 @@ body,
   height: 1.25rem;
   margin-inline-end: 0.5rem;
 }
-/* The header's user name, from Carbon's md up. */
+/* The header's user name, from Carbon's md up: the button that opens the
+   profile (labelled "Profile"), styled like Carbon's header actions. */
 .app-header__user {
   display: none;
-  align-self: center;
+  border: 0;
+  margin: 0;
   padding-inline: 0.5rem;
+  background: none;
   color: var(--cds-text-secondary);
+  font: inherit;
   font-size: 0.875rem;
   letter-spacing: 0.16px;
   white-space: nowrap;
+  cursor: pointer;
+}
+.app-header__user:hover {
+  background-color: var(--cds-background-hover);
+  color: var(--cds-text-primary);
+}
+.app-header__user[aria-current="page"] {
+  background-color: var(--cds-background-active);
+  color: var(--cds-text-primary);
+}
+.app-header__user:focus-visible {
+  outline: 2px solid var(--cds-focus);
+  outline-offset: -2px;
 }
 @media (min-width: 42rem) {
   .app-header__user {
     display: block;
   }
+}
+
+/* The shell's SideNav sits below the header, which reaches under the notch.
+   Carbon shows the menu button and the overlay below lg (66rem) and hides
+   the button from lg up, where the SideNav is a rail that expands over the
+   page on hover and focus. The page makes room for the collapsed rail. */
+.app-shell > .cds--side-nav {
+  /* A divider that keeps Carbon's widths (3rem, 16rem) exact. */
+  box-shadow: inset -1px 0 0 var(--cds-border-subtle-01);
+  inset-block-start: calc(3rem + env(safe-area-inset-top));
+  block-size: calc(100% - 3rem - env(safe-area-inset-top));
+  padding-block-end: env(safe-area-inset-bottom);
+}
+.app-shell > .cds--side-nav__overlay {
+  inset-block-start: calc(3rem + env(safe-area-inset-top));
+}
+.shell-nav__count {
+  color: var(--cds-text-secondary);
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+}
+@media (min-width: 66rem) {
+  .app-shell__body {
+    margin-inline-start: 3rem;
+  }
+}
+/* The notification under the header while the server is down (App). */
+.app-shell__notice {
+  flex: none;
+  padding: 1rem 1rem 0;
+}
+.app-shell__notice .cds--inline-notification {
+  max-inline-size: none;
 }
 
 /* A view below the header: one cell that fills the rest of the screen, so
@@ -101,6 +134,186 @@ body,
 }
 .app-view > * {
   min-block-size: 0;
+}
+/* The documents view: the column first from lg, then the page. */
+@media (min-width: 66rem) {
+  .docs-view {
+    grid-template-columns: 18rem minmax(0, 1fr);
+  }
+}
+/* The page scrolls inside its cell. Positioned, so an absolutely placed
+   element in it (a screen-reader-only span of a row) stays inside it and
+   cannot make the document taller than the screen. */
+.docs-pane {
+  position: relative;
+  min-inline-size: 0;
+  overflow-y: auto;
+}
+/* The open document (DocumentDetail, a fixed layer until part 4 of #150):
+   from lg right of the rail and the column. */
+@media (min-width: 66rem) {
+  .app-detail {
+    inset-inline-start: calc(3rem + 18rem);
+  }
+}
+
+/* The column (NavColumn). Below lg it is hidden until the Browse button
+   opens it as a modal overlay with a scrim; from lg up it is the first
+   column. */
+.nav-column {
+  display: none;
+  min-inline-size: 0;
+  background-color: var(--cds-layer-01);
+  color: var(--cds-text-primary);
+  border-inline-end: 1px solid var(--cds-border-subtle-01);
+}
+.nav-column--overlay {
+  position: fixed;
+  z-index: 7000;
+  display: block;
+  inset-block: calc(3rem + env(safe-area-inset-top)) 0;
+  inset-inline-start: 0;
+  inline-size: min(20rem, calc(100vw - 3rem));
+  padding-block-end: env(safe-area-inset-bottom);
+  padding-inline-start: env(safe-area-inset-left);
+  box-shadow: 0 2px 6px var(--cds-shadow, rgba(0, 0, 0, 0.3));
+}
+.nav-column__scrim {
+  position: fixed;
+  z-index: 6900;
+  inset: calc(3rem + env(safe-area-inset-top)) 0 0;
+  background-color: var(--cds-overlay);
+}
+.nav-column__open {
+  display: flex;
+  flex: none;
+}
+@media (min-width: 66rem) {
+  .nav-column {
+    position: relative;
+    display: block;
+  }
+  .nav-column__open,
+  .nav-column__close {
+    display: none;
+  }
+}
+
+/* The column's content: heading row, the admin's switch, the saved views,
+   then the tree. */
+.nav-browse {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  overflow-y: auto;
+  padding-block-end: 1rem;
+  font-size: 0.875rem;
+  letter-spacing: 0.16px;
+}
+.nav-browse__head {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-block-size: 2.5rem;
+  padding-inline: 1rem 0.25rem;
+}
+.nav-browse__title {
+  /* heading-compact-01 */
+  flex: 1;
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.28572;
+  letter-spacing: 0.16px;
+}
+.nav-browse__toggle {
+  padding: 0.25rem 1rem 0.5rem;
+}
+/* Carbon keeps the switch button clipped to one pixel behind its label, so
+   a pointer hits the label; the button itself covers the toggle here, so a
+   click (and a test's) lands on the control it names. Focus ring and the
+   label's hover come from Carbon as before. */
+.nav-browse__toggle.cds--toggle {
+  position: relative;
+}
+.nav-browse__toggle .cds--toggle__button {
+  inset: 0;
+  z-index: 1;
+  margin: 0;
+  block-size: 100%;
+  inline-size: 100%;
+  clip: auto;
+  opacity: 0;
+  cursor: pointer;
+}
+.nav-browse__note {
+  margin: 0;
+  padding: 0.5rem 1rem;
+}
+.nav-views {
+  margin-block-end: 0.5rem;
+}
+.nav-views .cds--contained-list__header {
+  padding-inline-start: 1rem;
+}
+.nav-views .cds--contained-list-item__content {
+  overflow: hidden;
+  padding-inline-start: 1rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-views__item--current .cds--contained-list-item__content {
+  box-shadow: inset 3px 0 0 var(--cds-border-interactive);
+  font-weight: 600;
+}
+.nav-tree {
+  padding-block-start: 0.25rem;
+}
+.nav-tree__label {
+  display: flex;
+  min-inline-size: 0;
+  align-items: center;
+  gap: 0.5rem;
+}
+.nav-tree__name {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-tree__count {
+  flex: none;
+  color: var(--cds-text-secondary);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.32px;
+  white-space: nowrap;
+}
+/* A tag's colour, as decoration; a ring for a tag without one. */
+.nav-tree__dot {
+  flex: none;
+  inline-size: 0.625rem;
+  block-size: 0.625rem;
+  border-radius: 50%;
+}
+.nav-tree__dot--none {
+  border: 1px solid var(--cds-border-strong-01);
+}
+/* A collapsed node that holds the selection. */
+.nav-tree__node--within > .cds--tree-node__label {
+  box-shadow: inset 3px 0 0 var(--cds-border-interactive);
+}
+/* The label's own spacing: the count sits at the right edge. */
+.nav-tree .cds--tree-node__label__details {
+  flex: 1;
+  min-inline-size: 0;
+}
+.nav-tree .cds--tree-node__label__text {
+  display: block;
+  flex: 1;
+  min-inline-size: 0;
+  padding-inline-end: 0.75rem;
 }
 
 /* The notice (Toast.tsx): a Carbon toast notification at the bottom of the

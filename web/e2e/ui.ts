@@ -53,55 +53,96 @@ export async function search(page: Page, q: string): Promise<void> {
   await searchBox(page).press("Enter");
 }
 
-/** The sidebar, or the navigation sheet on a phone. */
+/**
+ * The app's navigation, in three places since #150 part 2: the shell's
+ * SideNav ("Navigation": the lists with their counts and the pages; a rail
+ * from lg, an overlay behind the menu button below), the documents view's
+ * column ("Browse": saved views, tags, correspondents and types; a column
+ * from lg, an overlay behind the Browse button below) and the header's
+ * account controls (the user's name as the Profile button, Log out). The
+ * helpers below look in all of them, so a spec needs no knowledge of which
+ * holds what.
+ */
 export function navigation(page: Page): Locator {
-  return page.getByRole("navigation", { name: "Navigation" });
+  return shellNav(page).or(browseColumn(page)).or(page.getByRole("banner", { name: "paperless-go", exact: true }));
 }
 
-/** A list's entry in the navigation ("All documents", "Trash", a tag, a correspondent or a type): its name, then its count. */
+/**
+ * Opens a list from the SideNav ("All documents", "Inbox", "Trash"). From lg
+ * the SideNav is a rail that stays expanded while the pointer rests on it,
+ * over the column: the pointer moves on, so the rail is out of the way.
+ */
+export async function openList(page: Page, name: string): Promise<void> {
+  await listEntry(shellNav(page), name).click();
+  await page.mouse.move(640, 400);
+  await expect(shellNav(page)).not.toHaveClass(/cds--side-nav--expanded/);
+}
+
+/** The shell's SideNav. */
+export function shellNav(page: Page): Locator {
+  return page.getByRole("navigation", { name: "Navigation", exact: true });
+}
+
+/** The documents view's column (saved views, tags, correspondents, types), as a column or inside its overlay. */
+export function browseColumn(page: Page): Locator {
+  return page.getByRole("navigation", { name: "Browse", exact: true });
+}
+
+/** A list's entry in the navigation ("All documents", "Trash": a link of the SideNav; a tag, a correspondent or a type: a node of the column's tree): its name, then its count. */
 export function listEntry(nav: Locator, name: string): Locator {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return nav.getByRole("button", { name: new RegExp(`^${escaped}(?: \\d+)?$`) });
+  const named = new RegExp(`^${escaped}(?: \\d+)?$`);
+  return nav.getByRole("link", { name: named }).or(nav.getByRole("treeitem", { name: named }));
 }
 
 /** A tag's entry in the navigation: its name, then its count. */
 export const tagEntry = listEntry;
 
-/** The button that collapses or expands a tag's sub-tags ("Sub-tags of Finance"); aria-expanded says which. */
+/** The tree node that holds the sub-tags of the tag named name (none once it has no sub-tags); aria-expanded says whether they show. */
 export function subTagsToggle(nav: Locator, name: string): Locator {
-  return nav.getByRole("button", { name: `Sub-tags of ${name}`, exact: true });
+  return tagEntry(nav, name).and(nav.page().locator("[aria-expanded]"));
 }
 
-/** Collapses the sub-tags of the tag named name (they must be expanded). */
+/** Collapses the sub-tags of the tag named name (they must be expanded): Left on the node, as Carbon's TreeView takes it. */
 export async function collapseTag(nav: Locator, name: string): Promise<void> {
   const toggle = subTagsToggle(nav, name);
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
-  await toggle.click();
+  await toggle.focus();
+  await toggle.press("ArrowLeft");
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
 }
 
-/** Expands the sub-tags of the tag named name (they must be collapsed). */
+/** Expands the sub-tags of the tag named name (they must be collapsed): Right on the node. */
 export async function expandTag(nav: Locator, name: string): Promise<void> {
   const toggle = subTagsToggle(nav, name);
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
-  await toggle.click();
+  await toggle.focus();
+  await toggle.press("ArrowRight");
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
 }
 
-/** The header's menu button: on a phone it opens the navigation; from md it is hidden. */
+/** The header's menu button: below lg it opens the SideNav as an overlay; from lg it is hidden. */
 export function menuButton(page: Page): Locator {
-  return page.getByRole("button", { name: "Open menu" });
+  return page.getByRole("button", { name: "Open menu", exact: true });
 }
 
-/** The desktop sidebar (the permanent navigation from md), as opposed to the phone's navigation sheet. */
-export function sidebar(page: Page): Locator {
-  return page.getByTestId("sidebar");
-}
-
-/** Opens the navigation on a phone and returns its dialog. */
+/** Opens the SideNav below lg and returns it (expanded, with the focus inside). */
 export async function openNavigation(page: Page): Promise<Locator> {
   await menuButton(page).click();
-  const dialog = page.getByRole("dialog", { name: "Navigation" });
+  const nav = shellNav(page);
+  await expect(nav).toHaveClass(/cds--side-nav--expanded/);
+  return nav;
+}
+
+/** The list toolbar's Browse button: below lg it opens the column as an overlay; from lg it is hidden. */
+export function browseButton(page: Page): Locator {
+  return page.getByRole("button", { name: "Browse", exact: true });
+}
+
+/** Opens the column overlay below lg and returns its dialog. */
+export async function openBrowse(page: Page): Promise<Locator> {
+  await browseButton(page).click();
+  const dialog = page.getByRole("dialog", { name: "Browse", exact: true });
   await dialog.waitFor();
   return dialog;
 }
@@ -270,9 +311,10 @@ export async function logInThroughForm(page: Page, name: string, password: strin
 }
 
 /**
- * A sheet by its title: today a native <dialog> opened with showModal
- * (bulk edit, the saved views, the metadata page, the permanent delete);
- * #150's Carbon modals keep the role and the name.
+ * A dialog by its title: a native <dialog> opened with showModal (bulk
+ * edit, Save view, the metadata page, the permanent delete) until its part
+ * of #150, or a Carbon Modal (the saved-view menu's Rename and Delete since
+ * part 2): both have the role and the name.
  */
 export function sheet(page: Page, title: string | RegExp): Locator {
   return page.getByRole("dialog", { name: title, exact: true });
@@ -320,14 +362,36 @@ export async function saveDocument(page: Page): Promise<void> {
   await expect(detailForm(page).getByRole("status")).toHaveText("Saved");
 }
 
-/** The entry of the "Saved views" list in the navigation. */
+/** The entry of the "Saved views" list in the navigation: its button, which opens the view. */
 export function savedViewEntry(page: Page, name: string): Locator {
-  return navigation(page).getByRole("list", { name: "Saved views", exact: true }).getByRole("button", { name, exact: true });
+  return savedViewsList(page).getByRole("button", { name, exact: true });
 }
 
-/** A page of the navigation ("Log", "Users", "Tags, correspondents & types"). */
+/** The "Saved views" list in the navigation. */
+export function savedViewsList(page: Page): Locator {
+  return browseColumn(page).getByRole("list", { name: "Saved views", exact: true });
+}
+
+/** A saved view's row (the list item that holds its button and its menu): aria-current marks the view the list shows. */
+export function savedViewRow(page: Page, name: string): Locator {
+  return savedViewsList(page)
+    .getByRole("listitem")
+    .filter({ has: page.getByRole("button", { name, exact: true }) });
+}
+
+/** Opens the menu of the saved view named name and returns it (its items: Rename, Update…, Move up, Move down, Delete). */
+export async function openSavedViewMenu(page: Page, name: string): Promise<Locator> {
+  await savedViewRow(page, name)
+    .getByRole("button", { name: `Actions for ${name}`, exact: true })
+    .click();
+  const menu = page.getByRole("menu", { name: `Actions for ${name}`, exact: true });
+  await menu.waitFor();
+  return menu;
+}
+
+/** A page of the navigation ("Log", "Users", "Profile", "Tags, correspondents & types"): a link of the SideNav. */
 export function pageEntry(page: Page, name: string): Locator {
-  return navigation(page).getByRole("button", { name, exact: true });
+  return shellNav(page).getByRole("link", { name, exact: true });
 }
 
 /** A tab of the metadata page ("Tags", "Correspondents", "Document types"). */

@@ -34,10 +34,10 @@ async function open(search = "?view=metadata") {
 }
 
 describe("metadata page", () => {
-  it("opens from the sidebar and lists the tag tree with counts, names as text", async () => {
+  it("opens from the navigation and lists the tag tree with counts, names as text", async () => {
     server.tags = [tag("t1", "Steuer", null, { documentCount: 4 }), tag("t2", "2024", "t1", { documentCount: 1 }), tag("t3", "<b>Arzt</b>", null, { documentCount: 0 })];
     render(<App />);
-    fireEvent.click(within(await screen.findByTestId("sidebar")).getByRole("button", { name: t.manageMetadata }));
+    fireEvent.click(await screen.findByRole("link", { name: t.manageMetadata }));
     expect(window.location.search).toBe("?view=metadata");
     // The view switch renders asynchronously: wait for the panel, not just the text in it.
     await within(await screen.findByRole("tabpanel")).findByText("Steuer");

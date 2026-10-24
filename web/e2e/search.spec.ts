@@ -34,7 +34,7 @@ test("a tag in the sidebar filters the list; the chip removes the filter", async
   await page.goto("/");
   const nav = navigation(page);
   // Bills is a sub-tag of Finance, shown below it.
-  await expect(nav.getByRole("button", { name: "Sub-tags of Finance" })).toHaveAttribute("aria-expanded", "true");
+  await expect(subTagsToggle(nav, "Finance")).toHaveAttribute("aria-expanded", "true");
   await tagEntry(nav, "Bills").click();
   await expect(page).toHaveURL(/[?&]tag=[0-9a-f-]{36}/);
   const list = documentList(page, "Bills");
@@ -51,8 +51,7 @@ test("collapsed sub-tags are hidden in the sidebar, and shown again when expande
   await page.goto("/");
   const nav = navigation(page);
   await expect(tagEntry(nav, "Bills")).toBeVisible();
-  // Without Tailwind's preflight, the browser's [hidden] rule would lose to
-  // the list's flex utility; the .legacy reset (index.css) restores it.
+  // Carbon's TreeView hides the collapsed node's children (#150, part 2).
   await collapseTag(nav, "Finance");
   await expect(subTagsToggle(nav, "Finance")).toHaveAttribute("aria-expanded", "false");
   await expect(tagEntry(nav, "Bills")).toBeHidden();

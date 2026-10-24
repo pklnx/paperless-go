@@ -1,6 +1,6 @@
 import { seed, unique } from "./demo";
 import { expect, test } from "./fixtures";
-import { documentList, documentRow, documentRows, listEntry, navigation, notice, savedViewEntry, search, sheet } from "./ui";
+import { documentList, documentRow, documentRows, notice, openList, openSavedViewMenu, savedViewEntry, savedViewRow, search, sheet } from "./ui";
 
 test("a search is saved as a view, opened from the sidebar, renamed and deleted", async ({ page }) => {
   const name = unique("Water");
@@ -15,11 +15,11 @@ test("a search is saved as a view, opened from the sidebar, renamed and deleted"
   await save.getByLabel("Name", { exact: true }).fill(name);
   await save.getByRole("button", { name: "Save", exact: true }).click();
   await expect(notice(page, `View “${name}” saved.`)).toBeVisible();
-  await expect(savedViewEntry(page, name)).toHaveAttribute("aria-current", "page");
+  await expect(savedViewRow(page, name)).toHaveAttribute("aria-current", "page");
   await expect(page).toHaveURL(/[?&]sv=[0-9a-f-]{36}/);
 
   // Another list, then the view from the sidebar: its search comes back.
-  await listEntry(navigation(page), "All documents").click();
+  await openList(page, "All documents");
   await expect(page).not.toHaveURL(/[?&]sv=/);
   await expect(documentRow(page, seed.incomeTax.title)).toBeVisible();
   await savedViewEntry(page, name).click();
@@ -30,8 +30,7 @@ test("a search is saved as a view, opened from the sidebar, renamed and deleted"
   await expect(documentRow(page, seed.incomeTax.title)).toHaveCount(0);
 
   // Rename: kept on the server, so it survives a reload.
-  await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click();
-  await sheet(page, name).getByRole("button", { name: "Rename", exact: true }).click();
+  await (await openSavedViewMenu(page, name)).getByRole("menuitem", { name: "Rename", exact: true }).click();
   const rename = sheet(page, "Rename");
   await rename.getByLabel("Name", { exact: true }).fill(renamed);
   await rename.getByRole("button", { name: "Save", exact: true }).click();
@@ -41,13 +40,12 @@ test("a search is saved as a view, opened from the sidebar, renamed and deleted"
   await expect(savedViewEntry(page, renamed)).toBeVisible();
 
   // Delete asks first, and the documents stay.
-  await page.getByRole("button", { name: `Actions for ${renamed}`, exact: true }).click();
-  await sheet(page, renamed).getByRole("button", { name: "Delete", exact: true }).click();
+  await (await openSavedViewMenu(page, renamed)).getByRole("menuitem", { name: "Delete", exact: true }).click();
   const remove = sheet(page, `Delete “${renamed}”?`);
   await expect(remove).toContainText("Only the saved view is deleted; the documents stay.");
   await remove.getByRole("button", { name: "Delete", exact: true }).click();
   await expect(notice(page, `View “${renamed}” deleted.`)).toBeVisible();
   await expect(savedViewEntry(page, renamed)).toHaveCount(0);
-  await listEntry(navigation(page), "All documents").click();
+  await openList(page, "All documents");
   await expect(documentRow(page, seed.water.title)).toBeVisible();
 });

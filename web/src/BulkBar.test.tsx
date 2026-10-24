@@ -614,14 +614,14 @@ describe("all matches of a search", () => {
     await start();
     fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 1") }));
     expect(bar().getByText(t.selectedCount(1))).toBeTruthy();
-    fireEvent.click(within(screen.getByTestId("sidebar")).getByRole("button", { name: /Steuer/ }));
+    fireEvent.click(screen.getByRole("treeitem", { name: /^Steuer/ }));
     await waitFor(() => expect(screen.queryByRole("region", { name: t.bulkActions })).toBeNull());
     expect(box("Doc 1").checked).toBe(false);
 
     fireEvent.click(screen.getByRole("checkbox", { name: t.selectAllLoaded }));
     fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
     await screen.findByText(t.allMatchesSelected(3));
-    fireEvent.click(within(screen.getByTestId("sidebar")).getByRole("button", { name: /Arzt/ }));
+    fireEvent.click(screen.getByRole("treeitem", { name: /^Arzt/ }));
     await waitFor(() => expect(screen.queryByRole("region", { name: t.bulkActions })).toBeNull());
     expect(screen.queryByText(t.allMatchesSelected(3))).toBeNull();
     expect(box("Doc 1").checked || box("Doc 2").checked).toBe(false);
@@ -631,7 +631,7 @@ describe("all matches of a search", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: t.selectAllLoaded }));
     fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
     expect((await screen.findByRole("alert")).textContent).toBe(`${t.bulkMatchCount(6000)} ${t.bulkTooMany(5000)}`);
-    fireEvent.click(within(screen.getByTestId("sidebar")).getByRole("button", { name: /Steuer/ }));
+    fireEvent.click(screen.getByRole("treeitem", { name: /^Steuer/ }));
     await waitFor(() => expect(screen.queryByRole("region", { name: t.bulkActions })).toBeNull());
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -648,7 +648,7 @@ describe("all matches of a search", () => {
     fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
     fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
     expect(bulks()).toEqual([{ match: { tz }, dryRun: true }]);
-    fireEvent.click(within(screen.getByTestId("sidebar")).getByRole("button", { name: /Steuer/ }));
+    fireEvent.click(screen.getByRole("treeitem", { name: /^Steuer/ }));
     await waitFor(() => expect(gets("/api/documents").at(-1)!.url).toContain("tag=t1"));
     await screen.findByText("Doc 1");
     // The list's own handler of the count runs before this await resumes.
@@ -672,7 +672,7 @@ describe("all matches of a search", () => {
     await start();
     fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 1") }));
     fireEvent.click(bar().getByRole("button", { name: t.bulkFavorite }));
-    fireEvent.click(within(screen.getByTestId("sidebar")).getByRole("button", { name: /Steuer/ }));
+    fireEvent.click(screen.getByRole("treeitem", { name: /^Steuer/ }));
     await screen.findByText("B 1");
     const lists = gets("/api/documents").length;
     const counts = gets("/api/documents/counts").length;

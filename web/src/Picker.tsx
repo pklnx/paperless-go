@@ -1,6 +1,7 @@
 import { useId, useMemo, useRef, useState } from "react";
 import { ApiError } from "./api";
 import { CloseIcon } from "./icons";
+import { dialogOpen } from "./dialogs";
 import { t } from "./i18n";
 import { input } from "./styles";
 import { chipInk } from "./tagTree";
@@ -145,6 +146,8 @@ export function Picker({ label, options, selected, multiple, onChange, onCreate,
           onClick={() => setOpen(true)}
           onBlur={() => setOpen(false)}
           onKeyDown={(e) => {
+            // A navigation overlay over the detail has the keys.
+            if (dialogOpen()) return;
             if (e.key === "ArrowDown") {
               e.preventDefault();
               setOpen(true);

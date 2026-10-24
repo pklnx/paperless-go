@@ -3,11 +3,14 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { App } from "./App";
 import { t } from "./i18n";
 import { viewKey } from "./savedViews";
+import { findAlert } from "./test/alerts";
 import { named, page, savedView, stubServer, tag, type Request, type Server } from "./testServer";
 
 // Saved views in the web UI (#12, part 4) against a fake server: what the
-// sidebar shows, what opening a view requests, and what saving, renaming,
-// updating, moving and deleting send.
+// navigation column shows, what opening a view requests, and what saving,
+// renaming, updating, moving and deleting send. Since #150 part 2 the list
+// is a Carbon ContainedList with an OverflowMenu per view; every request is
+// pinned as method, path and body, as it was before.
 
 let server: Server;
 let requests: Request[];
@@ -23,7 +26,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const sidebar = () => within(screen.getByTestId("sidebar"));
+/** The navigation column (saved views, tags, correspondents, types). */
+const column = () => within(screen.getByRole("navigation", { name: t.browse }));
+/** The row of a view (the listitem that holds its button): aria-current marks the one the list shows. */
+const rowOf = (name: string) => column().getByRole("button", { name }).closest("li")!;
+/** A request as method, path and body only. */
+const pin = (r: Request | undefined) => (r ? { method: r.method, path: r.path, body: r.body } : undefined);
 const lists = () => requests.filter((r) => r.method === "GET" && r.path === "/api/documents").map((r) => new URLSearchParams(r.url.split("?")[1]));
 /** The list parameters that matter here: everything but limit and tz. */
 const params = (p: URLSearchParams) => {
@@ -44,10 +52,10 @@ async function start(url = "/") {
 
 const web = (p: Record<string, unknown>) => ({ [viewKey]: { v: 1, ...p } });
 
-/** Opens a view's menu in the sidebar; returns the sheet. */
+/** Opens a view's menu in the column; returns the menu. */
 async function menuOf(name: string) {
-  fireEvent.click(await sidebar().findByRole("button", { name: t.viewActions(name) }));
-  return within(await screen.findByRole("dialog", { name }));
+  fireEvent.click(await column().findByRole("button", { name: t.viewActions(name) }));
+  return within(await screen.findByRole("menu", { name: t.viewActions(name) }));
 }
 
 describe("the Saved views section", () => {
@@ -61,18 +69,20 @@ describe("the Saved views section", () => {
       savedView("v5", "Not in the inbox", { sortIndex: 4, filter: web({ inbox: false }) }),
     ];
     await start();
-    const list = within(await sidebar().findByRole("list", { name: t.savedViews }));
-    expect(list.getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Steuern⋯", "Bank⋯"]);
-    expect(sidebar().queryByText("From the app")).toBeNull();
-    expect(sidebar().queryByText("Two tags")).toBeNull();
-    expect(sidebar().queryByText("Not in the inbox")).toBeNull();
+    const list = within(await column().findByRole("list", { name: t.savedViews }));
+    // Each row: the view's button, then its menu.
+    expect(list.getAllByRole("listitem").map((li) => within(li).getAllByRole("button")[0]!.textContent)).toEqual(["Steuern", "Bank"]);
+    for (const name of ["Steuern", "Bank"]) expect(list.getByRole("button", { name: t.viewActions(name) })).toBeTruthy();
+    expect(column().queryByText("From the app")).toBeNull();
+    expect(column().queryByText("Two tags")).toBeNull();
+    expect(column().queryByText("Not in the inbox")).toBeNull();
   });
 
   it("shows no section without views", async () => {
     server.savedViews = [savedView("v2", "From the app", { filter: { inbox: true } })];
     await start();
     await waitFor(() => expect(viewLoads()).toBe(1));
-    expect(sidebar().queryByRole("list", { name: t.savedViews })).toBeNull();
+    expect(column().queryByRole("list", { name: t.savedViews })).toBeNull();
   });
 
   it("opens a view: its parameters replace the list's, and it is marked while the list shows them", async () => {
@@ -80,16 +90,16 @@ describe("the Saved views section", () => {
     server.tags = [tag("t1", "Steuer")];
     server.savedViews = [savedView("v1", "Steuern 2026", { filter: { tags: [{ id: "x" }], ...web({ q: "added:2026", tag: ["t1"], favorite: true, sort: "date", order: "asc" }) } })];
     await start("/?corr=c1&inbox=1");
-    fireEvent.click(await sidebar().findByRole("button", { name: "Steuern 2026" }));
+    fireEvent.click(await column().findByRole("button", { name: "Steuern 2026" }));
     await waitFor(() => expect(params(lists().at(-1)!)).toBe("q=added%3A2026&tag=t1&favorite=true&sort=date&order=asc"));
     expect(new URLSearchParams(window.location.search).get("sv")).toBe("v1");
-    expect(sidebar().getByRole("button", { name: "Steuern 2026" }).getAttribute("aria-current")).toBe("page");
+    expect(rowOf("Steuern 2026").getAttribute("aria-current")).toBe("page");
     // Another search: the list no longer shows the view, which is no longer marked.
     fireEvent.change(screen.getByRole("searchbox", { name: t.searchLabel }), { target: { value: "other" } });
     fireEvent.submit(screen.getByRole("search"));
-    await waitFor(() => expect(sidebar().getByRole("button", { name: "Steuern 2026" }).getAttribute("aria-current")).toBeNull());
-    // Another sidebar entry forgets the view.
-    fireEvent.click(sidebar().getByRole("button", { name: /^Bank/ }));
+    await waitFor(() => expect(rowOf("Steuern 2026").getAttribute("aria-current")).toBeNull());
+    // Another navigation entry forgets the view.
+    fireEvent.click(screen.getByRole("treeitem", { name: /^Bank/ }));
     await waitFor(() => expect(new URLSearchParams(window.location.search).get("sv")).toBeNull());
   });
 
@@ -97,17 +107,17 @@ describe("the Saved views section", () => {
     server.savedViews = [savedView("v1", "Everyone", { filter: web({ q: "x", everyone: true }) }), savedView("v2", "Mine", { filter: web({ q: "y" }) })];
     server.user = { id: 1, name: "root", admin: true };
     await start();
-    fireEvent.click(await sidebar().findByRole("button", { name: "Everyone" }));
+    fireEvent.click(await column().findByRole("button", { name: "Everyone" }));
     await waitFor(() => expect(params(lists().at(-1)!)).toBe("q=x"));
     expect(new URLSearchParams(window.location.search).get("all")).toBe("1");
-    fireEvent.click(sidebar().getByRole("button", { name: "Mine" }));
+    fireEvent.click(column().getByRole("button", { name: "Mine" }));
     await waitFor(() => expect(params(lists().at(-1)!)).toBe("q=y&owner=me"));
     expect(new URLSearchParams(window.location.search).get("all")).toBeNull();
     cleanup();
 
     server.user = { id: 2, name: "alice", admin: false };
     await start();
-    fireEvent.click(await sidebar().findByRole("button", { name: "Everyone" }));
+    fireEvent.click(await column().findByRole("button", { name: "Everyone" }));
     await waitFor(() => expect(params(lists().at(-1)!)).toBe("q=x"));
     expect(new URLSearchParams(window.location.search).get("all")).toBeNull();
   });
@@ -143,7 +153,7 @@ describe("Save view…", () => {
     });
     await waitFor(() => expect(viewLoads()).toBe(loads + 1));
     expect(new URLSearchParams(window.location.search).get("sv")).toBe("new");
-    await waitFor(() => expect(sidebar().getByRole("button", { name: "Steuern" }).getAttribute("aria-current")).toBe("page"));
+    await waitFor(() => expect(rowOf("Steuern").getAttribute("aria-current")).toBe("page"));
     expect(screen.queryByRole("dialog", { name: t.saveViewTitle })).toBeNull();
   });
 
@@ -167,77 +177,161 @@ describe("a view's menu", () => {
     ];
   });
 
-  it("renames a view", async () => {
+  it("offers the five actions, and closes with Escape sending nothing", async () => {
     await start();
     const menu = await menuOf("First");
-    fireEvent.click(menu.getByRole("button", { name: t.renameView }));
-    const sheet = within(screen.getByRole("dialog", { name: t.renameView }));
-    fireEvent.change(sheet.getByLabelText(t.viewName), { target: { value: " Erste " } });
+    expect(menu.getAllByRole("menuitem").map((m) => m.textContent)).toEqual([t.renameView, t.updateView, t.moveViewUp, t.moveViewDown, t.deleteView]);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(0);
+  });
+
+  it("renames a view: PATCH { name } with the trimmed name", async () => {
+    await start();
+    const menu = await menuOf("First");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.renameView }));
+    const dialog = within(await screen.findByRole("dialog", { name: t.renameView }));
+    const field = dialog.getByLabelText(t.viewName) as HTMLInputElement;
+    expect(field.value).toBe("First");
+    expect(document.activeElement).toBe(field);
+    fireEvent.change(field, { target: { value: " Erste " } });
     const loads = viewLoads();
-    fireEvent.click(sheet.getByRole("button", { name: t.save }));
+    fireEvent.click(dialog.getByRole("button", { name: t.save }));
     await waitFor(() => expect(sent("PATCH")).toHaveLength(1));
-    expect(sent("PATCH")[0]).toMatchObject({ path: "/api/saved-views/v1", body: { name: "Erste" } });
+    expect(pin(sent("PATCH")[0])).toEqual({ method: "PATCH", path: "/api/saved-views/v1", body: { name: "Erste" } });
     await waitFor(() => expect(viewLoads()).toBe(loads + 1));
-    expect(screen.queryByRole("dialog", { name: t.renameView })).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.renameView })).toBeNull());
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(1);
   });
 
-  it("updates a view to the current filter, sending only the web's part so the server keeps the app's keys (#143)", async () => {
-    await start("/?q=neu&fav=1");
-    const menu = await menuOf("First");
-    fireEvent.click(menu.getByRole("button", { name: t.updateView }));
-    await waitFor(() => expect(sent("PATCH")).toHaveLength(1));
-    expect(sent("PATCH")[0]!.body).toEqual({
-      paperlessGo: { v: 1, q: "neu", tag: [], correspondent: [], type: [], inbox: null, favorite: true, sort: "", order: "", everyone: false },
-    });
-    expect(await screen.findByText(t.viewUpdated("First"))).toBeTruthy();
-  });
-
-  it("offers no update while the list is unfiltered", async () => {
-    await start();
-    const menu = await menuOf("First");
-    expect((menu.getByRole("button", { name: t.updateView }) as HTMLButtonElement).disabled).toBe(true);
-  });
-
-  it("moves a view down and up by swapping sort indexes, and not past the ends", async () => {
+  it("renames with Enter in the field, and sends nothing for an empty name or on Cancel and Escape", async () => {
     await start();
     let menu = await menuOf("First");
-    expect((menu.getByRole("button", { name: t.moveViewUp }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(menu.getByRole("button", { name: t.moveViewDown }));
-    await waitFor(() => expect(sent("PATCH")).toHaveLength(2));
-    expect(sent("PATCH").map((r) => [r.path, r.body])).toEqual([
-      ["/api/saved-views/v1", { sortIndex: 8 }],
-      ["/api/saved-views/v2", { sortIndex: 3 }],
-    ]);
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "First" })).toBeNull());
-    menu = await menuOf("Second");
-    expect((menu.getByRole("button", { name: t.moveViewDown }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(menu.getByRole("button", { name: t.moveViewUp }));
-    await waitFor(() => expect(sent("PATCH")).toHaveLength(4));
-    expect(sent("PATCH").slice(2).map((r) => [r.path, r.body])).toEqual([
-      ["/api/saved-views/v2", { sortIndex: 3 }],
-      ["/api/saved-views/v1", { sortIndex: 8 }],
-    ]);
+    fireEvent.click(menu.getByRole("menuitem", { name: t.renameView }));
+    let dialog = within(await screen.findByRole("dialog", { name: t.renameView }));
+    fireEvent.change(dialog.getByLabelText(t.viewName), { target: { value: "   " } });
+    expect((dialog.getByRole("button", { name: t.save }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.submit(dialog.getByLabelText(t.viewName).closest("form")!);
+    expect(sent("PATCH")).toHaveLength(0);
+    fireEvent.click(dialog.getByRole("button", { name: t.cancel }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.renameView })).toBeNull());
+    menu = await menuOf("First");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.renameView }));
+    dialog = within(await screen.findByRole("dialog", { name: t.renameView }));
+    fireEvent.change(dialog.getByLabelText(t.viewName), { target: { value: "Changed" } });
+    fireEvent.keyDown(dialog.getByLabelText(t.viewName), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.renameView })).toBeNull());
+    expect(sent("PATCH")).toHaveLength(0);
+    menu = await menuOf("First");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.renameView }));
+    dialog = within(await screen.findByRole("dialog", { name: t.renameView }));
+    fireEvent.change(dialog.getByLabelText(t.viewName), { target: { value: "Erste" } });
+    fireEvent.submit(dialog.getByLabelText(t.viewName).closest("form")!);
+    await waitFor(() => expect(sent("PATCH")).toHaveLength(1));
+    expect(pin(sent("PATCH")[0])).toEqual({ method: "PATCH", path: "/api/saved-views/v1", body: { name: "Erste" } });
   });
 
-  it("deletes a view only after asking", async () => {
+  it("shows why a rename failed and keeps the modal open", async () => {
+    server.savedView = () => ({ status: 400, body: { error: "name too long", code: "invalid" } });
+    await start();
+    const menu = await menuOf("First");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.renameView }));
+    const dialog = within(await screen.findByRole("dialog", { name: t.renameView }));
+    fireEvent.change(dialog.getByLabelText(t.viewName), { target: { value: "X" } });
+    fireEvent.click(dialog.getByRole("button", { name: t.save }));
+    // Carbon's TextInput keeps an empty alert region of its own; the one with text is the app's.
+    const alert = await findAlert();
+    expect(alert.textContent).toContain(t.failed("name too long"));
+    expect(screen.getByRole("dialog", { name: t.renameView }).contains(alert)).toBe(true);
+  });
+
+  it("updates a view to the current filter: PATCH with only the web's part, so the server keeps the app's keys (#143)", async () => {
+    await start("/?q=neu&fav=1");
+    const menu = await menuOf("First");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.updateView }));
+    await waitFor(() => expect(sent("PATCH")).toHaveLength(1));
+    expect(pin(sent("PATCH")[0])).toEqual({
+      method: "PATCH",
+      path: "/api/saved-views/v1",
+      body: { paperlessGo: { v: 1, q: "neu", tag: [], correspondent: [], type: [], inbox: null, favorite: true, sort: "", order: "", everyone: false } },
+    });
+    expect(Object.keys(sent("PATCH")[0]!.body!)).toEqual(["paperlessGo"]);
+    expect(await screen.findByText(t.viewUpdated("First"))).toBeTruthy();
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(1);
+  });
+
+  it("offers no update while the list is unfiltered, with the hint", async () => {
+    await start();
+    const menu = await menuOf("First");
+    const item = menu.getByRole("menuitem", { name: t.updateView });
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    // The hint is the item's description (Carbon's MenuItem has no text slot for it).
+    expect(document.getElementById(item.getAttribute("aria-describedby")!)?.textContent).toBe(t.updateViewHint);
+    fireEvent.click(item);
+    expect(sent("PATCH")).toHaveLength(0);
+  });
+
+  it("moves a view down and up by swapping sort indexes, one PATCH after the other, and not past the ends", async () => {
+    await start();
+    let menu = await menuOf("First");
+    expect(menu.getByRole("menuitem", { name: t.moveViewUp }).getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.moveViewDown }));
+    await waitFor(() => expect(sent("PATCH")).toHaveLength(2));
+    expect(sent("PATCH").map(pin)).toEqual([
+      { method: "PATCH", path: "/api/saved-views/v1", body: { sortIndex: 8 } },
+      { method: "PATCH", path: "/api/saved-views/v2", body: { sortIndex: 3 } },
+    ]);
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    menu = await menuOf("Second");
+    expect(menu.getByRole("menuitem", { name: t.moveViewDown }).getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.moveViewUp }));
+    await waitFor(() => expect(sent("PATCH")).toHaveLength(4));
+    expect(sent("PATCH").slice(2).map(pin)).toEqual([
+      { method: "PATCH", path: "/api/saved-views/v2", body: { sortIndex: 3 } },
+      { method: "PATCH", path: "/api/saved-views/v1", body: { sortIndex: 8 } },
+    ]);
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(4);
+  });
+
+  it("stops moving after a failed PATCH and says why", async () => {
+    server.savedView = () => ({ status: 500, body: { error: "boom" } });
+    await start();
+    const menu = await menuOf("First");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.moveViewDown }));
+    expect((await screen.findByTestId("notice")).textContent).toContain(t.failed("boom"));
+    expect(sent("PATCH").map(pin)).toEqual([{ method: "PATCH", path: "/api/saved-views/v1", body: { sortIndex: 8 } }]);
+  });
+
+  it("deletes a view only after asking: DELETE without a body; Cancel and Escape send nothing", async () => {
     await start();
     let menu = await menuOf("Second");
-    fireEvent.click(menu.getByRole("button", { name: t.deleteView }));
-    let ask = within(screen.getByRole("dialog", { name: t.deleteViewTitle("Second") }));
+    fireEvent.click(menu.getByRole("menuitem", { name: t.deleteView }));
+    let ask = within(await screen.findByRole("dialog", { name: t.deleteViewTitle("Second") }));
     expect(ask.getByText(t.deleteViewText)).toBeTruthy();
     fireEvent.click(ask.getByRole("button", { name: t.cancel }));
-    expect(screen.queryByRole("dialog", { name: t.deleteViewTitle("Second") })).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.deleteViewTitle("Second") })).toBeNull());
     expect(sent("DELETE")).toHaveLength(0);
+    // The focus is back on the view's menu button.
+    expect(document.activeElement).toBe(column().getByRole("button", { name: t.viewActions("Second") }));
 
     menu = await menuOf("Second");
-    fireEvent.click(menu.getByRole("button", { name: t.deleteView }));
-    ask = within(screen.getByRole("dialog", { name: t.deleteViewTitle("Second") }));
+    fireEvent.click(menu.getByRole("menuitem", { name: t.deleteView }));
+    ask = within(await screen.findByRole("dialog", { name: t.deleteViewTitle("Second") }));
+    fireEvent.keyDown(ask.getByRole("button", { name: t.cancel }), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.deleteViewTitle("Second") })).toBeNull());
+    expect(sent("DELETE")).toHaveLength(0);
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(0);
+
+    menu = await menuOf("Second");
+    fireEvent.click(menu.getByRole("menuitem", { name: t.deleteView }));
+    ask = within(await screen.findByRole("dialog", { name: t.deleteViewTitle("Second") }));
     server.savedViews = server.savedViews.slice(0, 1);
     fireEvent.click(ask.getByRole("button", { name: t.deleteView }));
     await waitFor(() => expect(sent("DELETE")).toHaveLength(1));
-    expect(sent("DELETE")[0]!.path).toBe("/api/saved-views/v2");
+    expect(pin(sent("DELETE")[0])).toEqual({ method: "DELETE", path: "/api/saved-views/v2", body: undefined });
     expect(await screen.findByText(t.viewDeleted("Second"))).toBeTruthy();
-    await waitFor(() => expect(sidebar().queryByRole("button", { name: "Second" })).toBeNull());
+    await waitFor(() => expect(column().queryByRole("button", { name: "Second" })).toBeNull());
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(1);
   });
 
   it("says when the view is gone and loads the views again", async () => {
@@ -245,8 +339,43 @@ describe("a view's menu", () => {
     await start();
     const menu = await menuOf("First");
     const loads = viewLoads();
-    fireEvent.click(menu.getByRole("button", { name: t.moveViewDown }));
-    expect((await menu.findByRole("alert")).textContent).toBe(t.viewGone);
+    fireEvent.click(menu.getByRole("menuitem", { name: t.moveViewDown }));
+    expect((await screen.findByTestId("notice")).textContent).toContain(t.viewGone);
     await waitFor(() => expect(viewLoads()).toBe(loads + 1));
+    // Inside a modal the message shows there, and the views are loaded again as well.
+    fireEvent.click((await menuOf("First")).getByRole("menuitem", { name: t.deleteView }));
+    const ask = within(await screen.findByRole("dialog", { name: t.deleteViewTitle("First") }));
+    fireEvent.click(ask.getByRole("button", { name: t.deleteView }));
+    expect((await findAlert()).textContent).toContain(t.viewGone);
+    expect(screen.getByRole("dialog", { name: t.deleteViewTitle("First") })).toBeTruthy();
+    await waitFor(() => expect(viewLoads()).toBe(loads + 2));
+  });
+});
+
+describe("the menu in German", () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it("names the menu, its items and the modals in German, nothing in English", async () => {
+    vi.resetModules();
+    vi.stubGlobal("navigator", { ...navigator, languages: ["de-DE", "en-US"], language: "de-DE" });
+    const { App: GermanApp } = await import("./App");
+    const { messagesFor } = await import("./i18n");
+    const de = messagesFor("de");
+    ({ server, requests } = stubServer());
+    server.documents = () => page([]);
+    server.savedViews = [savedView("v1", "Steuern", { filter: web({ q: "Steuer" }) })];
+    render(<GermanApp />);
+    fireEvent.click(await screen.findByRole("button", { name: de.viewActions("Steuern") }));
+    const menu = within(await screen.findByRole("menu", { name: de.viewActions("Steuern") }));
+    expect(menu.getAllByRole("menuitem").map((m) => m.textContent)).toEqual([de.renameView, de.updateView, de.moveViewUp, de.moveViewDown, de.deleteView]);
+    fireEvent.click(menu.getByRole("menuitem", { name: de.deleteView }));
+    const ask = within(await screen.findByRole("dialog", { name: de.deleteViewTitle("Steuern") }));
+    expect(ask.getByRole("button", { name: de.cancel })).toBeTruthy();
+    expect(ask.getByRole("button", { name: de.deleteView })).toBeTruthy();
+    expect(ask.getByRole("button", { name: de.carbon.closeModal })).toBeTruthy();
+    const html = document.body.innerHTML;
+    for (const s of ["Options", "Rename", "Move up", "Delete", "Cancel", ">Close<", "Focus sentinel", ">danger<"]) expect(html, s).not.toContain(s);
   });
 });

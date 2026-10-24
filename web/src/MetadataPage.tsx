@@ -3,7 +3,7 @@ import { ApiError, metadataEditApi, type Metadata, type MetadataKind, type Named
 import { sortByName } from "./collate";
 import { t } from "./i18n";
 import { Sheet } from "./Sheet";
-import type { Loaded } from "./Sidebar";
+import type { Loaded } from "./NavColumn";
 import { button, input, primary } from "./styles";
 import { buildTagTree, chipInk, flatTagTree, type TagNode } from "./tagTree";
 import type { Filter } from "./urlState";
@@ -88,7 +88,7 @@ export function MetadataPage({ metadata, userId, onChanged, open }: Props) {
 
   return (
     <div className="legacy mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
-      <h2 className="text-lg font-semibold">{t.manageMetadata}</h2>
+      <h2 tabIndex={-1} className="text-lg font-semibold outline-none">{t.manageMetadata}</h2>
       <div role="tablist" aria-label={t.manageMetadata} className="flex gap-1 border-b border-line">
         {tabs.map(([k, label]) => (
           <button

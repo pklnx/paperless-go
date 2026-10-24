@@ -1,20 +1,15 @@
-import { useId, useState, type FormEvent } from "react";
+import { useId, useRef, useState, type FormEvent } from "react";
+import { ContainedList, ContainedListItem, FeatureFlags, InlineNotification, MenuItem, MenuItemDivider, OverflowMenu, TextInput } from "@carbon/react";
 import { ApiError, savedViewsApi, type SavedView } from "./api";
+import { AppModal, DangerModal } from "./DangerModal";
 import { t } from "./i18n";
 import { applyView, canSave, moveView, paramsOf, showsView, shownViews, viewKey } from "./savedViews";
 import { Sheet } from "./Sheet";
-import { button, danger, input, primary } from "./styles";
+import { button, input, primary } from "./styles";
 import type { Notify } from "./Toast";
 import type { ViewState } from "./urlState";
 
 const errorText = (err: unknown) => (err instanceof ApiError && err.status === 404 ? t.viewGone : t.failed(err instanceof Error ? err.message : String(err)));
-
-const item = "flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm pointer-coarse:min-h-11";
-const active = "bg-accent-soft font-semibold text-accent-soft-ink";
-const idle = "hover:bg-surface-hover";
-const section = "px-2 pt-2 text-xs font-semibold tracking-wide text-ink-muted uppercase";
-const menuButton =
-  "relative flex size-6 shrink-0 items-center justify-center rounded text-ink-muted hover:bg-surface-hover hover:text-ink pointer-coarse:after:absolute pointer-coarse:after:-inset-2.5";
 
 interface ListProps {
   /** The caller's views from the server, in their order; null until loaded. */
@@ -31,176 +26,205 @@ interface ListProps {
 }
 
 /**
- * The sidebar's "Saved views": the views the web can open, in their manual
- * order. A click opens a view; its menu renames it, sets it to what the
- * list shows now, moves it up or down, or deletes it (asked first).
+ * The navigation column's "Saved views": the views the web can open, in
+ * their manual order. A click opens a view; its menu renames it, sets it to
+ * what the list shows now, moves it up or down, or deletes it (asked first).
  */
 export function SavedViewList({ views, error, state, admin, open, reload, notify }: ListProps) {
-  const [menu, setMenu] = useState<SavedView | null>(null);
   const shown = shownViews(views ?? []);
   if (error && !views) {
     return (
-      <p role="alert" className="px-2 text-sm text-danger">
+      <p role="alert" className="nav-browse__note app-text-error">
         {t.loadViewsFailed(error)}
       </p>
     );
   }
   if (shown.length === 0) return null;
-  const index = menu ? shown.findIndex((s) => s.view.id === menu.id) : -1;
+  const done = (text: string) => {
+    reload();
+    if (text) notify?.({ text });
+  };
   return (
-    <div>
-      <h2 className={section}>{t.savedViews}</h2>
-      <ul aria-label={t.savedViews} className="mt-1 flex flex-col gap-0.5">
-        {shown.map(({ view, params }) => {
+    // The OverflowMenu of Carbon v12 (on Menu): the older one adds two tab
+    // stops named "Focus sentinel" to every open menu.
+    <FeatureFlags enableV12Overflowmenu>
+      <ContainedList label={t.savedViews} kind="disclosed" size="sm" className="nav-views">
+        {shown.map(({ view, params }, index) => {
           const on = showsView(state, view.id, params, admin);
           return (
-            <li key={view.id} className="flex items-center gap-0.5">
-              <button type="button" className={`${item} ${on ? active : idle}`} aria-current={on ? "page" : undefined} title={view.name} onClick={() => open(applyView(view.id, params, admin))}>
-                <span className="truncate">{view.name}</span>
-              </button>
-              <button type="button" className={menuButton} aria-label={t.viewActions(view.name)} title={t.viewActions(view.name)} onClick={() => setMenu(view)}>
-                <span aria-hidden>⋯</span>
-              </button>
-            </li>
+            <ContainedListItem
+              key={view.id}
+              className={on ? "nav-views__item--current" : undefined}
+              aria-current={on ? "page" : undefined}
+              onClick={() => open(applyView(view.id, params, admin))}
+              action={
+                <ViewMenu
+                  view={view}
+                  shown={shown.map((s) => s.view)}
+                  index={index}
+                  state={state}
+                  done={done}
+                  gone={reload}
+                  notify={notify}
+                />
+              }
+            >
+              {view.name}
+            </ContainedListItem>
           );
         })}
-      </ul>
-      {menu && index >= 0 && (
-        <ViewMenu
-          view={menu}
-          shown={shown.map((s) => s.view)}
-          index={index}
-          state={state}
-          close={() => setMenu(null)}
-          done={(text) => {
-            setMenu(null);
-            reload();
-            if (text) notify?.({ text });
-          }}
-          gone={reload}
-        />
-      )}
-    </div>
+      </ContainedList>
+    </FeatureFlags>
   );
 }
 
-type Step = "menu" | "rename" | "delete";
+type Ask = "rename" | "delete";
 
-/** One view's actions, in a sheet. */
+/**
+ * One view's actions: an OverflowMenu with rename (a modal with the name),
+ * update to the current list, move up and down, and delete (a danger
+ * modal). Every request is the same as before the menu was Carbon's: a
+ * rename sends { name }, an update { paperlessGo } only (the server keeps
+ * the app's keys), a move { sortIndex } per affected view, one after the
+ * other, and a delete nothing.
+ */
 function ViewMenu({
   view,
   shown,
   index,
   state,
-  close,
   done,
   gone,
+  notify,
 }: {
   view: SavedView;
   shown: SavedView[];
   index: number;
   state: ViewState;
-  close: () => void;
   done: (notice: string) => void;
   gone: () => void;
+  notify?: Notify;
 }) {
-  const [step, setStep] = useState<Step>("menu");
+  const [ask, setAsk] = useState<Ask | null>(null);
   const [name, setName] = useState(view.name);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const nameId = useId();
-  const run = (work: Promise<unknown>, notice: string) => {
+  const hintId = `${nameId}-hint`;
+  // The menu's trigger: where the focus goes when a modal closes, as the
+  // menu item that opened it is gone by then.
+  const menu = useRef<HTMLDivElement>(null);
+  const returnFocus = () => menu.current?.querySelector<HTMLButtonElement>("button");
+  const close = () => {
+    setAsk(null);
+    setError("");
+  };
+  /** Runs one request; its failure shows in the open modal, else as a notice. A 404 reloads the views. */
+  const run = (work: Promise<unknown>, notice: string, inModal: boolean) => {
     setBusy(true);
     setError("");
     work.then(
-      () => done(notice),
+      () => {
+        setBusy(false);
+        setAsk(null);
+        done(notice);
+      },
       (err: unknown) => {
         setBusy(false);
-        setError(errorText(err));
+        const text = errorText(err);
+        if (inModal) setError(text);
+        else notify?.({ text, error: true });
         if (err instanceof ApiError && err.status === 404) gone();
       },
     );
   };
-  const rename = (e: FormEvent) => {
-    e.preventDefault();
+  const rename = (e?: FormEvent) => {
+    e?.preventDefault();
     const n = name.trim();
-    if (!n) return;
-    run(savedViewsApi.patch(view.id, { name: n }), "");
+    if (!n || busy) return;
+    run(savedViewsApi.patch(view.id, { name: n }), "", true);
   };
   const move = (dir: -1 | 1) => {
     // One after the other: a failure stops before the next.
     run(
       moveView(shown, index, dir).reduce<Promise<unknown>>((p, m) => p.then(() => savedViewsApi.patch(m.id, { sortIndex: m.sortIndex })), Promise.resolve()),
       "",
+      false,
     );
   };
-  const title = step === "delete" ? t.deleteViewTitle(view.name) : step === "rename" ? t.renameView : view.name;
+  const updatable = canSave(state);
   return (
-    <Sheet open onClose={close} title={title}>
-      {step === "menu" && (
-        <div className="flex flex-col gap-2">
-          <button type="button" className={button} disabled={busy} onClick={() => setStep("rename")}>
-            {t.renameView}
-          </button>
-          <button
-            type="button"
-            className={button}
-            disabled={busy || !canSave(state)}
-            title={canSave(state) ? undefined : t.updateViewHint}
-            // Only the web's part: the server keeps the app's keys as they are now, not as loaded.
-            onClick={() => run(savedViewsApi.patch(view.id, { paperlessGo: { ...paramsOf(state) } }), t.viewUpdated(view.name))}
-          >
-            {t.updateView}
-          </button>
-          {!canSave(state) && <p className="text-xs text-ink-muted">{t.updateViewHint}</p>}
-          <div className="flex gap-2">
-            <button type="button" className={`${button} flex-1`} disabled={busy || index === 0} onClick={() => move(-1)}>
-              {t.moveViewUp}
-            </button>
-            <button type="button" className={`${button} flex-1`} disabled={busy || index === shown.length - 1} onClick={() => move(1)}>
-              {t.moveViewDown}
-            </button>
+    <>
+      <OverflowMenu ref={menu} label={t.viewActions(view.name)} size="sm" menuAlignment="bottom-end" tooltipAlignment="left">
+        <MenuItem
+          label={t.renameView}
+          onClick={() => {
+            setName(view.name);
+            setAsk("rename");
+          }}
+        />
+        <MenuItem
+          label={t.updateView}
+          // Only with a search, a filter or a sort to save; the hint (below the
+          // menu, read with the item) says so. Carbon's MenuItem has no text of
+          // its own for it and sets the item's title itself.
+          disabled={!updatable}
+          aria-describedby={updatable ? undefined : hintId}
+          // Only the web's part: the server keeps the app's keys as they are now, not as loaded.
+          onClick={() => run(savedViewsApi.patch(view.id, { paperlessGo: { ...paramsOf(state) } }), t.viewUpdated(view.name), false)}
+        />
+        <MenuItem label={t.moveViewUp} disabled={index === 0} onClick={() => move(-1)} />
+        <MenuItem label={t.moveViewDown} disabled={index === shown.length - 1} onClick={() => move(1)} />
+        <MenuItemDivider />
+        <MenuItem label={t.deleteView} kind="danger" onClick={() => setAsk("delete")} />
+      </OverflowMenu>
+      {!updatable && (
+        <span id={hintId} className="cds--visually-hidden">
+          {t.updateViewHint}
+        </span>
+      )}
+      {ask === "rename" && (
+        <AppModal
+          size="sm"
+          modalHeading={t.renameView}
+          primaryButtonText={t.save}
+          secondaryButtonText={t.cancel}
+          primaryButtonDisabled={busy || !name.trim()}
+          preventCloseOnClickOutside
+          returnFocus={returnFocus}
+          onRequestClose={() => {
+            if (!busy) close();
+          }}
+          onRequestSubmit={() => rename()}
+        >
+          <form className="modal-stack" onSubmit={rename} noValidate>
+            <TextInput id={nameId} data-modal-primary-focus="" labelText={t.viewName} value={name} maxLength={128} onChange={(e) => setName(e.target.value)} />
+            {error && <InlineNotification className="notification--full" kind="error" lowContrast hideCloseButton role="alert" statusIconDescription={t.carbon.status.error} subtitle={error} />}
+          </form>
+        </AppModal>
+      )}
+      {ask === "delete" && (
+        <DangerModal
+          size="sm"
+          modalHeading={t.deleteViewTitle(view.name)}
+          primaryButtonText={t.deleteView}
+          secondaryButtonText={t.cancel}
+          primaryButtonDisabled={busy}
+          returnFocus={returnFocus}
+          onRequestClose={() => {
+            if (!busy) close();
+          }}
+          onRequestSubmit={() => {
+            if (!busy) run(savedViewsApi.remove(view.id), t.viewDeleted(view.name), true);
+          }}
+        >
+          <div className="modal-stack">
+            <p>{t.deleteViewText}</p>
+            {error && <InlineNotification className="notification--full" kind="error" lowContrast hideCloseButton role="alert" statusIconDescription={t.carbon.status.error} subtitle={error} />}
           </div>
-          <button type="button" className={button} disabled={busy} onClick={() => setStep("delete")}>
-            {t.deleteView}
-          </button>
-        </div>
+        </DangerModal>
       )}
-      {step === "rename" && (
-        <form className="flex flex-col gap-2" onSubmit={rename}>
-          <label htmlFor={nameId} className="text-sm font-medium">
-            {t.viewName}
-          </label>
-          <input id={nameId} className={input} value={name} maxLength={128} autoFocus onChange={(e) => setName(e.target.value)} />
-          <div className="flex justify-end gap-2">
-            <button type="button" className={button} onClick={close}>
-              {t.cancel}
-            </button>
-            <button type="submit" className={primary} disabled={busy || !name.trim()}>
-              {t.save}
-            </button>
-          </div>
-        </form>
-      )}
-      {step === "delete" && (
-        <>
-          <p className="text-sm">{t.deleteViewText}</p>
-          <div className="flex justify-end gap-2">
-            <button type="button" className={button} onClick={close}>
-              {t.cancel}
-            </button>
-            <button type="button" className={danger} disabled={busy} onClick={() => run(savedViewsApi.remove(view.id), t.viewDeleted(view.name))}>
-              {t.deleteView}
-            </button>
-          </div>
-        </>
-      )}
-      {error && (
-        <p role="alert" className="text-sm text-danger">
-          {error}
-        </p>
-      )}
-    </Sheet>
+    </>
   );
 }
 

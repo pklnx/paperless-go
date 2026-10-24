@@ -64,4 +64,18 @@ describe("dialogOpen", () => {
     document.body.innerHTML = '<dialog class="sheet" open></dialog>';
     expect(dialogOpen()).toBe(true);
   });
+
+  it("sees the SideNav overlay and the column overlay, not the closed ones or the rail expanded on hover", () => {
+    // Below lg: Carbon's SideNav closed, then open.
+    document.body.innerHTML = '<nav class="cds--side-nav cds--side-nav__navigation"></nav><aside class="nav-column"></aside>';
+    expect(dialogOpen()).toBe(false);
+    document.body.innerHTML = '<nav class="cds--side-nav cds--side-nav__navigation cds--side-nav--expanded"></nav>';
+    expect(dialogOpen()).toBe(true);
+    // From lg: the rail, expanded by hover or focus, is no overlay.
+    document.body.innerHTML = '<nav class="cds--side-nav cds--side-nav--rail cds--side-nav--expanded"></nav>';
+    expect(dialogOpen()).toBe(false);
+    // The column as an overlay (App), not as the page's column.
+    document.body.innerHTML = '<aside class="nav-column nav-column--overlay" role="dialog"></aside>';
+    expect(dialogOpen()).toBe(true);
+  });
 });
