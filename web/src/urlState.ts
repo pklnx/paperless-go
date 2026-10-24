@@ -161,21 +161,67 @@ export function documentQuery(s: ViewState, ownOnly: boolean): DocumentQuery {
  * Asked before the state changes: by update, and on the back and forward
  * buttons, with the next state; by confirmLeave (logging out) with null,
  * leaving the app. False keeps the current state. The open document's
- * form sets one while it has unsaved changes.
+ * form sets one while it has unsaved changes. A boolean answers at once;
+ * a Promise asks the user (the "Discard changes?" modal) and answers
+ * when they do.
  */
-export type NavigationGuard = (next: ViewState | null) => boolean;
+export type NavigationGuard = (next: ViewState | null) => boolean | Promise<boolean>;
 let guard: NavigationGuard | null = null;
 
-/** Asks the guard about leaving the app (logging out): true when there is none or it agrees. */
-export function confirmLeave(): boolean {
-  return !guard || guard(null);
+/**
+ * The question lock: the guard's open question, while one is. A second
+ * navigation is refused meanwhile, and removing the guard settles the
+ * question as "stay" (false), so an open question always settles.
+ */
+let pending: { settle: (ok: boolean) => void } | null = null;
+
+/**
+ * Asks the guard about next. A boolean comes back as it is; a Promise is
+ * wrapped so that it holds the lock until it settles, by the guard's
+ * answer or by the guard's removal (false). Not called while a question
+ * is open: the callers refuse first.
+ */
+function ask(next: ViewState | null): boolean | Promise<boolean> {
+  if (!guard) return true;
+  const answer = guard(next);
+  if (typeof answer === "boolean") return answer;
+  return new Promise<boolean>((resolve) => {
+    const question = {
+      settle: (ok: boolean) => {
+        if (pending === question) pending = null;
+        resolve(ok);
+      },
+    };
+    pending = question;
+    answer.then(question.settle, () => question.settle(false));
+  });
 }
 
-/** Sets the guard (null removes it); returns a function that removes this guard again. */
+/**
+ * Asks the guard about leaving the app (logging out): true when there is
+ * none or it agrees; false while a question is open already.
+ */
+export function confirmLeave(): Promise<boolean> {
+  if (pending) return Promise.resolve(false);
+  return Promise.resolve(ask(null));
+}
+
+/**
+ * Sets the guard (null removes it); returns a function that removes this
+ * guard again. Either settles the open question, if any, as "stay", and
+ * forgets a pending skip of the guard (skipUrl).
+ */
 export function setNavigationGuard(g: NavigationGuard | null): () => void {
+  const settle = () => {
+    pending?.settle(false);
+    skipUrl = null;
+  };
   guard = g;
+  settle();
   return () => {
-    if (guard === g) guard = null;
+    if (guard !== g) return;
+    guard = null;
+    settle();
   };
 }
 
@@ -183,17 +229,51 @@ const listeners = new Set<() => void>();
 const currentUrl = () => window.location.pathname + window.location.search;
 /** The URL the listeners last saw: where a refused back or forward returns to. */
 let shownUrl = "";
+/**
+ * The URL the next popstate shows without asking the guard: set once a
+ * refused-then-allowed back or forward steps back to it (one shot; only
+ * for that URL).
+ */
+let skipUrl: string | null = null;
+
+function show() {
+  shownUrl = currentUrl();
+  listeners.forEach((fn) => fn());
+}
 
 // One popstate listener for all subscribers, so the guard runs once and
 // before any of them sees the new state. A refused back or forward puts
-// the shown URL back as a new entry (popstate cannot be cancelled).
+// the shown URL back as a new entry (popstate cannot be cancelled). A
+// question does the same at once, and on "yes" steps back to the target
+// with the guard skipped once, so the history has no duplicate entry and
+// the next Back works. While a question is open the shown URL only comes
+// back; nothing is asked again.
 function onPopState() {
-  if (guard && !guard(parseState(window.location.search))) {
+  if (skipUrl !== null) {
+    const expected = skipUrl;
+    skipUrl = null;
+    if (currentUrl() === expected) {
+      show();
+      return;
+    }
+  }
+  if (pending) {
     window.history.pushState(null, "", shownUrl);
     return;
   }
-  shownUrl = currentUrl();
-  listeners.forEach((fn) => fn());
+  const answer = ask(parseState(window.location.search));
+  if (answer === true) {
+    show();
+    return;
+  }
+  const target = currentUrl();
+  window.history.pushState(null, "", shownUrl);
+  if (answer === false) return;
+  void answer.then((ok) => {
+    if (!ok) return;
+    skipUrl = target;
+    window.history.back();
+  });
 }
 
 function subscribe(fn: () => void) {
@@ -214,6 +294,9 @@ export type UpdateState = (patch: Partial<ViewState>, opts?: { replace?: boolean
 /**
  * The state of the URL, and a function that changes it: a new history
  * entry unless replace. The navigation guard may refuse the change.
+ * Without a guard, or with one that answers at once, the history has
+ * changed when update returns; a guard that asks defers the change until
+ * the answer, and a second update while the question is open is refused.
  */
 export function useViewState(): [ViewState, UpdateState] {
   const search = useSyncExternalStore(subscribe, getSearch);
@@ -222,12 +305,21 @@ export function useViewState(): [ViewState, UpdateState] {
     const nextState = { ...parseState(window.location.search), ...patch };
     const next = formatState(nextState);
     if (next === window.location.search) return;
-    if (guard && !guard(nextState)) return;
-    const url = window.location.pathname + next;
-    if (opts?.replace) window.history.replaceState(null, "", url);
-    else window.history.pushState(null, "", url);
-    shownUrl = url;
-    listeners.forEach((fn) => fn());
+    if (pending) return;
+    const apply = () => {
+      const url = window.location.pathname + next;
+      if (opts?.replace) window.history.replaceState(null, "", url);
+      else window.history.pushState(null, "", url);
+      shownUrl = url;
+      listeners.forEach((fn) => fn());
+    };
+    const answer = ask(nextState);
+    if (answer === true) apply();
+    else if (answer !== false) {
+      void answer.then((ok) => {
+        if (ok) apply();
+      });
+    }
   }, []);
   return [state, update];
 }

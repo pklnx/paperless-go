@@ -1,7 +1,7 @@
 import { devices } from "@playwright/test";
 import { seed } from "./demo";
 import { expect, test } from "./fixtures";
-import { browseButton, browseColumn, bulkBar, closeDocument, collapseTag, detail, documentLink, documentList, expandTag, menuButton, openBrowse, openNavigation, pageEntry, selectBox, shellNav, tagEntry } from "./ui";
+import { browseButton, browseColumn, bulkBar, closeDocument, collapseTag, detail, discardChanges, discardQuestion, documentLink, documentList, expandTag, field, keepEditing, menuButton, openBrowse, openNavigation, pageEntry, selectBox, shellNav, tagEntry } from "./ui";
 
 // A phone with a touch screen (below Carbon's lg): no rail and no column;
 // the SideNav is an overlay behind the menu button, the column (saved views,
@@ -95,6 +95,30 @@ test("a document opens below the header and Close returns to the list", async ({
   await closeDocument(page);
   await expect(doc).toHaveCount(0);
   await expect(documentLink(page, seed.incomeTax.title)).toBeInViewport();
+});
+
+test("a question opened from the navigation keeps the focus on Keep editing, and Keep editing lands on the heading", async ({ page }) => {
+  await page.goto("/");
+  await documentLink(page, seed.incomeTax.title).click();
+  await expect(detail(page, seed.incomeTax.title)).toBeVisible();
+  await field(page, "Title").fill("Not saved");
+  // A list chosen from the SideNav overlay: the overlay closes and would return the focus to the
+  // menu button, outside the question; the question keeps it on its safe button.
+  const nav = await openNavigation(page);
+  await nav.getByRole("link", { name: /^Inbox/ }).click();
+  await expect(discardQuestion(page)).toBeVisible();
+  await expect(discardQuestion(page).getByRole("button", { name: "Keep editing", exact: true })).toBeFocused();
+  await expectNavigationClosed(page);
+  await expect(page).not.toHaveURL(/[?&]inbox=1/);
+  // The link that asked is hidden in the closed SideNav: the focus goes to the detail's heading.
+  await keepEditing(page);
+  await expect(discardQuestion(page)).toHaveCount(0);
+  await expect(page.getByTestId("document-detail").getByRole("heading", { level: 2 })).toBeFocused();
+  await expect(field(page, "Title")).toHaveValue("Not saved");
+  // Nothing unsaved is left behind.
+  await closeDocument(page);
+  await discardChanges(page);
+  await expect(page).not.toHaveURL(/[?&]doc=/);
 });
 
 test("the upload button is reachable and the page does not scroll sideways or under the header", async ({ page }) => {

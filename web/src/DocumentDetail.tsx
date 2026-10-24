@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type TouchEvent } from "react";
 import { ApiError, documentsApi, metadataApi, type DocumentDetail as Doc, type DocumentSummary, type Metadata, type MetadataKind, type User } from "./api";
+import { DangerModal } from "./DangerModal";
 import { documentName, ProcessingStatus } from "./DocumentParts";
 import { dialogOpen } from "./dialogs";
 import { formFrom, isDirty, patchFrom, rebaseForm, type DocumentForm, type InvalidField } from "./documentForm";
@@ -158,16 +159,38 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
     return () => ctl.abort();
   }, [owner, user.admin, meta?.owner]);
 
+  // The "Discard changes?" question: the modal is shown while asking is
+  // set, and question answers it (once; the modal unmounts with it). One
+  // question at a time: the guard answers "stay" without asking while one
+  // is open (from Delete, or from the guard itself).
+  const [asking, setAsking] = useState(false);
+  const question = useRef<((discard: boolean) => void) | null>(null);
+  const askDiscard = () =>
+    new Promise<boolean>((resolve) => {
+      question.current = (discard) => {
+        question.current = null;
+        setAsking(false);
+        resolve(discard);
+      };
+      setAsking(true);
+    });
+  const answer = (discard: boolean) => question.current?.(discard);
+
   // Leaving with unsaved changes: in the app (the URL guard), and the page itself.
-  useEffect(
-    () =>
-      setNavigationGuard((next) => {
-        // null: leaving the app (logging out).
-        if (next && next.doc === id && next.view === "") return true;
-        return !dirtyNow() || window.confirm(t.unsavedChanges);
-      }),
-    [id],
-  );
+  useEffect(() => {
+    const remove = setNavigationGuard((next) => {
+      // null: leaving the app (logging out).
+      if (next && next.doc === id && next.view === "") return true;
+      if (!dirtyNow()) return true;
+      if (question.current) return false;
+      return askDiscard();
+    });
+    return () => {
+      // Another document, or unmounted: an open question settles as "stay".
+      remove();
+      answer(false);
+    };
+  }, [id]);
   useEffect(() => {
     if (!dirty) return;
     const onUnload = (e: BeforeUnloadEvent) => {
@@ -405,12 +428,22 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
 
   // Delete: to the trash at once, without a question (#12, decision 4);
   // the list offers Undo. Unsaved changes are asked about first, as for
-  // leaving: they would be refused in the trash anyway.
+  // leaving (the same modal): they would be refused in the trash anyway.
   const moveToTrash = () => {
-    if (!doc || saving || trashBusy) return;
-    if (dirtyNow() && !window.confirm(t.unsavedChanges)) return;
+    if (!doc || saving || trashBusy || question.current) return;
+    if (dirtyNow()) {
+      const mine = visit.current;
+      void askDiscard().then((discard) => {
+        if (discard && visit.current === mine) trash();
+      });
+      return;
+    }
+    trash();
+  };
+  const trash = () => {
+    const d = docRef.current;
+    if (!d) return;
     const mine = visit.current;
-    const d = doc;
     setTrashBusy(true);
     setGeneral("");
     documentsApi.trash(d.id).then(
@@ -745,6 +778,22 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
               <FileFacts doc={doc} onChange={(d) => setDoc((x) => (x ? { ...x, processing: d.processing } : x))} />
             </div>
           </div>
+        )}
+        {asking && (
+          <DangerModal
+            size="sm"
+            modalHeading={t.discardChangesTitle}
+            primaryButtonText={t.discardChanges}
+            secondaryButtonText={t.keepEditing}
+            // Escape and the close button mean "Keep editing".
+            onRequestClose={() => answer(false)}
+            onSecondarySubmit={() => answer(false)}
+            onRequestSubmit={() => answer(true)}
+            // A question opened by Back or Forward has no opener: the focus goes to the heading.
+            returnFocus={() => heading.current}
+          >
+            <p>{t.unsavedChanges}</p>
+          </DangerModal>
         )}
         <PurgeConfirm
           open={purgeAsk !== null && doc !== null}
