@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App } from "./App";
 import { firstAdminCommand } from "./Auth";
+import { UNAUTHORIZED_EVENT } from "./api";
 import { lg } from "./breakpoints";
 import { t } from "./i18n";
 import { dialogOpen } from "./dialogs";
@@ -628,5 +629,79 @@ describe("the navigation in German", () => {
     expect(screen.getByRole("switch", { name: de.everyonesDocuments })).toBeTruthy();
     const html = document.body.innerHTML;
     for (const s of ["Open menu", "Browse", "All documents", "Favorites", "Log out", "Profile", "Everyone", ">Off<", ">On<"]) expect(html, s).not.toContain(s);
+  });
+});
+
+describe("the unsaved-changes question (#150, part 8)", () => {
+  /** A text document (no preview to load) that the list shows and the detail opens. */
+  const letter = { ...doc("d1", "Rechnung", { originalMime: "text/plain", originalFileName: "d1.txt" }), modifiedAt: "2026-10-21T10:00:00Z", notes: "", archiveSerialNumber: null, pageCount: 0, archiveSize: null, processingNote: "", processing: { state: "done", attempts: 1, maxAttempts: 3 } };
+  /** A server with the document; session says whether alice is logged in, and the test changes it. */
+  function serverWith(session: () => Reply) {
+    stubServer((method, url) => {
+      const path = url.split("?")[0]!;
+      if (path === "/api/session") return method === "DELETE" ? { status: 204 } : session();
+      if (path === "/api/documents") return { status: 200, body: { documents: [letter], maxUploadSize: 1000 } };
+      if (path === "/api/documents/counts") return { status: 200, body: { inbox: 0, favorites: 0, total: 1 } };
+      if (path === "/api/documents/d1") return { status: 200, body: letter };
+      if (path === "/api/tags") return { status: 200, body: { tags: [] } };
+      if (path === "/api/correspondents") return { status: 200, body: { correspondents: [] } };
+      if (path === "/api/document-types") return { status: 200, body: { documentTypes: [] } };
+      if (path === "/api/saved-views") return { status: 200, body: { savedViews: [] } };
+      return { status: 200 };
+    });
+  }
+  const detail = () => within(screen.getByTestId("document-detail"));
+  const question = () => screen.queryByRole("dialog", { name: t.discardChangesTitle });
+  const logouts = () => requests.filter((r) => r.method === "DELETE" && r.url === "/api/session");
+  /** Opens the document and edits its title. */
+  async function openAndEdit() {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "Rechnung" }));
+    const title = await waitFor(() => detail().getByLabelText(t.fieldTitle) as HTMLInputElement);
+    await waitFor(() => expect(title.value).toBe("Rechnung"));
+    fireEvent.change(title, { target: { value: "changed" } });
+    return title;
+  }
+
+  it("asks before logging out with unsaved changes, and Keep editing keeps the session", async () => {
+    serverWith(() => ({ status: 200, body: { user: alice } }));
+    const title = await openAndEdit();
+    fireEvent.click(header().getByRole("button", { name: t.logOut }));
+    const ask = await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    expect(logouts()).toHaveLength(0);
+    fireEvent.click(within(ask).getByRole("button", { name: t.keepEditing }));
+    await waitFor(() => expect(question()).toBeNull());
+    expect(logouts()).toHaveLength(0);
+    expect(title.value).toBe("changed");
+    expect(header().getByText("alice")).toBeTruthy();
+    expect(window.location.search).toBe("?doc=d1");
+  });
+
+  it("shows the login when the session ends while the question is open, and navigation works after the new login", async () => {
+    let session: Reply = { status: 200, body: { user: alice } };
+    serverWith(() => session);
+    await openAndEdit();
+    fireEvent.click(detail().getByRole("button", { name: t.closeDocument }));
+    await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    expect(window.location.search).toBe("?doc=d1");
+    // The session ended: an API answer of 401 tells the gate, which shows the login; the question goes with the detail.
+    session = loggedOut;
+    act(() => {
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    });
+    await screen.findByLabelText(t.userName);
+    expect(question()).toBeNull();
+    expect(window.location.search).toBe("?doc=d1");
+    // Logged in again: the document is open as before, and closing it is not locked by the settled question.
+    session = { status: 200, body: { user: alice } };
+    fireEvent.change(screen.getByLabelText(t.userName), { target: { value: "alice" } });
+    fireEvent.change(screen.getByLabelText(t.fieldPassword, { selector: "input" }), { target: { value: "correct horse battery" } });
+    fireEvent.click(screen.getByRole("button", { name: t.logIn }));
+    await screen.findByTestId("document-detail");
+    await waitFor(() => expect((detail().getByLabelText(t.fieldTitle) as HTMLInputElement).value).toBe("Rechnung"));
+    fireEvent.click(detail().getByRole("button", { name: t.closeDocument }));
+    expect(window.location.search).toBe("");
+    await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
+    expect(question()).toBeNull();
   });
 });

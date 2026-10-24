@@ -4,6 +4,7 @@ import { documentsApi, type DocumentDetail, type NamedRow, type Tag } from "./ap
 import { App } from "./App";
 import { stubXHR } from "./fakeXHR";
 import { t } from "./i18n";
+import { dialogOpen } from "./dialogs";
 import { trashDay } from "./Trash";
 
 // The document detail against a fake server and a fake PDF viewer: what
@@ -210,7 +211,6 @@ beforeEach(() => {
     }
     return json(404, { error: "not found" });
   });
-  vi.stubGlobal("confirm", vi.fn(() => false));
 });
 
 afterEach(() => {
@@ -237,6 +237,16 @@ async function openAt(url: string) {
 }
 
 const titleField = () => detail().getByLabelText(t.fieldTitle) as HTMLInputElement;
+/** The "Discard changes?" question (a Carbon danger modal), if open. */
+const discardQuestion = () => screen.queryByRole("dialog", { name: t.discardChangesTitle });
+const answerQuestion = async (button: string) => {
+  const ask = await screen.findByRole("dialog", { name: t.discardChangesTitle });
+  fireEvent.click(within(ask).getByRole("button", { name: button }));
+};
+/** Answers the open question with "Discard changes". */
+const discard = () => answerQuestion(t.discardChanges);
+/** Answers the open question with "Keep editing". */
+const keepEditing = () => answerQuestion(t.keepEditing);
 
 describe("opening", () => {
   it("opens from the list's title through ?doc=, and Back closes it", async () => {
@@ -350,12 +360,13 @@ describe("editing", () => {
     expect((await detail().findByText(t.invalidTitle)).id).toBe(titleField().getAttribute("aria-describedby"));
 
     // The link opens the other document; the changes are discarded after asking.
-    vi.mocked(window.confirm).mockReturnValue(true);
     patchAnswer = { status: 409, body: { error: "taken", code: "asn_taken", documentId: "d9" } };
     fireEvent.change(detail().getByLabelText(t.fieldASN), { target: { value: "12" } });
     fireEvent.click(detail().getByRole("button", { name: t.save }));
     fireEvent.click(await detail().findByRole("link", { name: t.openThatDocument }));
-    expect(docParam()).toBe("d9");
+    expect(docParam()).toBe("d1");
+    await discard();
+    await waitFor(() => expect(docParam()).toBe("d9"));
     await waitFor(() => expect(titleField().value).toBe("Other"));
   });
 
@@ -436,7 +447,7 @@ describe("Done", () => {
     await waitFor(() => expect(titleField().value).toBe("B"));
     // The inbox list no longer has it; no question about unsaved changes.
     expect(screen.queryByRole("link", { name: "A2" })).toBeNull();
-    expect(window.confirm).not.toHaveBeenCalled();
+    expect(discardQuestion()).toBeNull();
   });
 
   it("outside the inbox: saves without the inbox and closes", async () => {
@@ -481,9 +492,13 @@ describe("navigation", () => {
     await waitFor(() => expect(titleField().value).toBe("A"));
     fireEvent.change(titleField(), { target: { value: "changed" } });
 
-    // Next, refused: stays.
+    // Next: the question, with the text; "Keep editing" stays.
     fireEvent.click(detail().getByRole("button", { name: t.nextDocument }));
-    expect(window.confirm).toHaveBeenCalledWith(t.unsavedChanges);
+    const ask = await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    expect(within(ask).getByText(t.unsavedChanges)).toBeTruthy();
+    expect(docParam()).toBe("d1");
+    await keepEditing();
+    await waitFor(() => expect(discardQuestion()).toBeNull());
     expect(docParam()).toBe("d1");
     expect(titleField().value).toBe("changed");
 
@@ -492,17 +507,22 @@ describe("navigation", () => {
     window.dispatchEvent(unload);
     expect(unload.defaultPrevented).toBe(true);
 
-    // Back, refused: the document's URL comes back.
+    // Back: the document's URL comes back at once, then the question; refused, it stays.
     act(() => window.history.back());
-    await waitFor(() => expect(vi.mocked(window.confirm).mock.calls.length).toBe(2));
-    await waitFor(() => expect(docParam()).toBe("d1"));
+    await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    expect(docParam()).toBe("d1");
+    await keepEditing();
+    await waitFor(() => expect(discardQuestion()).toBeNull());
+    expect(docParam()).toBe("d1");
     expect(titleField().value).toBe("changed");
 
     // Close, accepted: gone without saving.
-    vi.mocked(window.confirm).mockReturnValue(true);
     fireEvent.click(detail().getByRole("button", { name: t.closeDocument }));
-    expect(docParam()).toBeNull();
+    expect(docParam()).toBe("d1");
+    await discard();
+    await waitFor(() => expect(docParam()).toBeNull());
     await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
+    expect(discardQuestion()).toBeNull();
     expect(patches()).toHaveLength(0);
     // Nothing unsaved any more: the page leaves without a question.
     const later = new Event("beforeunload", { cancelable: true });
@@ -517,7 +537,70 @@ describe("navigation", () => {
     await waitFor(() => expect(titleField().value).toBe("A"));
     fireEvent.click(detail().getByRole("button", { name: t.nextDocument }));
     expect(docParam()).toBe("d2");
-    expect(window.confirm).not.toHaveBeenCalled();
+    expect(discardQuestion()).toBeNull();
+  });
+
+  it("Escape means Keep editing: the modal is gone and does not reappear, the document stays open", async () => {
+    serve(doc("d1", "A"), doc("d2", "B"));
+    await openAt("/?doc=d1");
+    fireEvent.change(titleField(), { target: { value: "changed" } });
+    fireEvent.click(detail().getByRole("button", { name: t.nextDocument }));
+    const ask = await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    // The question is a dialog to the detail's key handler: Escape reaches the modal only.
+    expect(dialogOpen()).toBe(true);
+    fireEvent.keyDown(within(ask).getByRole("button", { name: t.keepEditing }), { key: "Escape" });
+    await waitFor(() => expect(discardQuestion()).toBeNull());
+    expect(docParam()).toBe("d1");
+    expect(titleField().value).toBe("changed");
+    expect(screen.getByTestId("document-detail")).toBeTruthy();
+    // No second question: a later render leaves it closed, and the next navigation asks anew.
+    fireEvent.change(titleField(), { target: { value: "changed again" } });
+    expect(discardQuestion()).toBeNull();
+    fireEvent.click(detail().getByRole("button", { name: t.nextDocument }));
+    await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    await discard();
+    await waitFor(() => expect(docParam()).toBe("d2"));
+    await waitFor(() => expect(titleField().value).toBe("B"));
+  });
+
+  it("returns the focus to the detail's heading after a question opened by Back", async () => {
+    serve(doc("d1", "A"), doc("d2", "B"));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "A" }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    fireEvent.change(titleField(), { target: { value: "changed" } });
+    // A Back has no opener: the focus is nowhere in particular.
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    act(() => window.history.back());
+    await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    await keepEditing();
+    await waitFor(() => expect(discardQuestion()).toBeNull());
+    expect(document.activeElement).toBe(detail().getByRole("heading", { level: 2 }));
+    expect(docParam()).toBe("d1");
+  });
+
+  it("asks one question at a time: Back while the Delete question is open stays without a second question", async () => {
+    serve(doc("d1", "A"), doc("d2", "B"));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "A" }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    fireEvent.change(titleField(), { target: { value: "changed" } });
+    fireEvent.click(detail().getByRole("button", { name: t.deleteDocumentLabel("changed") }));
+    await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    act(() => window.history.back());
+    // The document's URL comes back; still the one question.
+    await waitFor(() => expect(docParam()).toBe("d1"));
+    await act(async () => {});
+    expect(screen.getAllByRole("dialog", { name: t.discardChangesTitle })).toHaveLength(1);
+    // Its answer is still the Delete's: the document goes to the trash.
+    await discard();
+    await waitFor(() => expect(requests.filter((r) => r.method === "DELETE").map((r) => r.url)).toEqual(["/api/documents/d1"]));
+    await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
+    // Nothing locked: the next navigation goes through without a question.
+    fireEvent.click(await screen.findByRole("link", { name: "B" }));
+    expect(docParam()).toBe("d2");
+    expect(discardQuestion()).toBeNull();
   });
 });
 
@@ -535,8 +618,8 @@ describe("a save that answers late (#105)", () => {
     const release = holdPatches();
     fireEvent.click(detail().getByRole("button", { name: button }));
     await waitFor(() => expect(patches()).toHaveLength(1));
-    vi.mocked(window.confirm).mockReturnValue(true);
     act(() => window.history.back());
+    await discard();
     await waitFor(() => expect(docParam()).toBe("d2"));
     await waitFor(() => expect(titleField().value).toBe("B"));
     return { calls, release };
@@ -590,8 +673,8 @@ describe("a save that answers late (#105)", () => {
     const release = holdPatches();
     fireEvent.click(detail().getByRole("button", { name: t.done }));
     await waitFor(() => expect(patches()).toHaveLength(1));
-    vi.mocked(window.confirm).mockReturnValue(true);
     act(() => window.history.back());
+    await discard();
     await waitFor(() => expect(docParam()).toBe("d2"));
     await waitFor(() => expect(titleField().value).toBe("B"));
     act(() => window.history.forward());
@@ -622,13 +705,13 @@ describe("a save that answers late (#105)", () => {
     expect((detail().getByRole("button", { name: t.previousDocument }) as HTMLButtonElement).disabled).toBe(true);
     // Leaving would be allowed: only the save in flight keeps the keys and
     // the swipe from navigating.
-    vi.mocked(window.confirm).mockReturnValue(true);
     fireEvent.keyDown(document.body, { key: "ArrowRight" });
     fireEvent.keyDown(document.body, { key: "ArrowLeft" });
     const section = screen.getByTestId("document-detail");
     fireEvent.touchStart(section, { touches: [{ clientX: 300, clientY: 400 }] });
     fireEvent.touchEnd(section, { changedTouches: [{ clientX: 100, clientY: 410 }] });
     expect(docParam()).toBe("d2");
+    expect(discardQuestion()).toBeNull();
     await act(async () => {
       release();
       await calls[0];
@@ -810,12 +893,14 @@ describe("logging out (#105)", () => {
     await openAt("/?doc=d1");
     fireEvent.change(titleField(), { target: { value: "changed" } });
     fireEvent.click(within(screen.getByRole("banner", { name: t.appName })).getByRole("button", { name: t.logOut }));
-    expect(window.confirm).toHaveBeenCalledWith(t.unsavedChanges);
+    await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    await keepEditing();
+    await waitFor(() => expect(discardQuestion()).toBeNull());
     expect(logouts()).toHaveLength(0);
     expect(titleField().value).toBe("changed");
 
-    vi.mocked(window.confirm).mockReturnValue(true);
     fireEvent.click(within(screen.getByRole("banner", { name: t.appName })).getByRole("button", { name: t.logOut }));
+    await discard();
     await waitFor(() => expect(logouts()).toHaveLength(1));
     expect(patches()).toHaveLength(0);
   });
@@ -825,7 +910,7 @@ describe("logging out (#105)", () => {
     await openAt("/?doc=d1");
     fireEvent.click(within(screen.getByRole("banner", { name: t.appName })).getByRole("button", { name: t.logOut }));
     await waitFor(() => expect(logouts()).toHaveLength(1));
-    expect(window.confirm).not.toHaveBeenCalled();
+    expect(discardQuestion()).toBeNull();
   });
 });
 
@@ -934,7 +1019,7 @@ describe("the trash (#12)", () => {
     fireEvent.click(detail().getByRole("button", { name: t.deleteDocumentLabel("Rechnung") }));
     await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
     expect(requests.filter((r) => r.method === "DELETE").map((r) => r.url)).toEqual(["/api/documents/d1"]);
-    expect(window.confirm).not.toHaveBeenCalled();
+    expect(discardQuestion()).toBeNull();
     const notice = within(await screen.findByTestId("notice"));
     fireEvent.click(notice.getByRole("button", { name: t.undo }));
     await waitFor(() => expect(posts("/api/documents/d1/restore")).toHaveLength(1));
@@ -946,9 +1031,18 @@ describe("the trash (#12)", () => {
     await openAt("/?doc=d1");
     fireEvent.change(titleField(), { target: { value: "Neu" } });
     fireEvent.click(detail().getByRole("button", { name: t.deleteDocumentLabel("Neu") }));
-    expect(window.confirm).toHaveBeenCalledWith(t.unsavedChanges);
+    await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    expect(requests.filter((r) => r.method === "DELETE")).toHaveLength(0);
+    await keepEditing();
+    await waitFor(() => expect(discardQuestion()).toBeNull());
     expect(requests.filter((r) => r.method === "DELETE")).toHaveLength(0);
     expect(titleField().value).toBe("Neu");
+    expect(screen.getByTestId("document-detail")).toBeTruthy();
+    // Accepted: the delete happens and the detail closes.
+    fireEvent.click(detail().getByRole("button", { name: t.deleteDocumentLabel("Neu") }));
+    await discard();
+    await waitFor(() => expect(requests.filter((r) => r.method === "DELETE").map((r) => r.url)).toEqual(["/api/documents/d1"]));
+    await waitFor(() => expect(screen.queryByTestId("document-detail")).toBeNull());
   });
 
   it("says so when a save meets a document trashed elsewhere, and shows its banner", async () => {

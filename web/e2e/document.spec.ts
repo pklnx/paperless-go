@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { seed, unique } from "./demo";
 import { expect, test } from "./fixtures";
-import { chosen, closeDocument, confirmDialog, detail, detailForm, documentLink, field, pdfPage, pick, pickTag } from "./ui";
+import { chosen, closeDocument, detail, detailForm, discardChanges, discardQuestion, documentLink, field, keepEditing, logOut, pdfPage, pick, pickTag } from "./ui";
 
 /** The open document's ID, from the URL. */
 const openID = (page: Page) => new URL(page.url()).searchParams.get("doc") ?? "";
@@ -68,17 +68,100 @@ test("next and previous move through the list; unsaved changes are asked about",
   await expect(detail(page, seed.warranty.title)).toBeVisible();
   expect(openID(page)).toBe(first);
 
-  // An unsaved edit: leaving asks first (a native confirm), and the
-  // answer "OK" goes on and drops the edit.
-  await field(page, "Title").fill(unique("Not saved"));
-  await confirmDialog(page, () => page.getByRole("button", { name: "Next document" }).click());
+  // An unsaved edit: leaving asks first (a Carbon modal). "Keep editing"
+  // keeps the edit and the URL, and so does Escape; the dialog is gone
+  // then and stays gone (the detail's own Escape does not close the
+  // document behind it). "Discard changes" goes on and drops the edit.
+  const edited = unique("Not saved");
+  const next = page.getByRole("button", { name: "Next document" });
+  await field(page, "Title").fill(edited);
+  await next.click();
+  await expect(discardQuestion(page)).toBeVisible();
+  await expect(discardQuestion(page)).toContainText("This document has unsaved changes. Leave it and discard them?");
+  await keepEditing(page);
+  await expect(discardQuestion(page)).toHaveCount(0);
+  await expect(next).toBeFocused();
+  expect(openID(page)).toBe(first);
+  await expect(field(page, "Title")).toHaveValue(edited);
+
+  await next.click();
+  await expect(discardQuestion(page)).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(discardQuestion(page)).toHaveCount(0);
+  await expect(next).toBeFocused();
+  expect(openID(page)).toBe(first);
+  await expect(field(page, "Title")).toHaveValue(edited);
+  // The detail is named by its edited title meanwhile.
+  await expect(detail(page, edited)).toBeVisible();
+  expect(await discardQuestion(page).count()).toBe(0);
+
+  await next.click();
+  await discardChanges(page);
   await expect(page).not.toHaveURL(new RegExp(`doc=${first}`));
+  await expect(discardQuestion(page)).toHaveCount(0);
   await page.getByRole("button", { name: "Previous document" }).click();
   await expect(field(page, "Title")).toHaveValue(seed.warranty.title);
 
   await closeDocument(page);
   await expect(page).not.toHaveURL(/[?&]doc=/);
   await expect(documentLink(page, seed.warranty.title)).toBeVisible();
+});
+
+test("Back with unsaved changes asks; Keep editing keeps the URL, Discard changes shows the previous entry without a duplicate", async ({ page }) => {
+  await page.goto("/");
+  await documentLink(page, seed.warranty.title).click();
+  await expect(detail(page, seed.warranty.title)).toBeVisible();
+  const first = openID(page);
+  // The history: the list, the first document, the second (Next).
+  await page.getByRole("button", { name: "Next document" }).click();
+  await expect(page).not.toHaveURL(new RegExp(`doc=${first}`));
+  const second = openID(page);
+  await expect(field(page, "Title")).not.toHaveValue(seed.warranty.title);
+  await field(page, "Title").fill(unique("Not saved"));
+  // The focus is nowhere in particular (a tap on a blank part): the question has no opener.
+  await field(page, "Title").blur();
+
+  // Back: the second document's URL stays while it asks, and after "Keep editing".
+  await page.goBack();
+  await expect(discardQuestion(page)).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`doc=${second}`));
+  await keepEditing(page);
+  await expect(discardQuestion(page)).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`doc=${second}`));
+  // The question had no opener: the focus is on the detail's heading.
+  await expect(page.getByTestId("document-detail").getByRole("heading", { level: 2 })).toBeFocused();
+
+  // Back again, "Discard changes": the first document, with its own title.
+  await page.goBack();
+  await discardChanges(page);
+  await expect(page).toHaveURL(new RegExp(`doc=${first}`));
+  await expect(field(page, "Title")).toHaveValue(seed.warranty.title);
+  await expect(discardQuestion(page)).toHaveCount(0);
+  // No duplicate entry: one more Back leaves the detail for the list.
+  await page.goBack();
+  await expect(page).not.toHaveURL(/[?&]doc=/);
+  await expect(detail(page, seed.warranty.title)).toHaveCount(0);
+  await expect(documentLink(page, seed.warranty.title)).toBeVisible();
+});
+
+test("logging out with unsaved changes asks; Keep editing keeps the session and the edit", async ({ page }) => {
+  await page.goto("/");
+  await documentLink(page, seed.internet.title).click();
+  await expect(detail(page, seed.internet.title)).toBeVisible();
+  const edited = unique("Not saved");
+  await field(page, "Title").fill(edited);
+  await logOut(page);
+  await expect(discardQuestion(page)).toBeVisible();
+  await keepEditing(page);
+  await expect(discardQuestion(page)).toHaveCount(0);
+  await expect(page.getByRole("banner").getByRole("button", { name: "Log out", exact: true })).toBeVisible();
+  await expect(field(page, "Title")).toHaveValue(edited);
+  await expect(page).toHaveURL(/[?&]doc=/);
+  expect(await page.getByLabel("User name", { exact: true }).count()).toBe(0);
+  // Leave nothing unsaved behind: the edit is dropped.
+  await closeDocument(page);
+  await discardChanges(page);
+  await expect(page).not.toHaveURL(/[?&]doc=/);
 });
 
 test("a change made elsewhere meanwhile: the save is refused and the user's edits are kept", async ({ page, guards }) => {

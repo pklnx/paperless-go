@@ -175,9 +175,12 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
   };
   const setEveryone = (on: boolean) => update({ all: on ? "1" : "" });
   // Logging out leaves the app: the open document's unsaved changes are
-  // asked about first, and a refusal keeps the session and the edits.
+  // asked about first (the detail's modal), and a refusal keeps the
+  // session and the edits.
   const leave = () => {
-    if (confirmLeave()) logout();
+    void confirmLeave().then((ok) => {
+      if (ok) logout();
+    });
   };
   const onMaxUploadSize = useCallback(
     (n: number) => {

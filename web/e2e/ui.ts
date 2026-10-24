@@ -211,9 +211,9 @@ export function pdfPage(page: Page, n: number): Locator {
 /**
  * Runs action (the click that asks) and accepts the confirmation, whichever
  * kind it is:
- * - a native window.confirm (API key revoke, unsaved changes, lock, reset
- *   2FA and remove user), which Playwright would otherwise dismiss, so the
- *   action would silently not happen;
+ * - a native window.confirm (API key revoke, lock, reset 2FA and remove
+ *   user), which Playwright would otherwise dismiss, so the action would
+ *   silently not happen;
  * - an in-DOM confirmation, when confirm names its button: a Sheet
  *   ("Delete permanently") or an inline panel (role="group", the admin's
  *   "Reset password"). The button is found by its name only, without
@@ -238,6 +238,21 @@ export async function confirmDialog(page: Page, action: () => Promise<void>, con
   if (confirm === undefined) throw new Error("confirmDialog: no confirmation was shown");
   const button = typeof confirm === "string" || confirm instanceof RegExp ? page.getByRole("button", { name: confirm, exact: true }) : confirm;
   await button.click();
+}
+
+/** The open document's "Discard changes?" question (a Carbon modal), asked before unsaved changes would be lost. */
+export function discardQuestion(page: Page): Locator {
+  return page.getByRole("dialog", { name: "Discard changes?", exact: true });
+}
+
+/** Answers the "Discard changes?" question with "Discard changes": the navigation (or delete) goes on. */
+export async function discardChanges(page: Page): Promise<void> {
+  await discardQuestion(page).getByRole("button", { name: "Discard changes", exact: true }).click();
+}
+
+/** Answers the "Discard changes?" question with "Keep editing": nothing changes. */
+export async function keepEditing(page: Page): Promise<void> {
+  await discardQuestion(page).getByRole("button", { name: "Keep editing", exact: true }).click();
 }
 
 /** The theme switch (in the header, or on the login page): named after the theme it switches to. */
