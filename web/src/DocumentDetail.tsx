@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type TouchEvent } from "react";
 import { ApiError, documentsApi, metadataApi, type DocumentDetail as Doc, type DocumentSummary, type Metadata, type MetadataKind, type User } from "./api";
 import { documentName, ProcessingStatus } from "./DocumentParts";
+import { dialogOpen } from "./dialogs";
 import { formFrom, isDirty, patchFrom, rebaseForm, type DocumentForm, type InvalidField } from "./documentForm";
 import { ArrowIcon, CloseIcon, InboxIcon, StarIcon, iconButton } from "./icons";
 import { lang, t } from "./i18n";
@@ -192,8 +193,8 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
-      // A dialog over the detail (the phone menu) has the keys.
-      if (document.querySelector("dialog[open]")) return;
+      // A dialog or a navigation overlay over the detail has the keys.
+      if (dialogOpen()) return;
       const n = nav.current;
       if (e.key === "Escape") {
         e.preventDefault();
@@ -550,8 +551,9 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
         data-testid="document-detail"
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
-        // Below Carbon's fixed header (3rem plus the notch), a .legacy root (index.css) until part 4 of #150.
-        className="legacy fixed inset-x-0 top-[calc(3rem+env(safe-area-inset-top))] bottom-0 z-20 flex flex-col overflow-hidden rounded-t-2xl bg-bg shadow-2xl md:left-64 md:rounded-none md:shadow-none"
+        // Below Carbon's fixed header (3rem plus the notch) and, from lg, right of the
+        // rail and the column (app-detail, layout.css); a .legacy root (index.css) until part 4 of #150.
+        className="legacy app-detail fixed inset-x-0 top-[calc(3rem+env(safe-area-inset-top))] bottom-0 z-20 flex flex-col overflow-hidden rounded-t-2xl bg-bg shadow-2xl md:rounded-none md:shadow-none"
       >
         <header className="flex items-center gap-1 border-b border-line px-2 py-1.5">
           <button type="button" className={iconButton} aria-label={t.closeDocument} title={t.closeDocument} onClick={close}>

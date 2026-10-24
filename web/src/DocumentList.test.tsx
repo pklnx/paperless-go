@@ -102,8 +102,22 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** The desktop sidebar (the drawer holds a second one while it is open). */
-const sidebar = () => within(screen.getByTestId("sidebar"));
+/** The shell's SideNav: the lists with their counts and the pages. */
+const shellNav = () => within(screen.getByRole("navigation", { name: t.navigation }));
+/** The documents view's column: saved views, tags, correspondents and types. */
+const column = () => within(screen.getByRole("navigation", { name: t.browse }));
+/** A node of the column's tree (a tag, a correspondent or a type): its name, then its count. */
+const treeItem = (name: string | RegExp) => screen.getByRole("treeitem", { name });
+const findTreeItem = (name: string | RegExp) => screen.findByRole("treeitem", { name });
+/** The names of a tree node's children, in order. */
+const childrenOf = (name: string) =>
+  Array.from(document.getElementById(treeItem(name).getAttribute("aria-owns")!)!.querySelectorAll<HTMLElement>(":scope > [role=treeitem]")).map(
+    (n) => document.getElementById(n.getAttribute("aria-labelledby")!)!.textContent,
+  );
+/** Carbon's caret, which toggles a node without selecting it. */
+const caret = (name: string | RegExp) => treeItem(name).querySelector<HTMLElement>(":scope > .cds--tree-node__label .cds--tree-parent-node__toggle")!;
+/** Whether a node's children are hidden (Carbon hides the collapsed subtree's list). */
+const childrenHidden = (name: string | RegExp) => document.getElementById(treeItem(name).getAttribute("aria-owns")!)!.classList.contains("cds--tree-node--hidden");
 /** The documents' list: the one named like the list's heading. */
 function documentRows() {
   const title = document.getElementById("list-title")!.textContent!;
@@ -137,30 +151,25 @@ describe("sidebar", () => {
     server.correspondents = [named("c2", "Zahnarzt", 4), named("c1", "Amt", 7)];
     server.types = [named("d1", "Rechnung", 9)];
     await start();
-    const s = sidebar();
-    await s.findByRole("button", { name: /^Steuer/ });
-    expect(s.getByRole("button", { name: new RegExp(`^${t.allDocuments}\\s*42$`) })).toBeTruthy();
-    expect(s.getByRole("button", { name: new RegExp(`^${t.inbox}\\s*3$`) })).toBeTruthy();
-    expect(s.getByRole("button", { name: new RegExp(`^${t.favorites}\\s*2$`) })).toBeTruthy();
+    await findTreeItem(/^Steuer/);
+    const s = shellNav();
+    expect(s.getByRole("link", { name: `${t.allDocuments} 42` })).toBeTruthy();
+    expect(s.getByRole("link", { name: `${t.inbox} 3` })).toBeTruthy();
+    expect(s.getByRole("link", { name: `${t.favorites} 2` })).toBeTruthy();
 
     // Roots sorted with collate; the orphan is a root; the parent shows the subtree's count.
-    const tagList = s.getByRole("list", { name: t.tags });
-    const roots = Array.from(tagList.children).map((li) => li.querySelector("button:not([aria-expanded])")?.textContent);
-    expect(roots).toEqual(["arbeit1", "Ärzte1", "Orphan1", "Steuer5"]);
-    const steuer = Array.from(tagList.children).find((li) => li.textContent?.startsWith("Steuer"))!;
-    expect(within(steuer as HTMLElement).getByRole("button", { name: /^2024\s*3$/ })).toBeTruthy();
+    expect(childrenOf(t.tags)).toEqual(["arbeit 1", "Ärzte 1", "Orphan 1", "Steuer 5"]);
+    expect(within(treeItem("Steuer 5")).getByRole("treeitem", { name: "2024 3" })).toBeTruthy();
     // The tag colour is a dot next to the name.
-    const dot = within(Array.from(tagList.children)[0] as HTMLElement).getByTestId("tag-dot");
+    const dot = within(treeItem("arbeit 1")).getByTestId("tag-dot");
     expect(dot.style.backgroundColor).toBe("rgb(211, 47, 47)");
 
-    const corr = s.getByRole("list", { name: t.correspondents });
-    expect(within(corr).getAllByRole("button").map((b) => b.textContent)).toEqual(["Amt7", "Zahnarzt4"]);
-    expect(within(s.getByRole("list", { name: t.documentTypes })).getByRole("button").textContent).toBe("Rechnung9");
-    // Profile, Log and the log-out are in the sidebar's foot; no users page for a user.
-    expect(s.getByRole("button", { name: t.log })).toBeTruthy();
-    expect(s.getByRole("button", { name: t.profile })).toBeTruthy();
-    expect(s.queryByRole("button", { name: t.users })).toBeNull();
-    await waitFor(() => expect(s.getByRole("status").textContent).toBe(t.statusOk));
+    expect(childrenOf(t.correspondents)).toEqual(["Amt 7", "Zahnarzt 4"]);
+    expect(childrenOf(t.documentTypes)).toEqual(["Rechnung 9"]);
+    // Profile and Log are in the SideNav; no users page for a user.
+    expect(s.getByRole("link", { name: t.log })).toBeTruthy();
+    expect(s.getByRole("link", { name: t.profile })).toBeTruthy();
+    expect(s.queryByRole("link", { name: t.users })).toBeNull();
   });
 
   it("filters the list by a click, with parameters and never with q, and removes the filter by its chip", async () => {
@@ -170,20 +179,20 @@ describe("sidebar", () => {
     await start();
     expect(params(lastList())).toBe("");
 
-    fireEvent.click(await sidebar().findByRole("button", { name: /Steuer/ }));
+    fireEvent.click(await findTreeItem(/^Steuer/));
     expect(window.location.search).toBe("?tag=t1");
     await waitFor(() => expect(params(lastList())).toBe("tag=t1"));
     expect(screen.getByRole("heading", { level: 2, name: "Steuer" })).toBeTruthy();
     expect(screen.getByRole("button", { name: t.removeFilter(t.tagFilter("Steuer")) })).toBeTruthy();
 
-    fireEvent.click(sidebar().getByRole("button", { name: /Amt/ }));
+    fireEvent.click(treeItem(/^Amt/));
     await waitFor(() => expect(params(lastList())).toBe("correspondent=c1"));
     expect(window.location.search).toBe("?corr=c1");
-    fireEvent.click(sidebar().getByRole("button", { name: /Rechnung/ }));
+    fireEvent.click(treeItem(/^Rechnung/));
     await waitFor(() => expect(params(lastList())).toBe("type=d1"));
-    fireEvent.click(sidebar().getByRole("button", { name: new RegExp(t.inbox) }));
+    fireEvent.click(shellNav().getByRole("link", { name: new RegExp(t.inbox) }));
     await waitFor(() => expect(params(lastList())).toBe("inbox=true"));
-    fireEvent.click(sidebar().getByRole("button", { name: new RegExp(t.favorites) }));
+    fireEvent.click(shellNav().getByRole("link", { name: new RegExp(t.favorites) }));
     await waitFor(() => expect(params(lastList())).toBe("favorite=true"));
     expect(window.location.search).toBe("?fav=1");
     // No sidebar click ever sent a q: only typed searches are logged as searches.
@@ -234,9 +243,9 @@ describe("sidebar", () => {
     expect(lists).toHaveLength(before);
     fireEvent.submit(screen.getByRole("search"));
     await waitFor(() => expect(params(lastList())).toBe("q=Rechnung"));
-    fireEvent.click(await sidebar().findByRole("button", { name: /Steuer/ }));
+    fireEvent.click(await findTreeItem(/^Steuer/));
     await waitFor(() => expect(params(lastList())).toBe("q=Rechnung&tag=t1"));
-    fireEvent.click(sidebar().getByRole("button", { name: new RegExp(t.allDocuments) }));
+    fireEvent.click(shellNav().getByRole("link", { name: new RegExp(t.allDocuments) }));
     await waitFor(() => expect(params(lastList())).toBe(""));
     expect((screen.getByRole("searchbox", { name: t.searchLabel }) as HTMLInputElement).value).toBe("");
   });
@@ -244,30 +253,31 @@ describe("sidebar", () => {
   it("restores the previous filter on Back", async () => {
     server.tags = [tag("t1", "Steuer"), tag("t2", "Arzt")];
     await start();
-    fireEvent.click(await sidebar().findByRole("button", { name: /Steuer/ }));
+    fireEvent.click(await findTreeItem(/^Steuer/));
     await waitFor(() => expect(params(lastList())).toBe("tag=t1"));
-    fireEvent.click(sidebar().getByRole("button", { name: /Arzt/ }));
+    fireEvent.click(treeItem(/^Arzt/));
     await waitFor(() => expect(params(lastList())).toBe("tag=t2"));
     act(() => window.history.back());
     await waitFor(() => expect(window.location.search).toBe("?tag=t1"));
     await waitFor(() => expect(params(lastList())).toBe("tag=t1"));
-    expect(sidebar().getByRole("button", { name: /Steuer/ }).getAttribute("aria-current")).toBe("page");
-    expect(sidebar().getByRole("button", { name: /Arzt/ }).getAttribute("aria-current")).toBeNull();
+    expect(treeItem(/^Steuer/).getAttribute("aria-selected")).toBe("true");
+    expect(treeItem(/^Arzt/).getAttribute("aria-selected")).toBe("false");
   });
 
   it("collapses a tag's subtree and remembers it", async () => {
     server.tags = [tag("t1", "Steuer"), tag("t2", "2024", "t1")];
     await start();
-    const toggle = await sidebar().findByRole("button", { name: t.subTagsOf("Steuer") });
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(sidebar().queryByRole("button", { name: /2024/ })).toBeNull();
+    const steuer = await findTreeItem(/^Steuer/);
+    expect(steuer.getAttribute("aria-expanded")).toBe("true");
+    expect(childrenHidden(/^Steuer/)).toBe(false);
+    fireEvent.click(caret(/^Steuer/));
+    expect(steuer.getAttribute("aria-expanded")).toBe("false");
+    expect(childrenHidden(/^Steuer/)).toBe(true);
     expect(JSON.parse(localStorage.getItem("paperless-go.tags.alice")!)).toEqual({ v: 1, collapsed: ["t1"] });
 
     cleanup();
     await start();
-    expect((await sidebar().findByRole("button", { name: t.subTagsOf("Steuer") })).getAttribute("aria-expanded")).toBe("false");
+    expect((await findTreeItem(/^Steuer/)).getAttribute("aria-expanded")).toBe("false");
   });
 
   it("opens the selected tag's parents", async () => {
@@ -275,7 +285,8 @@ describe("sidebar", () => {
     window.history.replaceState(null, "", "/?tag=t2");
     server.tags = [tag("t1", "Steuer"), tag("t2", "2024", "t1")];
     await start();
-    expect((await sidebar().findByRole("button", { name: /2024/ })).getAttribute("aria-current")).toBe("page");
+    expect((await findTreeItem(/^2024/)).getAttribute("aria-selected")).toBe("true");
+    expect(treeItem(/^Steuer/).getAttribute("aria-expanded")).toBe("true");
   });
 
   it("shows why the names could not be loaded", async () => {
@@ -284,33 +295,38 @@ describe("sidebar", () => {
     const ok = globalThis.fetch;
     vi.stubGlobal("fetch", (url: string, init?: RequestInit) => (url.startsWith("/api/tags") ? Promise.resolve(json(503, { error: "database unavailable" })) : ok(url, init)));
     await start();
-    expect((await sidebar().findByRole("alert")).textContent).toBe(t.loadMetadataFailed("database unavailable"));
+    expect((await column().findByRole("alert")).textContent).toBe(t.loadMetadataFailed("database unavailable"));
   });
 });
 
-describe("phone drawer", () => {
-  it("opens from the menu button, and closes after a choice and with its close button", async () => {
+describe("phone navigation (below lg)", () => {
+  it("opens the SideNav from the menu button and the column from Browse, each closing after a choice", async () => {
     server.tags = [tag("t1", "Steuer")];
     await start();
     const menu = screen.getByRole("button", { name: t.openMenu });
+    const nav = screen.getByRole("navigation", { name: t.navigation });
     expect(menu.getAttribute("aria-expanded")).toBe("false");
+    expect(nav.hasAttribute("inert")).toBe(true);
     fireEvent.click(menu);
-    const drawer = within(screen.getByRole("dialog", { name: t.navigation }));
     expect(menu.getAttribute("aria-expanded")).toBe("true");
-    fireEvent.click(drawer.getByRole("button", { name: /Steuer/ }));
-    await waitFor(() => expect(params(lastList())).toBe("tag=t1"));
-    expect(screen.queryByRole("dialog", { name: t.navigation })).toBeNull();
+    expect(nav.className).toContain("cds--side-nav--expanded");
+    // A page from the SideNav closes it.
+    fireEvent.click(within(nav).getByRole("link", { name: t.log }));
+    expect(window.location.search).toBe("?view=log");
+    expect(nav.className).not.toContain("cds--side-nav--expanded");
     expect(menu.getAttribute("aria-expanded")).toBe("false");
-
+    // Back to the documents; the tags are behind Browse, as a dialog.
     fireEvent.click(menu);
-    fireEvent.click(within(screen.getByRole("dialog", { name: t.navigation })).getByRole("button", { name: t.closeDialog }));
-    expect(screen.queryByRole("dialog", { name: t.navigation })).toBeNull();
-
-    // A page from the drawer's foot closes it too.
-    fireEvent.click(menu);
-    fireEvent.click(within(screen.getByRole("dialog", { name: t.navigation })).getByRole("button", { name: t.log }));
-    expect(window.location.search).toBe("?tag=t1&view=log");
-    expect(screen.queryByRole("dialog", { name: t.navigation })).toBeNull();
+    fireEvent.click(within(nav).getByRole("link", { name: new RegExp(`^${t.allDocuments}`) }));
+    await waitFor(() => expect(params(lastList())).toBe(""));
+    fireEvent.click(screen.getByRole("button", { name: t.browse }));
+    const dialog = within(screen.getByRole("dialog", { name: t.browse }));
+    fireEvent.click(dialog.getByRole("treeitem", { name: /^Steuer/ }));
+    await waitFor(() => expect(params(lastList())).toBe("tag=t1"));
+    expect(screen.queryByRole("dialog", { name: t.browse })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: t.browse }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: t.browse })).getByRole("button", { name: t.closeBrowse }));
+    expect(screen.queryByRole("dialog", { name: t.browse })).toBeNull();
   });
 });
 
@@ -331,8 +347,8 @@ describe("admin switch", () => {
     // Switched off, no row names an owner.
     expect(screen.queryByText(t.ownedBy("bob"))).toBeNull();
 
-    const sw = sidebar().getByRole("switch", { name: t.everyonesDocuments });
-    expect((sw as HTMLInputElement).checked).toBe(false);
+    const sw = screen.getByRole("switch", { name: t.everyonesDocuments });
+    expect(sw.getAttribute("aria-checked")).toBe("false");
     fireEvent.click(sw);
     await waitFor(() => expect(params(lastList())).toBe(""));
     expect(window.location.search).toBe("?all=1");
@@ -342,12 +358,12 @@ describe("admin switch", () => {
     expect(await screen.findByText(t.ownedBy("bob"))).toBeTruthy();
     expect(screen.queryByText(t.ownedBy("root"))).toBeNull();
     expect(screen.queryByText(t.ownedBy("root-old"))).toBeNull();
-    expect(sidebar().getByRole("button", { name: t.users })).toBeTruthy();
+    expect(shellNav().getByRole("link", { name: t.users })).toBeTruthy();
   });
 
   it("is not there for other users, who never send owner", async () => {
     await start();
-    expect(sidebar().queryByRole("switch")).toBeNull();
+    expect(screen.queryByRole("switch")).toBeNull();
     expect(requests.some((r) => r.includes("owner="))).toBe(false);
   });
 });

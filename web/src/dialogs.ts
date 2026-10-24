@@ -1,6 +1,10 @@
-/** A Carbon Modal or a native dialog (the sheets) is open: the app's keyboard handling is off while one is. Part 2 of #150 adds the two navigation overlays. */
+/**
+ * A Carbon Modal, a native dialog (the sheets), the shell's SideNav overlay
+ * (below lg; the rail expanded on hover is none) or the documents view's
+ * column overlay is open: the app's keyboard handling is off while one is.
+ */
 export function dialogOpen(doc: Document = document): boolean {
-  return doc.querySelector("dialog[open], .cds--modal.is-visible") !== null;
+  return doc.querySelector("dialog[open], .cds--modal.is-visible, .cds--side-nav--expanded:not(.cds--side-nav--rail), .nav-column--overlay") !== null;
 }
 
 /** Fields that take typed keys. Carbon's Search, TextInput, Select and Checkbox are native fields too. */

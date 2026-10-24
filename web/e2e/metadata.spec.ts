@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { unique, work } from "./demo";
 import { expect, test } from "./fixtures";
-import { closeDocument, createChoice, detail, detailForm, documentLink, field, listEntry, metadataRow, metadataTab, navigation, pageEntry, saveDocument, search, sheet } from "./ui";
+import { closeDocument, createChoice, detail, detailForm, documentLink, field, listEntry, metadataRow, metadataTab, navigation, pageEntry, saveDocument, search, sheet, subTagsToggle, tagEntry } from "./ui";
 
 const metadataPage = "Tags, correspondents & types";
 
@@ -39,9 +39,13 @@ test("a tag is created with a document, put under another tag, renamed and delet
   await expect(edit).toBeHidden();
   await expect(metadataRow(page, "Tags", tag)).toHaveCount(0);
   await expect(metadataRow(page, "Tags", renamed)).toContainText("1 document");
+  // The tag tree is in the documents view's column (#150, part 2): Home has sub-tags now, the new one among them.
+  await listEntry(navigation(page), "All documents").click();
   const nav = navigation(page);
-  await expect(nav.getByRole("button", { name: "Sub-tags of Home", exact: true })).toHaveAttribute("aria-expanded", "true");
+  await expect(subTagsToggle(nav, "Home")).toHaveAttribute("aria-expanded", "true");
   await expect(listEntry(nav, renamed)).toBeVisible();
+  await pageEntry(page, metadataPage).click();
+  await expect(page).toHaveURL(/[?&]view=metadata/);
 
   // Delete says how many documents lose the tag; the document stays.
   await metadataRow(page, "Tags", renamed).getByRole("button", { name: `Delete ${renamed}`, exact: true }).click();
@@ -50,9 +54,11 @@ test("a tag is created with a document, put under another tag, renamed and delet
   await remove.getByRole("button", { name: "Delete", exact: true }).click();
   await expect(remove).toBeHidden();
   await expect(metadataRow(page, "Tags", renamed)).toHaveCount(0);
-  await expect(nav.getByRole("button", { name: "Sub-tags of Home", exact: true })).toHaveCount(0);
 
   await listEntry(navigation(page), "All documents").click();
+  // The tree is there (Home shows) and Home has no sub-tags any more.
+  await expect(tagEntry(nav, "Home")).toBeVisible();
+  await expect(subTagsToggle(nav, "Home")).toHaveCount(0);
   await search(page, work.metadata.word);
   await documentLink(page, work.metadata.title).click();
   await expect(detail(page, work.metadata.title)).toBeVisible();

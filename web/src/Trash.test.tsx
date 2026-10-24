@@ -64,7 +64,8 @@ const params = (p: URLSearchParams) => {
 };
 const bulks = () => requests.filter((r) => r.path === "/api/documents/bulk").map((r) => r.body);
 const sent = (method: string, path: string) => requests.filter((r) => r.method === method && r.path === path);
-const sidebar = () => within(screen.getByTestId("sidebar"));
+/** The shell's SideNav: the lists with their counts and the pages. */
+const shellNav = () => within(screen.getByRole("navigation", { name: t.navigation }));
 const bar = () => within(screen.getByRole("region", { name: t.bulkActions }));
 const notice = () => screen.findByTestId("notice");
 /** Waits until the shell's notice says text. */
@@ -79,7 +80,7 @@ async function start(url = "/") {
 }
 
 async function openTrash() {
-  fireEvent.click(await sidebar().findByRole("button", { name: new RegExp(`^${t.trash}`) }));
+  fireEvent.click(await shellNav().findByRole("link", { name: new RegExp(`^${t.trash}`) }));
   await screen.findByRole("heading", { name: t.trash });
   await waitFor(() => expect(screen.queryByText(t.loading)).toBeNull());
 }
@@ -101,9 +102,9 @@ describe("the Trash entry and list", () => {
     server.counts = { inbox: 0, favorites: 0, total: 1, trash: 2 };
     put(doc("1", "Live"), doc("2", "Alt", deleted), doc("3", "Älter", deleted));
     await start();
-    const entries = sidebar().getAllByRole("button").map((b) => b.textContent);
+    const entries = shellNav().getAllByRole("link").map((l) => l.textContent);
     const fav = entries.findIndex((e) => e?.startsWith(t.favorites));
-    expect(entries[fav + 1]).toBe(`${t.trash}2`);
+    expect(entries[fav + 1]).toBe(`${t.trash} 2`);
     await openTrash();
     expect(params(lists().at(-1)!)).toBe("trashed=true&sort=deleted");
     expect(window.location.search).toBe("?trash=1");
@@ -131,7 +132,7 @@ describe("the Trash entry and list", () => {
     put(doc("2", "Alt", { ...deleted, ownerId: 2, ownerName: "bob" }));
     await start("/?trash=1");
     expect(params(lists().at(-1)!)).toBe("owner=me&trashed=true&sort=deleted");
-    fireEvent.click(sidebar().getByRole("switch", { name: t.everyonesDocuments }));
+    fireEvent.click(screen.getByRole("switch", { name: t.everyonesDocuments }));
     await waitFor(() => expect(params(lists().at(-1)!)).toBe("trashed=true&sort=deleted"));
     expect(await screen.findByText(t.ownedBy("bob"))).toBeTruthy();
   });
@@ -298,7 +299,7 @@ describe("notices and row actions (review follow-ups)", () => {
     await start();
     fireEvent.click(screen.getByRole("button", { name: t.deleteDocumentLabel("Rechnung") }));
     await noticeSays(t.movedToTrash("Rechnung"));
-    fireEvent.click(sidebar().getByRole("button", { name: t.log }));
+    fireEvent.click(shellNav().getByRole("link", { name: t.log }));
     await waitFor(() => expect(window.location.search).toBe("?view=log"));
     fireEvent.click(within(screen.getByTestId("notice")).getByRole("button", { name: t.undo }));
     await waitFor(() => expect(sent("POST", "/api/documents/1/restore")).toHaveLength(1));
@@ -362,9 +363,9 @@ describe("second review follow-ups", () => {
     fireEvent.click(screen.getByRole("button", { name: t.deleteDocumentLabel("Rechnung") }));
     await noticeSays(t.movedToTrash("Rechnung"));
     // Another page and back: a new list, loaded without the row.
-    fireEvent.click(sidebar().getByRole("button", { name: t.manageMetadata }));
+    fireEvent.click(shellNav().getByRole("link", { name: t.manageMetadata }));
     await waitFor(() => expect(screen.queryByRole("link", { name: "Brief" })).toBeNull());
-    fireEvent.click(sidebar().getByRole("button", { name: new RegExp(`^${t.allDocuments}`) }));
+    fireEvent.click(shellNav().getByRole("link", { name: new RegExp(`^${t.allDocuments}`) }));
     await screen.findByRole("link", { name: "Brief" });
     expect(screen.queryByRole("link", { name: "Rechnung" })).toBeNull();
     fireEvent.click(within(screen.getByTestId("notice")).getByRole("button", { name: t.undo }));
