@@ -3,7 +3,12 @@
 State of the work for the next session. Update before a session ends.
 
 ## Open PRs
-- #100 (#92, iPhone guide): approved; waits for the maintainer's device checks listed in the PR body (raw bytes vs multipart is the key one). Don't merge before.
+- #100 (#92, iPhone guide): approved; waits for the maintainer's device checks listed in the PR body (raw bytes vs multipart is the key one). The maintainer has a German step-by-step check guide (test server on the Mac, checks b, f, e, g, c, share menu, names, d, a, iCloud link). After the results: fix the guide, merge `main` into the branch, delta review, merge. If check b gives 415, plan multipart support on the server instead. Don't merge before.
+
+## State (2026-10-24)
+- #150 (Carbon UI): parts 1, 2, 3, 8 and 4 (#179, PR #192) are merged. Open: part 5 (#180, metadata page, Log, Users), part 6 (#181, profile, Tailwind removal), part 7 (#182, screenshots and guide text). The maintainer signed off the list look; part 7 comes last.
+- The coordinator's decision tiers (green, yellow, red) and the merge rules are in `pklnx/dev-process` (`decisions.md`, `coordinator.md`). Apply them in every session.
+- Merge rules learned 2026-10-24: never merge a head that no approving review covers (only exception: a pure base merge with the evidence posted); read every reviewer's full report and post a "Reports read" comment before merging.
 
 ## Next tickets
 - First release v26.10-1 published 2026-10-23 (dry run, then release; ghcr.io package public, #149 removed the "no release yet" notes). Every further release needs the maintainer's explicit OK; run a dry run first. The release body has only the generated notes (no tool here edits releases).
@@ -79,6 +84,9 @@ State of the work for the next session. Update before a session ends.
 - Drag and drop in Safari and Firefox; a ~100 MB upload through a reverse proxy.
 
 ## Notes for sessions
+- pnpm shims: every agent creates its own new shim directory (check with `ls -la` first) with a wrapper script, never a symlink, and never writes to an existing shim or binary; never `corepack enable`. On 2026-10-24 a shared symlink let two agents overwrite `~/.cache/node/corepack/v1/pnpm/12.9.1/pnpm-native` (restored from the npx copy).
+- Fetch with an explicit refspec (`+refs/heads/X:refs/remotes/origin/X`), never through `FETCH_HEAD`, when several agents share a clone.
+- A refused action is reported and never retried in another form. Deleting anything this session did not create is the maintainer's call.
 - golangci-lint matching CI: `GOTOOLCHAIN=$(go env GOVERSION) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0`, then `~/go/bin/golangci-lint run ./...`.
 - PostgreSQL 17 or newer is required (#66). The cloud sandbox's local PostgreSQL is 16 and can no longer run the store tests: start `dockerd` and run `postgres:18` (Docker Hub rate-limits; `mirror.gcr.io/library/postgres:18` works), then point `TEST_DATABASE_URL` at it.
 - Cloud sessions have no `gh`: use the GitHub MCP tools from the GitHub operations table in `CLAUDE.md`; the coordinator subscribes to PR activity and arms one safety check-in.
