@@ -15,15 +15,31 @@ import { describe, expect, it } from "vitest";
 const here = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
-/** The custom properties the first CSS block sets whose selector list holds selector (".cds--white" also in ":root, .cds--white { … }"). */
+/**
+ * The custom properties of the first CSS block whose selector list names
+ * selector as one of its comma-separated selectors (".cds--white" in
+ * ":root, .cds--white { … }", not in ".cds--white .cds--x { … }"). A plain
+ * scan of the braces, no pattern built from the file's text.
+ */
 function tokens(css: string, selector: string): Map<string, string> {
-  const m = new RegExp(`^[^{}]*(?:^|[,\\s])${selector.replace(/[.-]/g, "\\$&")}(?:[,\\s][^{}]*)?\\{`, "m").exec(css);
-  if (!m) throw new Error(`no block ${selector}`);
-  const start = m.index + m[0].length;
-  const block = css.slice(start, css.indexOf("}", start));
-  const out = new Map<string, string>();
-  for (const m of block.matchAll(/(--cds-[a-z0-9-]+):\s*([^;]+);/g)) out.set(m[1]!, m[2]!.trim());
-  return out;
+  let from = 0;
+  for (;;) {
+    const open = css.indexOf("{", from);
+    if (open < 0) throw new Error(`no block ${selector}`);
+    const close = css.indexOf("}", open);
+    const head = css.slice(from, open);
+    const selectors = head.slice(head.lastIndexOf("}") + 1).split(",").map((x) => x.trim());
+    if (selectors.includes(selector)) {
+      const out = new Map<string, string>();
+      for (const line of css.slice(open + 1, close).split(";")) {
+        const colon = line.indexOf(":");
+        const name = line.slice(0, colon).trim();
+        if (name.startsWith("--cds-")) out.set(name, line.slice(colon + 1).trim());
+      }
+      return out;
+    }
+    from = close + 1;
+  }
 }
 
 /** The theme's tokens for a class, Carbon's values under the pklnx theme's. */
@@ -38,10 +54,11 @@ function background(css: string, selector: string, t: Map<string, string>): stri
   const start = css.indexOf(`${selector} {`);
   if (start < 0) throw new Error(`no rule ${selector}`);
   const block = css.slice(start, css.indexOf("}", start));
-  const m = /background-color:\s*var\((--cds-[a-z0-9-]+)\)/.exec(block);
-  if (!m) throw new Error(`${selector} sets no token background`);
-  const v = t.get(m[1]!);
-  if (!v) throw new Error(`theme has no ${m[1]}`);
+  const decl = block.split(";").map((x) => x.trim()).find((x) => x.startsWith("background-color:"));
+  const token = decl?.slice("background-color:".length).trim();
+  if (!token?.startsWith("var(--cds-") || !token.endsWith(")")) throw new Error(`${selector} sets no token background`);
+  const v = t.get(token.slice("var(".length, -1));
+  if (!v) throw new Error(`theme has no ${token}`);
   return v;
 }
 
