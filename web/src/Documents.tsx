@@ -64,7 +64,8 @@ export function WindowDrop({ onFiles }: { onFiles: (files: File[]) => void }) {
 
   if (!dragging) return null;
   return (
-    <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-scrim p-6">
+    // Unconverted markup outside every view: a .legacy root (index.css) until part 3 of #150.
+    <div className="legacy pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-scrim p-6">
       <p className="rounded-lg border-2 border-dashed border-accent bg-surface-raised px-8 py-10 text-lg font-semibold text-accent-ink">{t.dropHere}</p>
     </div>
   );

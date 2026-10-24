@@ -35,6 +35,10 @@ function renderGate() {
   return render(<AuthGate>{(user) => <p>app for {user.name}</p>}</AuthGate>);
 }
 
+/** The message of the one alert with text: the notification's subtitle, without its status icon's description ("Error"). */
+const alertMessage = () => theAlert().querySelector(".cds--inline-notification__subtitle")?.textContent;
+const findAlertMessage = async () => (await findAlert()).querySelector(".cds--inline-notification__subtitle")?.textContent;
+
 /** The password field: the input, not Carbon's show-password button that the label names too. */
 const password = () => screen.getByLabelText(t.fieldPassword, { selector: "input" }) as HTMLInputElement;
 
@@ -98,7 +102,7 @@ describe("login", () => {
     serve((method) => (method === "POST" ? { status: 401, body: { error: "wrong user name or password" } } : loggedOut));
     renderGate();
     await logIn("alice", "wrong");
-    expect((await findAlert()).textContent).toContain(t.wrongLogin);
+    expect(await findAlertMessage()).toBe(t.wrongLogin);
     expect(password().value).toBe("");
   });
 
@@ -110,10 +114,10 @@ describe("login", () => {
     serve((method) => (method === "POST" ? answers.shift()! : loggedOut));
     renderGate();
     await logIn("lee", "lee-password");
-    await waitFor(() => expect(theAlert().textContent).toContain(t.userLocked));
+    await waitFor(() => expect(alertMessage()).toBe(t.userLocked));
     expect(screen.queryByRole("heading", { name: t.twoFactorLogin })).toBeNull();
     await logIn("alice", "x");
-    await waitFor(() => expect(theAlert().textContent).toContain(t.tooManyAttempts(60)));
+    await waitFor(() => expect(alertMessage()).toBe(t.tooManyAttempts(60)));
   });
 
   it("rejects a wrong code and returns to the password step when the login expired", async () => {
@@ -134,13 +138,13 @@ describe("login", () => {
     const code = (await screen.findByLabelText(t.twoFactorCode)) as HTMLInputElement;
     fireEvent.change(code, { target: { value: "000000" } });
     fireEvent.click(screen.getByRole("button", { name: t.logIn }));
-    await waitFor(() => expect(theAlert().textContent).toContain(t.invalidTwoFactor));
+    await waitFor(() => expect(alertMessage()).toBe(t.invalidTwoFactor));
     expect(code.value).toBe("");
 
     // An expired login goes back to the password.
     fireEvent.change(code, { target: { value: "111111" } });
     fireEvent.click(screen.getByRole("button", { name: t.logIn }));
-    await waitFor(() => expect(theAlert().textContent).toContain(t.twoFactorExpired));
+    await waitFor(() => expect(alertMessage()).toBe(t.twoFactorExpired));
     expect(password().value).toBe("");
 
     await logIn("alice", "correct horse battery");
@@ -241,7 +245,7 @@ describe("passkey login", () => {
     });
     renderGate();
     fireEvent.click(await screen.findByRole("button", { name: t.passkeySignIn }));
-    expect((await findAlert()).textContent).toContain(t.passkeyUnknown);
+    expect(await findAlertMessage()).toBe(t.passkeyUnknown);
     expect(signalUnknownCredential).toHaveBeenCalledWith({ rpId: "localhost", credentialId: "AQ" });
   });
 
@@ -252,7 +256,7 @@ describe("passkey login", () => {
     serve((_, url) => (url === "/api/session/passkey/begin" ? ceremony : offered()));
     renderGate();
     fireEvent.click(await screen.findByRole("button", { name: t.passkeySignIn }));
-    expect((await findAlert()).textContent).toContain(t.passkeyCancelled);
+    expect(await findAlertMessage()).toBe(t.passkeyCancelled);
     expect(calls.some((c) => c.url === "/api/session/passkey/finish")).toBe(false);
   });
 
@@ -273,7 +277,7 @@ describe("passkey login", () => {
       return offered();
     });
     renderGate();
-    expect((await findAlert()).textContent).toContain(t.passkeyExpired);
+    expect(await findAlertMessage()).toBe(t.passkeyExpired);
     await waitFor(() => expect(calls.filter((c) => c.url === "/api/session/passkey/finish")).toHaveLength(2));
     // The first offer and one renewal, both conditional; then no more.
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
@@ -306,7 +310,7 @@ describe("in German", () => {
     fireEvent.change(await screen.findByLabelText(de.userName), { target: { value: "alice" } });
     fireEvent.change(screen.getByLabelText(de.fieldPassword, { selector: "input" }), { target: { value: "x" } });
     fireEvent.click(screen.getByRole("button", { name: de.logIn }));
-    await waitFor(() => expect(theAlert().textContent).toContain(de.wrongLogin));
+    await waitFor(() => expect(alertMessage()).toBe(de.wrongLogin));
     expect(screen.getByRole("button", { name: de.carbon.showPassword })).toBeTruthy();
     expect(document.body.innerHTML).toContain(de.carbon.status.error);
     for (const s of english) expect(document.body.innerHTML, s).not.toContain(s);

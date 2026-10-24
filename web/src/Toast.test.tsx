@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, within } from "@testing-library/react";
 import { Toast, noticeDuration, noticeTimer, useNotice, type Notify } from "./Toast";
 
 afterEach(() => {
@@ -124,5 +124,52 @@ describe("Toast", () => {
     show({ text: "failed", error: true });
     expect(screen.getByTestId("notice-assertive").textContent).toContain("failed");
     expect(screen.getByTestId("notice-polite").textContent).toBe("");
+  });
+});
+
+describe("the notice in German", () => {
+  // Carbon's English defaults of ActionableNotification that the notice must not show.
+  const english = ["close notification", "Close", "error icon", "success icon", "Focus sentinel"];
+
+  afterEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+  });
+
+  /** Mounts the notice afresh with the browser set to German: i18n.ts reads the language when it loads. */
+  async function renderGerman() {
+    vi.resetModules();
+    vi.stubGlobal("navigator", { ...navigator, languages: ["de-DE", "en-US"], language: "de-DE" });
+    const { Toast: GermanToast, useNotice: useGermanNotice } = await import("./Toast");
+    const { messagesFor, t: texts } = await import("./i18n");
+    const de = messagesFor("de");
+    expect(texts.closeDialog).toBe(de.closeDialog);
+    let show!: Notify;
+    function Harness() {
+      const n = useGermanNotice();
+      show = n.show;
+      return <GermanToast notice={n.notice} close={n.close} pause={n.pause} resume={n.resume} />;
+    }
+    render(<Harness />);
+    return { de, show: (n: Parameters<Notify>[0]) => act(() => show(n)) };
+  }
+
+  it("names the close button and the status icons in German, nothing in English", async () => {
+    const { de, show } = await renderGerman();
+    // A success notice with Undo, as a delete shows it.
+    show({ text: "In den Papierkorb verschoben.", action: { label: de.undo, run: () => {} } });
+    const notice = within(screen.getByTestId("notice"));
+    expect(notice.getByRole("button", { name: "Schließen" })).toBeTruthy();
+    expect(notice.getByRole("button", { name: de.undo })).toBeTruthy();
+    expect(notice.getByTitle(de.carbon.status.success)).toBeTruthy();
+    for (const s of english) expect(document.body.innerHTML, s).not.toContain(s);
+
+    // An error notice, in the assertive region.
+    show({ text: "Fehlgeschlagen.", error: true });
+    const error = within(screen.getByTestId("notice"));
+    expect(screen.getByTestId("notice-assertive").contains(screen.getByTestId("notice"))).toBe(true);
+    expect(error.getByRole("button", { name: "Schließen" })).toBeTruthy();
+    expect(error.getByTitle(de.carbon.status.error)).toBeTruthy();
+    for (const s of english) expect(document.body.innerHTML, s).not.toContain(s);
   });
 });
