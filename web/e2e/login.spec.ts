@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
 import { adminWithout2FA, generatedPasswordUser, lockedUser, timeStep, totp, twoFactorUser, type Login } from "./demo";
 import { expect, test } from "./fixtures";
@@ -102,4 +103,34 @@ test("a generated password must be replaced before anything else", async ({ page
   await page.getByRole("button", { name: "Change password" }).click();
   await expect(searchBox(page)).toBeVisible();
   await expect(page.getByRole("heading", { name: "Choose your own password" })).toHaveCount(0);
+});
+
+test("the web app manifest and its icons are served without a session", async ({ page }) => {
+  // The built binary: Vite copies web/public into the embedded build, and
+  // the real route table lets these paths through without a login.
+  const files: Record<string, string> = {
+    "/manifest.webmanifest": "application/manifest+json",
+    "/favicon-32.png": "image/png",
+    "/apple-touch-icon.png": "image/png",
+    "/icon-192.png": "image/png",
+    "/icon-512.png": "image/png",
+    "/icon-maskable-512.png": "image/png",
+  };
+  for (const [path, type] of Object.entries(files)) {
+    const resp = await page.request.get(path);
+    expect(resp.status(), path).toBe(200);
+    expect(resp.headers()["content-type"], path).toBe(type);
+    expect(resp.headers()["content-security-policy"], path).toContain("default-src 'self'");
+    expect(Buffer.compare(await resp.body(), readFileSync(new URL(`../public${path}`, import.meta.url))), path).toBe(0);
+  }
+});
+
+test("the product mark follows the colour scheme", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto("/");
+  await expect(page.locator(".app-mark--light")).toBeVisible();
+  await expect(page.locator(".app-mark--dark")).toBeHidden();
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.locator(".app-mark--dark")).toBeVisible();
+  await expect(page.locator(".app-mark--light")).toBeHidden();
 });

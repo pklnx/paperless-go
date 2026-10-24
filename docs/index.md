@@ -5,8 +5,9 @@ hero:
   name: paperless-go
   text: Your documents on your own server
   image:
-    src: /logo.svg
-    alt: paperless-go logo
+    light: /paperless-go-mark-light.svg
+    dark: /paperless-go-mark-dark.svg
+    alt: ""
   tagline: Scan, recognize, tag and find your documents, in the style of paperless-ngx. A server version of the Document Archive app for iPhone, iPad and Mac.
   actions:
     - theme: brand

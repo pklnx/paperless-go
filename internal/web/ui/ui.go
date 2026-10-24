@@ -8,7 +8,9 @@ package ui
 import (
 	"embed"
 	"io/fs"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -26,18 +28,55 @@ const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 
 // permissionsPolicy turns off browser features the UI never uses.
 const permissionsPolicy = "camera=(), microphone=(), geolocation=()"
 
-// Handler serves index.html at "/" and the hashed build assets at
-// "/assets/".
+// rootFiles are served from the build root (web/public): the web app manifest
+// and its icons, which browsers fetch by fixed names. Each is served only at
+// its exact path; nothing else of the build root is served by name.
+var rootFiles = map[string]string{
+	"/manifest.webmanifest":  "application/manifest+json",
+	"/favicon-32.png":        "image/png",
+	"/apple-touch-icon.png":  "image/png",
+	"/icon-192.png":          "image/png",
+	"/icon-512.png":          "image/png",
+	"/icon-maskable-512.png": "image/png",
+}
+
+// RootPaths are the request paths of the rootFiles, sorted, for the server's
+// routes.
+func RootPaths() []string {
+	return slices.Sorted(maps.Keys(rootFiles))
+}
+
+// Handler serves index.html at "/", the hashed build assets at "/assets/" and
+// the rootFiles, all from the embedded build.
 func Handler() http.Handler {
 	files, err := fs.Sub(dist, "dist")
 	if err != nil {
 		panic(err)
 	}
+	return handler(files)
+}
+
+// handler serves the UI from files, the root of a build (dist).
+func handler(files fs.FS) http.Handler {
 	index, err := fs.ReadFile(files, "index.html")
 	if err != nil {
 		index = nil // UI not built
 	}
-	assets := http.FileServerFS(files)
+	// /assets/ is served from the build's assets folder only, so no path
+	// under it reaches a file outside that folder.
+	assetFiles, err := fs.Sub(files, "assets")
+	if err != nil {
+		panic(err)
+	}
+	assets := http.StripPrefix("/assets", http.FileServerFS(assetFiles))
+	// The rootFiles are read once here, so a request only picks one of them
+	// by its exact path and never names a file.
+	root := map[string][]byte{}
+	for _, path := range RootPaths() {
+		if data, err := fs.ReadFile(files, strings.TrimPrefix(path, "/")); err == nil {
+			root[path] = data
+		}
+	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -52,6 +91,17 @@ func Handler() http.Handler {
 			return
 		}
 		h.Set("Cache-Control", "no-cache")
+		if typ, ok := rootFiles[r.URL.Path]; ok {
+			data, ok := root[r.URL.Path]
+			if !ok {
+				// Not in this build: an icon URL answering HTML helps nobody.
+				http.NotFound(w, r)
+				return
+			}
+			h.Set("Content-Type", typ)
+			_, _ = w.Write(data)
+			return
+		}
 		if index == nil {
 			h.Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)

@@ -13,7 +13,7 @@ type access int
 const (
 	accessSession access = iota // a session only; the zero value, so a forgotten field is the strictest
 	accessLogin                 // the login endpoints: no session needed, refused with a key
-	accessPublic                // no login: the health check and the UI code
+	accessPublic                // no login: the health check, the UI code and the web app manifest with its icons
 	accessRead                  // a session or an API key with "read"
 	accessUpload                // a session or an API key with "upload" or "write" (the upload only)
 	accessWrite                 // a session or an API key with "write"
@@ -42,7 +42,7 @@ func (s *Server) routes() []route {
 		return route{pattern: pattern, handler: f, access: a}
 	}
 	app := ui.Handler()
-	return []route{
+	routes := []route{
 		h("GET /healthz", s.handleHealth, accessPublic),
 
 		h("GET /api/session", s.handleGetSession, accessLogin),
@@ -118,4 +118,9 @@ func (s *Server) routes() []route {
 		{pattern: "GET /{$}", handler: app, access: accessPublic},
 		{pattern: "GET /assets/", handler: app, access: accessPublic},
 	}
+	// The web app manifest and its icons, at their fixed root paths.
+	for _, path := range ui.RootPaths() {
+		routes = append(routes, route{pattern: "GET " + path, handler: app, access: accessPublic})
+	}
+	return routes
 }

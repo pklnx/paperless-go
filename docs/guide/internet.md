@@ -39,7 +39,7 @@ Each line links to its section. Names like `example.com` stand for yours.
 
 | Path | What it gives | Limits |
 |---|---|---|
-| `/` and `/assets/` | The web UI's page and code; no data. | none |
+| `/`, `/assets/`, `/manifest.webmanifest` and the app icons (`/favicon-32.png`, `/apple-touch-icon.png`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png`) | The web UI's page and code, the web app manifest and its icons; no data. | none |
 | `/healthz` | `ok`, or `503` when the database does not answer. It pings the database (5 seconds at most). | none; see [Health check](#health-check) |
 | `POST /api/session`, `POST /api/session/2fa` | Password login and its second step. | [Login limits](#logins-on-the-internet) |
 | `POST /api/session/passkey/begin` and `/finish` | Passkey login (needs `PAPERLESS_GO_PUBLIC_URL`, else `503`). | 30 starts per minute and address, and caps on open logins |
