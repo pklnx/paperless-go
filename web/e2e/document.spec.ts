@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { seed, unique } from "./demo";
 import { expect, test } from "./fixtures";
-import { chosen, closeDocument, detail, detailForm, discardChanges, discardQuestion, documentLink, field, keepEditing, logOut, pdfPage, pick, pickTag } from "./ui";
+import { chosen, closeDocument, detail, detailForm, discardChanges, discardQuestion, documentLink, field, keepEditing, logOut, notice, openSavedViewMenu, pdfPage, pick, pickTag, search, sheet } from "./ui";
 
 /** The open document's ID, from the URL. */
 const openID = (page: Page) => new URL(page.url()).searchParams.get("doc") ?? "";
@@ -142,6 +142,56 @@ test("Back with unsaved changes asks; Keep editing keeps the URL, Discard change
   await expect(page).not.toHaveURL(/[?&]doc=/);
   await expect(detail(page, seed.warranty.title)).toHaveCount(0);
   await expect(documentLink(page, seed.warranty.title)).toBeVisible();
+});
+
+test("the question over another open modal (a view's Rename): the keyboard stays in the question, Escape answers it, the focus returns below", async ({ page }) => {
+  // A saved view, so that its Rename modal can be open next to the document (the column sits beside the detail from lg).
+  const name = unique("Lease view");
+  await page.goto("/");
+  await search(page, seed.lease.word);
+  await page.getByRole("button", { name: "Save view…", exact: true }).click();
+  await sheet(page, "Save this view").getByLabel("Name", { exact: true }).fill(name);
+  await sheet(page, "Save this view").getByRole("button", { name: "Save", exact: true }).click();
+  await expect(notice(page, `View “${name}” saved.`)).toBeVisible();
+  await documentLink(page, seed.lease.title).click();
+  await expect(detail(page, seed.lease.title)).toBeVisible();
+  await field(page, "Title").fill("Not saved");
+
+  // Rename open with the focus in its field, then Back: the question opens over it.
+  await (await openSavedViewMenu(page, name)).getByRole("menuitem", { name: "Rename", exact: true }).click();
+  const rename = sheet(page, "Rename");
+  const nameField = rename.getByLabel("Name", { exact: true });
+  await expect(nameField).toBeFocused();
+  await page.goBack();
+  const question = discardQuestion(page);
+  const keep = question.getByRole("button", { name: "Keep editing", exact: true });
+  await expect(keep).toBeFocused();
+  // Still there after the frames in which the lower modal's own focus wrap would have moved it.
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(keep).toBeFocused();
+  // Tab and Shift+Tab stay inside the question.
+  for (const key of ["Tab", "Tab", "Tab", "Tab", "Shift+Tab", "Shift+Tab", "Shift+Tab", "Shift+Tab"]) {
+    await page.keyboard.press(key);
+    await expect(question.locator(":focus")).toHaveCount(1);
+  }
+  // The first Escape answers the question (Keep editing); the focus returns into Rename, to its field.
+  await page.keyboard.press("Escape");
+  await expect(question).toHaveCount(0);
+  await expect(field(page, "Title")).toHaveValue("Not saved");
+  await expect(rename).toBeVisible();
+  await expect(nameField).toBeFocused();
+  // The next Escape closes Rename, with the focus back on its opener.
+  await page.keyboard.press("Escape");
+  await expect(rename).toHaveCount(0);
+  await expect(page.getByRole("button", { name: `Actions for ${name}`, exact: true })).toBeFocused();
+
+  // Leave nothing behind: the edit dropped, the view deleted.
+  await closeDocument(page);
+  await discardChanges(page);
+  await expect(page).not.toHaveURL(/[?&]doc=/);
+  await (await openSavedViewMenu(page, name)).getByRole("menuitem", { name: "Delete", exact: true }).click();
+  await sheet(page, `Delete “${name}”?`).getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(notice(page, `View “${name}” deleted.`)).toBeVisible();
 });
 
 test("logging out with unsaved changes asks; Keep editing keeps the session and the edit", async ({ page }) => {

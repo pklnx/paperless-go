@@ -677,11 +677,13 @@ describe("the unsaved-changes question (#150, part 8)", () => {
     expect(window.location.search).toBe("?doc=d1");
   });
 
-  it("opens the question with the focus on Keep editing when the SideNav overlay closes meanwhile, and Keep editing lands on the heading (below lg)", async () => {
+  it("makes the page inert behind the question (the SideNav overlay closing meanwhile cannot take the focus), and Keep editing lands on the heading (below lg)", async () => {
     serverWith(() => ({ status: 200, body: { user: alice } }));
     const title = await openAndEdit();
-    // A list chosen from the SideNav overlay: the overlay closes on the click and returns the
-    // focus to the menu button; the question keeps the focus on its safe button all the same.
+    // A list chosen from the SideNav overlay: the overlay closes on the click and would return
+    // the focus to the menu button. The page is inert while the question is open, so in a
+    // browser that focus() is a no-op and the focus stays on Keep editing (phone.spec.ts proves
+    // it; jsdom does not implement inert for focus).
     const menu = header().getByRole("button", { name: t.openMenu });
     menu.focus();
     fireEvent.click(menu);
@@ -690,17 +692,19 @@ describe("the unsaved-changes question (#150, part 8)", () => {
     fireEvent.click(link);
     const ask = await screen.findByRole("dialog", { name: t.discardChangesTitle });
     expect(screen.getByRole("navigation", { name: t.navigation }).className).not.toContain("cds--side-nav--expanded");
-    expect(document.activeElement).toBe(within(ask).getByRole("button", { name: t.keepEditing }));
+    expect(menu.closest("[inert]")).not.toBeNull();
+    expect(ask.closest("[inert]")).toBeNull();
     expect(window.location.search).toBe("?doc=d1");
-    // Keep editing: the link that asked sits in the closed, inert SideNav, so the focus goes to the detail's heading.
+    // Keep editing: the page is usable again; the link that asked sits in the closed, inert SideNav, so the focus goes to the detail's heading.
     fireEvent.click(within(ask).getByRole("button", { name: t.keepEditing }));
     await waitFor(() => expect(question()).toBeNull());
+    expect(menu.closest("[inert]")).toBeNull();
     expect(document.activeElement).toBe(detail().getByRole("heading", { level: 2 }));
     expect(title.value).toBe("changed");
     expect(window.location.search).toBe("?doc=d1");
   });
 
-  it("keeps the focus in the question over another open modal (lg: a view's Rename modal, then Back), without a focus fight", async () => {
+  it("makes a modal below the question inert (lg: a view's Rename modal, then Back), and gives it the focus back on Keep editing", async () => {
     await renderShell(true, "/", false, (s) => {
       s.savedViews = [savedView("v1", "Steuern", { filter: { "paperless-go": { v: 1, q: "Steuer" } } })];
       s.document = (_, path) => (path === "/api/documents/d1" ? { status: 200, body: letter } : { status: 404, body: { error: "not found" } });
@@ -713,10 +717,9 @@ describe("the unsaved-changes question (#150, part 8)", () => {
     fireEvent.click(await screen.findByRole("button", { name: t.viewActions("Steuern") }));
     fireEvent.click(within(await screen.findByRole("menu", { name: t.viewActions("Steuern") })).getByRole("menuitem", { name: t.renameView }));
     const rename = await screen.findByRole("dialog", { name: t.renameView });
-    const nameField = within(rename).getByLabelText(t.viewName);
-    expect(document.activeElement).toBe(nameField);
-    // Back: the question opens over the Rename modal. Only the topmost modal keeps the focus;
-    // two traps would bounce it between them until the stack overflows.
+    expect(document.activeElement).toBe(within(rename).getByLabelText(t.viewName));
+    // Back: the question opens over the Rename modal, which is inert meanwhile (so its own
+    // focus wrap and Escape are off in a browser); the focus is in the question.
     const errors: unknown[] = [];
     const onError = (e: ErrorEvent) => {
       errors.push(e.error ?? e.message);
@@ -727,13 +730,16 @@ describe("the unsaved-changes question (#150, part 8)", () => {
       act(() => window.history.back());
       const ask = await screen.findByRole("dialog", { name: t.discardChangesTitle });
       expect(errors).toEqual([]);
-      expect(document.activeElement).toBe(within(ask).getByRole("button", { name: t.keepEditing }));
-      expect(screen.getByRole("dialog", { name: t.renameView })).toBeTruthy();
+      // Where the focus is meanwhile is the browser's business (inert; document.spec.ts proves it): jsdom does not implement inert.
+      expect(rename.closest("[inert]")).toBe(rename.closest(".cds--modal"));
+      expect(ask.closest("[inert]")).toBeNull();
       expect(window.location.search).toBe("?doc=d1");
-      // Keep editing: the question closes and the focus goes back to the Rename modal's field.
+      // Keep editing: the Rename modal is usable again (the focus goes back to its field in a
+      // browser, where the lower modal's own focus wrap was off meanwhile; document.spec.ts).
       fireEvent.click(within(ask).getByRole("button", { name: t.keepEditing }));
       await waitFor(() => expect(question()).toBeNull());
-      expect(document.activeElement).toBe(nameField);
+      expect(rename.closest("[inert]")).toBeNull();
+      expect(screen.getByRole("dialog", { name: t.renameView })).toBeTruthy();
       expect(title.value).toBe("changed");
       expect(errors).toEqual([]);
     } finally {
