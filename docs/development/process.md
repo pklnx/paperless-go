@@ -166,10 +166,10 @@ there is no release. To finish the release:
    API again): compare the version in the re-run's summary with the first
    attempt.
 
-To abandon the release instead, point the floating tags back to the previous
-release by hand and delete the new package version (package settings on
-GitHub, "Manage versions"). Moving a tag needs a `docker login ghcr.io` with
-a token that has `write:packages`:
+To abandon the release instead, point the tags `X.Y`, `X` and `latest` back
+to the previous release by hand and delete the new package version (package
+settings on GitHub, "Manage versions"). Moving a tag needs a
+`docker login ghcr.io` with a token that has `write:packages`:
 
 ```sh
 docker buildx imagetools create -t ghcr.io/pklnx/paperless-go:latest ghcr.io/pklnx/paperless-go:26.10-1
@@ -186,13 +186,11 @@ The workflow writes an upgrade paragraph into every release's notes
 [Upgrades guide](../guide/operations#upgrades), and the generated notes list
 the `breaking` and `db-migration` pull requests first. Add manual upgrade notes
 only when a change needs more than these generic steps. The first semver
-release (no `vX.Y.Z` tag before it) also gets a paragraph for automatic image
-updaters: the tag `26.10` stays on `26.10-1`, and tools should switch to an
-exact version or `1.0` (`1` also brings minor releases, which may include a
-migration; until `./pgo migrate` runs, the web server does not start). `1.0`
-gets nothing new once a newer minor or major release is out, so the notes tell
-users to move the tag to the newest `X.Y` tag (set `PAPERLESS_GO_IMAGE`, run
-`./pgo migrate`, then `docker compose up -d web`).
+release (no `vX.Y.Z` tag before it) also got a paragraph for automatic image
+updaters (the tag `26.10` stays on `26.10-1`); it was published with 1.0.0,
+and once a `vX.Y.Z` tag exists no release prints it again. The current advice
+for updaters is in [Versions](../guide/operations#versions): an exact version
+or `X.Y`, moved to the newest `X.Y` tag after reading that release's notes.
 
 `./pgo --version` and `paperless-go --version` show the version. The release
 image shows `X.Y.Z` (for example `1.0.0`). A build from a clone shows
