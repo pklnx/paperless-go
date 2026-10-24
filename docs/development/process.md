@@ -36,7 +36,7 @@ issue, and the plan is updated in place. When the plan is good, the
 reviewer or the maintainer replaces `review` with **`ready`**. Only `ready` issues are implemented.
 
 A plan with several parts gets one sub-issue per part, titled
-`<what> (#N, part K)`, created by the session planner when the plan is
+`<what> (#N, part K)`, created by the planner or the coordinator when the plan is
 posted. The `ready` on the main issue covers all parts, and the main issue
 closes with the last part.
 
@@ -57,7 +57,9 @@ a Dependabot pull request or a follow-up issue.
 
 All reviews run in Claude sessions, local or cloud. Every pull request
 with app code gets a session review. Risky pull requests (deletes, schema
-changes, rewriting user data, sending documents to external services) also
+changes, rewriting user data, sending documents to external services,
+changes to the serving layer: static file serving, response headers, CSP,
+routing) also
 get a second, independent session review: a separate reviewer agent that does
 not see the first review beforehand. The coordinator adds the label
 **`second-review`** to each of them, including every pull request that
