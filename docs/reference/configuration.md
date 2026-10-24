@@ -14,7 +14,7 @@ Compose, set them in `.env`; `docker-compose.yml` passes them on.
 | `WEB_BIND` | `127.0.0.1` | Address the web UI is published on. See [Security](./security#network-access). |
 | `WEB_PORT` | `8080` | Port the web UI is published on. |
 | `POSTGRES_PORT` | `5432` | Port PostgreSQL is published on, on `127.0.0.1` only. |
-| `PAPERLESS_GO_IMAGE` | the bundle's version | Image of the web server and the CLI. |
+| `PAPERLESS_GO_IMAGE` | the bundle's version | Image of the web server and the CLI. A value set in `.env` stays when you extract a newer bundle; see [Upgrades](../guide/operations#upgrades). |
 
 ## Server
 
