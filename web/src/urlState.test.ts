@@ -310,6 +310,42 @@ describe("useViewState with a guard that asks", () => {
     }
   });
 
+  it("(f) forgets an armed skip when the guard is removed: a new guard is asked about the old target", async () => {
+    window.history.replaceState(null, "", "/?inbox=1");
+    const { result } = renderHook(() => useViewState());
+    act(() => result.current[1]({ doc: "d1" }));
+    const q = asking();
+    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
+    const asked: (ViewState | null)[] = [];
+    let remove = () => {};
+    try {
+      act(() => {
+        window.history.replaceState(null, "", "/?inbox=1");
+        popstate();
+      });
+      await waitFor(() => expect(q.asked).toHaveLength(1));
+      await q.answer(0, true);
+      expect(back).toHaveBeenCalledTimes(1);
+      // The skip is armed; the detail goes (a 401, a document switch) and another guard takes over.
+      q.remove();
+      remove = setNavigationGuard((next) => {
+        asked.push(next);
+        return false;
+      });
+      act(() => {
+        window.history.replaceState(null, "", "/?inbox=1");
+        popstate();
+      });
+      expect(asked).toHaveLength(1);
+      expect(asked[0]?.inbox).toBe("1");
+      expect(window.location.search).toBe("?inbox=1&doc=d1");
+    } finally {
+      back.mockRestore();
+      remove();
+      q.remove();
+    }
+  });
+
   it("(b) with a question open from update, a Back only pushes the shown URL back; the answer still applies, the next update asks", async () => {
     window.history.replaceState(null, "", "/?doc=d1");
     const { result } = renderHook(() => useViewState());

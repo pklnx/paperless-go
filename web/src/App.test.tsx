@@ -677,6 +677,29 @@ describe("the unsaved-changes question (#150, part 8)", () => {
     expect(window.location.search).toBe("?doc=d1");
   });
 
+  it("opens the question with the focus on Keep editing when the SideNav overlay closes meanwhile, and Keep editing lands on the heading (below lg)", async () => {
+    serverWith(() => ({ status: 200, body: { user: alice } }));
+    const title = await openAndEdit();
+    // A list chosen from the SideNav overlay: the overlay closes on the click and returns the
+    // focus to the menu button; the question keeps the focus on its safe button all the same.
+    const menu = header().getByRole("button", { name: t.openMenu });
+    menu.focus();
+    fireEvent.click(menu);
+    const link = within(screen.getByRole("navigation", { name: t.navigation })).getByRole("link", { name: /^Inbox/ });
+    expect(document.activeElement).not.toBe(document.body);
+    fireEvent.click(link);
+    const ask = await screen.findByRole("dialog", { name: t.discardChangesTitle });
+    expect(screen.getByRole("navigation", { name: t.navigation }).className).not.toContain("cds--side-nav--expanded");
+    expect(document.activeElement).toBe(within(ask).getByRole("button", { name: t.keepEditing }));
+    expect(window.location.search).toBe("?doc=d1");
+    // Keep editing: the link that asked sits in the closed, inert SideNav, so the focus goes to the detail's heading.
+    fireEvent.click(within(ask).getByRole("button", { name: t.keepEditing }));
+    await waitFor(() => expect(question()).toBeNull());
+    expect(document.activeElement).toBe(detail().getByRole("heading", { level: 2 }));
+    expect(title.value).toBe("changed");
+    expect(window.location.search).toBe("?doc=d1");
+  });
+
   it("shows the login when the session ends while the question is open, and navigation works after the new login", async () => {
     let session: Reply = { status: 200, body: { user: alice } };
     serverWith(() => session);
