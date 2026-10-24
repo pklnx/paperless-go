@@ -809,13 +809,13 @@ describe("logging out (#105)", () => {
     serve(doc("d1", "A"));
     await openAt("/?doc=d1");
     fireEvent.change(titleField(), { target: { value: "changed" } });
-    fireEvent.click(screen.getByRole("button", { name: t.logOut }));
+    fireEvent.click(within(screen.getByRole("banner", { name: t.appName })).getByRole("button", { name: t.logOut }));
     expect(window.confirm).toHaveBeenCalledWith(t.unsavedChanges);
     expect(logouts()).toHaveLength(0);
     expect(titleField().value).toBe("changed");
 
     vi.mocked(window.confirm).mockReturnValue(true);
-    fireEvent.click(screen.getByRole("button", { name: t.logOut }));
+    fireEvent.click(within(screen.getByRole("banner", { name: t.appName })).getByRole("button", { name: t.logOut }));
     await waitFor(() => expect(logouts()).toHaveLength(1));
     expect(patches()).toHaveLength(0);
   });
@@ -823,7 +823,7 @@ describe("logging out (#105)", () => {
   it("does not ask without changes", async () => {
     serve(doc("d1", "A"));
     await openAt("/?doc=d1");
-    fireEvent.click(screen.getByRole("button", { name: t.logOut }));
+    fireEvent.click(within(screen.getByRole("banner", { name: t.appName })).getByRole("button", { name: t.logOut }));
     await waitFor(() => expect(logouts()).toHaveLength(1));
     expect(window.confirm).not.toHaveBeenCalled();
   });

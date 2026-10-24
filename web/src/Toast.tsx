@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CloseIcon, iconButton } from "./icons";
+import { ActionableNotification, FeatureFlags } from "@carbon/react";
 import { t } from "./i18n";
 
 /** How long a notice stays, in milliseconds: the time for its Undo. */
@@ -99,9 +99,24 @@ function focusAfterNotice(returnTo: Element | null) {
 }
 
 /**
- * The notice at the bottom of the screen: its text, its action and a
- * close button. Plain text only. The live regions stay mounted and only
- * their content changes, so screen readers announce each notice.
+ * The notice at the bottom of the screen: a Carbon toast notification with
+ * its text, its action and a close button. Plain text only. The live
+ * regions stay mounted and only their content changes, so screen readers
+ * announce each notice.
+ *
+ * Carbon's defaults for ActionableNotification are overridden on purpose:
+ * - role="group", not "alertdialog": Carbon moves the focus into an
+ *   alertdialog and wraps Tab inside it, so no notice would ever expire
+ *   (useNotice pauses while the notice has the focus). The announcement
+ *   comes from the app's two live regions; a polite "status" inside the
+ *   assertive region of an error notice would conflict with it.
+ * - no hasFocus (deprecated, and only for alertdialog): the app's own
+ *   focus logic below focuses Undo for keyboard users only.
+ * - closeOnEscape={false}: Escape belongs to the detail and to Carbon's
+ *   modals; the notice has its close button and expires on its own.
+ * - FeatureFlags enableFocusWrapWithoutSentinels: without it, Carbon adds
+ *   two hidden "Focus sentinel" tab stops inside the live region.
+ * ActionableNotification has no timeout; useNotice's timer unmounts it.
  */
 export function Toast({ notice, close, pause, resume }: Pick<Notices, "notice" | "close" | "pause" | "resume">) {
   const box = useRef<HTMLDivElement>(null);
@@ -147,6 +162,7 @@ export function Toast({ notice, close, pause, resume }: Pick<Notices, "notice" |
       returnTo.current = null;
     }
     if (!notice?.focus || !keyboard.current) return;
+    // The action button (Undo) comes before the close button in Carbon's markup.
     const button = box.current?.querySelector("button");
     if (!button) return;
     if (!box.current?.contains(document.activeElement)) returnTo.current = document.activeElement;
@@ -164,6 +180,7 @@ export function Toast({ notice, close, pause, resume }: Pick<Notices, "notice" |
     <div
       ref={box}
       data-testid="notice"
+      className="app-notice"
       onFocus={() => {
         // Focus from a pointer click does not stop the time; the pointer on it does.
         if (!keyboard.current || focused.current) return;
@@ -183,35 +200,40 @@ export function Toast({ notice, close, pause, resume }: Pick<Notices, "notice" |
         hovered.current = false;
         update();
       }}
-      className="pointer-events-auto flex max-w-lg items-center gap-3 rounded-lg bg-ink py-1.5 pr-1.5 pl-4 text-sm text-bg shadow-lg"
     >
-      <span className="min-w-0 wrap-anywhere">{notice.text}</span>
-      {notice.action && (
-        <button
-          type="button"
-          className="shrink-0 rounded-md px-2 py-1 font-semibold underline-offset-2 hover:underline pointer-coarse:min-h-11"
-          onClick={() => {
-            const run = notice.action!.run;
+      <FeatureFlags enableFocusWrapWithoutSentinels>
+        <ActionableNotification
+          inline={false}
+          role="group"
+          closeOnEscape={false}
+          kind={notice.error ? "error" : "success"}
+          statusIconDescription={notice.error ? t.carbon.status.error : t.carbon.status.success}
+          subtitle={notice.text}
+          aria-label={t.closeDialog}
+          actionButtonLabel={notice.action?.label}
+          onActionButtonClick={
+            notice.action &&
+            (() => {
+              const run = notice.action!.run;
+              closeHere();
+              run();
+            })
+          }
+          onClose={() => {
             closeHere();
-            run();
+            return true;
           }}
-        >
-          {notice.action.label}
-        </button>
-      )}
-      <button type="button" className={`${iconButton} text-bg hover:bg-transparent hover:text-bg`} aria-label={t.closeDialog} title={t.closeDialog} onClick={closeHere}>
-        <CloseIcon />
-      </button>
+        />
+      </FeatureFlags>
     </div>
   );
-  const region = "pointer-events-none fixed inset-x-0 bottom-[calc(1rem+env(safe-area-inset-bottom))] z-40 flex justify-center px-4";
   return (
     <>
       {/* Plain live regions (no role): they stay in the page empty, and only their content changes. */}
-      <div aria-live="polite" aria-atomic="true" data-testid="notice-polite" className={region}>
+      <div aria-live="polite" aria-atomic="true" data-testid="notice-polite" className="app-notice-region">
         {notice && !notice.error && content}
       </div>
-      <div aria-live="assertive" aria-atomic="true" data-testid="notice-assertive" className={region}>
+      <div aria-live="assertive" aria-atomic="true" data-testid="notice-assertive" className="app-notice-region">
         {notice?.error && content}
       </div>
     </>

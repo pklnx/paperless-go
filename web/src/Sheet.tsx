@@ -41,7 +41,8 @@ export function Sheet({ open, onClose, title, children }: Props) {
       }}
       // The dialog element itself is only hit outside the content, on the backdrop.
       onClick={(e) => e.target === e.currentTarget && onClose()}
-      className="sheet fixed inset-x-0 top-auto bottom-0 m-0 max-h-[85dvh] w-full max-w-none overflow-y-auto rounded-t-2xl bg-surface-raised p-0 text-ink shadow-2xl backdrop:bg-scrim md:inset-0 md:m-auto md:h-fit md:max-w-md md:rounded-2xl"
+      // A .legacy root (index.css): the dialog's border is the browser's, Carbon's reset leaves dialog alone.
+      className="legacy sheet fixed inset-x-0 top-auto bottom-0 m-0 max-h-[85dvh] w-full max-w-none overflow-y-auto rounded-t-2xl border-0 bg-surface-raised p-0 text-ink shadow-2xl backdrop:bg-scrim md:inset-0 md:m-auto md:h-fit md:max-w-md md:rounded-2xl"
     >
       {open && (
         <div className="flex flex-col gap-3 px-4 pt-2 pb-[calc(1rem+env(safe-area-inset-bottom))]">

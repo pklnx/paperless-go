@@ -61,6 +61,32 @@ const en = {
   navigation: "Navigation",
   openMenu: "Open menu",
   closeDialog: "Close",
+  /** Texts that Carbon components bring in English; passed as props or through translateWithId. */
+  carbon: {
+    showPassword: "Show password",
+    hidePassword: "Hide password",
+    copy: "Copy to clipboard",
+    copied: "Copied",
+    closeNotification: "Close notification",
+    closeModal: "Close",
+    clearSearch: "Clear the search field",
+    showMore: "Show more",
+    showLess: "Show less",
+    breadcrumb: "Breadcrumb",
+    /** The status icon of a notification, by kind. */
+    status: { error: "Error", warning: "Warning", info: "Information", success: "Done" },
+    /** The side labels of a Toggle. */
+    toggleOff: "Off",
+    toggleOn: "On",
+    /** The (hidden) scroll buttons of a TabList. */
+    scrollLeft: "Scroll left",
+    scrollRight: "Scroll right",
+    /** Message ids for translateWithId (below), added by each part that uses such a component. */
+    ids: {
+      "increment.number": "Increment number",
+      "decrement.number": "Decrement number",
+    } as Record<string, string>,
+  },
   allDocuments: "All documents",
   inbox: "Inbox",
   favorites: "Favorites",
@@ -649,6 +675,27 @@ const de: Messages = {
   navigation: "Navigation",
   openMenu: "Menü öffnen",
   closeDialog: "Schließen",
+  carbon: {
+    showPassword: "Passwort anzeigen",
+    hidePassword: "Passwort verbergen",
+    copy: "In die Zwischenablage kopieren",
+    copied: "Kopiert",
+    closeNotification: "Hinweis schließen",
+    closeModal: "Schließen",
+    clearSearch: "Suchfeld leeren",
+    showMore: "Mehr anzeigen",
+    showLess: "Weniger anzeigen",
+    breadcrumb: "Navigationspfad",
+    status: { error: "Fehler", warning: "Warnung", info: "Information", success: "Erledigt" },
+    toggleOff: "Aus",
+    toggleOn: "An",
+    scrollLeft: "Nach links blättern",
+    scrollRight: "Nach rechts blättern",
+    ids: {
+      "increment.number": "Zahl erhöhen",
+      "decrement.number": "Zahl verringern",
+    },
+  },
   allDocuments: "Alle Dokumente",
   inbox: "Eingang",
   favorites: "Favoriten",
@@ -1202,3 +1249,13 @@ export const lang: Lang = detectLang();
 
 /** The texts in the UI language. */
 export const t: Messages = messagesFor(lang);
+
+/**
+ * The translateWithId prop for Carbon components that ask for their texts by
+ * message id (for example "carbon.table.batch.cancel"): the text from
+ * t.carbon.ids in the UI language. A missing id shows as itself, so the
+ * German rendering tests of each component find it.
+ */
+export function translateWithId(id: string): string {
+  return t.carbon.ids[id] ?? id;
+}

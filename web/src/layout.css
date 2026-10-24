@@ -1,0 +1,293 @@
+/* Page layout (layer app, above Carbon). The converted views use Carbon
+   components and these classes; the unconverted views keep their Tailwind
+   utilities inside a .legacy root (index.css) until their part of #150. */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* The page reaches under notch and home indicator (viewport-fit=cover in
+   index.html); the app keeps its content clear of them. 0 elsewhere. */
+#root {
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+/* Below 16px iOS Safari zooms into the page when a field gets focus. For
+   every field, Carbon's included: a deliberate deviation from its 14px
+   fields, on phones only. */
+@media (max-width: 767px) {
+  input:not([type="checkbox"], [type="radio"]),
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
+/* The shell: Carbon's Header is fixed at the top; the app below it fills the
+   rest of the screen. The header reaches under the notch with its background
+   and keeps its content clear of it. */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding-top: 3rem;
+}
+.app-shell > .cds--header {
+  height: calc(3rem + env(safe-area-inset-top));
+  padding-top: env(safe-area-inset-top);
+  padding-right: env(safe-area-inset-right);
+  padding-left: env(safe-area-inset-left);
+}
+.app-shell__body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+/* Part 1 of #150: today's sidebar next to the page, below the header. A
+   class of its own, because a utility (layer utilities) cannot override a
+   layout.css class (layer app). Part 2 replaces it with the SideNav. */
+.app-shell__row {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+/* Part 1 of #150: the header's menu button opens today's navigation sheet.
+   Carbon hides the button only from lg (66rem), while today's sidebar is
+   permanent from md (48rem): hidden from md here, so no width shows both.
+   Part 2 moves the whole shell to lg and drops this rule. */
+@media (min-width: 48rem) {
+  .app-shell .cds--header__menu-toggle {
+    display: none;
+  }
+}
+/* The product mark (ProductMark.tsx), in the header and on the login
+   pages: never squeezed by its flex row. app-mark--light/--dark name the
+   theme's file for tests; the file itself is never recoloured. */
+.app-mark {
+  flex-shrink: 0;
+}
+.app-header__logo {
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-inline-end: 0.5rem;
+}
+/* The header's user name, from Carbon's md up. */
+.app-header__user {
+  display: none;
+  align-self: center;
+  padding-inline: 0.5rem;
+  color: var(--cds-text-secondary);
+  font-size: 0.875rem;
+  letter-spacing: 0.16px;
+  white-space: nowrap;
+}
+@media (min-width: 42rem) {
+  .app-header__user {
+    display: block;
+  }
+}
+
+/* A view below the header: one cell that fills the rest of the screen, so
+   pages scroll inside it. */
+.app-view {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-block-size: 0;
+}
+.app-view > * {
+  min-block-size: 0;
+}
+
+/* The notice (Toast.tsx): a Carbon toast notification at the bottom of the
+   screen, centred, above the header and the sidebar and below Carbon's
+   modals (z-index 9000). The live regions take no pointer events; the
+   notice itself does. */
+.app-notice-region {
+  position: fixed;
+  z-index: 8900;
+  inset-inline: 0;
+  inset-block-end: calc(1rem + env(safe-area-inset-bottom));
+  display: flex;
+  justify-content: center;
+  padding-inline: 1rem;
+  pointer-events: none;
+}
+.app-notice {
+  pointer-events: auto;
+}
+.app-notice .cds--actionable-notification {
+  margin: 0;
+}
+
+/* Login and the other screens before the app: one centered column. */
+.auth-page {
+  position: relative;
+  display: flex;
+  min-height: 100%;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+.auth-page__theme {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+}
+.auth-page__column {
+  display: flex;
+  width: 100%;
+  max-width: 24rem;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+.auth-page__brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.auth-page__form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+.auth-page__wide {
+  width: 100%;
+  max-width: none;
+}
+/* Carbon's type styles as classes. The precompiled CSS has no cds--type-*
+   classes, and it defines the --cds-heading-* / --cds-body-* tokens only
+   inside one component's scope, so they do not resolve here: the values
+   are Carbon's type scale (@carbon/type 1.x), written out. */
+.auth-page__text {
+  /* body-01 */
+  font-size: 0.875rem;
+  font-weight: 400;
+  line-height: 1.42857;
+  letter-spacing: 0.16px;
+}
+.type-heading-03 {
+  font-size: 1.25rem;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 0;
+}
+.type-heading-04 {
+  font-size: 1.75rem;
+  font-weight: 400;
+  line-height: 1.28572;
+  letter-spacing: 0;
+}
+.auth-page__or {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--cds-text-secondary);
+}
+.auth-page__or::before,
+.auth-page__or::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: var(--cds-border-subtle);
+}
+.auth-page__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+/* Text helpers; colors are Carbon's tokens. The app- prefix marks them as
+   the app's own, next to Carbon's cds-- classes, and keeps them apart from
+   Tailwind's utilities of the unconverted views. */
+.app-text-secondary {
+  color: var(--cds-text-secondary);
+}
+.app-text-error {
+  color: var(--cds-text-error);
+}
+.app-text-small {
+  /* label-01 */
+  font-size: 0.75rem;
+  line-height: 1.33333;
+  letter-spacing: 0.32px;
+}
+/* Notifications inside a tile, a form or a modal take the full width. */
+.notification--full {
+  max-inline-size: none;
+  inline-size: 100%;
+}
+
+/* The content of a Modal: paragraphs, fields and lists, one below the other. */
+.modal-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* The PDF viewer's text layer (pdf.js TextLayer, after its pdf_viewer.css):
+   transparent text over the drawn page, for selecting and finding text.
+   The layer's element sets --total-scale-factor and the rounding steps. */
+.textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  line-height: 1;
+  text-align: initial;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 0;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+
+  :is(span, br) {
+    color: transparent;
+    position: absolute;
+    white-space: pre;
+    cursor: text;
+    transform-origin: 0% 0%;
+    user-select: text;
+  }
+
+  > :not(.markedContent),
+  .markedContent span:not(.markedContent) {
+    z-index: 1;
+    --font-height: 0;
+    font-size: calc(var(--text-scale-factor) * var(--font-height));
+    --scale-x: 1;
+    --rotate: 0deg;
+    transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+  }
+
+  .markedContent {
+    display: contents;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, AccentColor, transparent 50%);
+    color: transparent;
+  }
+
+  /* pdf.js appends this to end a selection cleanly. */
+  .endOfContent {
+    display: block;
+    position: absolute;
+    inset: 100% 0 0;
+    z-index: 0;
+    cursor: default;
+    user-select: none;
+  }
+
+  &.selecting .endOfContent {
+    top: 0;
+  }
+}

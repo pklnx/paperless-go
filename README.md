@@ -83,3 +83,5 @@ documentation sources are in [`docs/`](docs/).
 
 [MIT](LICENSE). The logo and app icons are not under the MIT License; they are
 covered by [BRAND-ASSETS.md](BRAND-ASSETS.md).
+The web UI bundles third-party packages and the IBM Plex fonts; their licenses
+are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

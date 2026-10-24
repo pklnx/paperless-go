@@ -1,6 +1,8 @@
 // Light/dark theme: follows the system until the user picks one in the
 // header; the choice is remembered in localStorage (per browser).
 
+import { useSyncExternalStore } from "react";
+
 export type Theme = "light" | "dark";
 const KEY = "paperless-go.theme";
 const media = () => window.matchMedia("(prefers-color-scheme: dark)");
@@ -18,14 +20,25 @@ export function currentTheme(): Theme {
   return storedTheme() ?? (media().matches ? "dark" : "light");
 }
 
-/** The page background per theme (--color-bg), for the browser and status bar. */
-const barColor: Record<Theme, string> = { light: "#ffffff", dark: "#09090b" };
+/** The page background per theme (Carbon's white and g100), for the browser and status bar. */
+const barColor: Record<Theme, string> = { light: "#ffffff", dark: "#161616" };
+
+/** Carbon's theme class per theme. On <html>, so portaled overlays follow it too. */
+export const carbonTheme: Record<Theme, string> = { light: "cds--white", dark: "cds--g100" };
+
+/** Fired on window when a theme is applied, so every toggle on screen shows it. */
+export const THEME_EVENT = "paperless-go:theme";
 
 export function applyTheme(theme: Theme) {
-  document.documentElement.classList.toggle("dark", theme === "dark");
-  document.documentElement.style.colorScheme = theme;
+  const root = document.documentElement;
+  // The dark class drives the unconverted (Tailwind) markup until #150 part 6.
+  root.classList.toggle("dark", theme === "dark");
+  root.classList.toggle(carbonTheme.light, theme === "light");
+  root.classList.toggle(carbonTheme.dark, theme === "dark");
+  root.style.colorScheme = theme;
   // index.html has one theme-color per system scheme; a chosen theme wins over both.
   for (const meta of document.querySelectorAll('meta[name="theme-color"]')) meta.setAttribute("content", barColor[theme]);
+  window.dispatchEvent(new Event(THEME_EVENT));
 }
 
 export function setTheme(theme: Theme) {
@@ -43,4 +56,14 @@ export function initTheme() {
   media().addEventListener("change", () => {
     if (!storedTheme()) applyTheme(currentTheme());
   });
+}
+
+function subscribe(changed: () => void) {
+  window.addEventListener(THEME_EVENT, changed);
+  return () => window.removeEventListener(THEME_EVENT, changed);
+}
+
+/** The applied theme; a component using it follows a change by a toggle or by the system. */
+export function useTheme(): Theme {
+  return useSyncExternalStore(subscribe, currentTheme);
 }

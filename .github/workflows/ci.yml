@@ -192,6 +192,10 @@ jobs:
   web:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # Second guard against the telemetry postinstall of the Carbon packages;
+      # web/pnpm-workspace.yaml blocks their install scripts.
+      IBM_TELEMETRY_DISABLED: "true"
     defaults:
       run:
         working-directory: web
@@ -209,7 +213,8 @@ jobs:
       - run: pnpm test
       - run: pnpm build
       # The built output has no eval( or new Function( (the CSP has no
-      # 'unsafe-eval'); a missing or incomplete build fails too.
+      # 'unsafe-eval'), refers to no other host (IBM's font CDN included)
+      # and bundles its fonts; a missing or incomplete build fails too.
       - run: pnpm check:dist
 
   changes:
@@ -262,6 +267,10 @@ jobs:
     # scripts/ci-playwright-chromium.sh (8-13 min in mail-archive when its
     # mirror was slow). Lower it once the fallback is seen not to run.
     timeout-minutes: 20
+    env:
+      # Second guard against the telemetry postinstall of the Carbon packages;
+      # web/pnpm-workspace.yaml blocks their install scripts.
+      IBM_TELEMETRY_DISABLED: "true"
     services:
       postgres:
         # As in the test job (see there): on mirror.gcr.io, with the locale
@@ -318,6 +327,9 @@ jobs:
     # so it needs no install.
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # As in the web job, although nothing is installed here.
+      IBM_TELEMETRY_DISABLED: "true"
     defaults:
       run:
         working-directory: web

@@ -1,6 +1,6 @@
 import { bills, seed } from "./demo";
 import { expect, test } from "./fixtures";
-import { documentList, documentRow, documentRows, navigation, search, searchBox, tagEntry } from "./ui";
+import { collapseTag, documentList, documentRow, documentRows, expandTag, navigation, search, searchBox, subTagsToggle, tagEntry } from "./ui";
 
 test("a word finds exactly its document, with the word highlighted", async ({ page }) => {
   await page.goto("/");
@@ -45,6 +45,20 @@ test("a tag in the sidebar filters the list; the chip removes the filter", async
   await expect(page).not.toHaveURL(/[?&]tag=/);
   await expect(documentRow(page, seed.incomeTax.title)).toBeVisible();
   await expect(documentList(page, "All documents")).toBeVisible();
+});
+
+test("collapsed sub-tags are hidden in the sidebar, and shown again when expanded", async ({ page }) => {
+  await page.goto("/");
+  const nav = navigation(page);
+  await expect(tagEntry(nav, "Bills")).toBeVisible();
+  // Without Tailwind's preflight, the browser's [hidden] rule would lose to
+  // the list's flex utility; the .legacy reset (index.css) restores it.
+  await collapseTag(nav, "Finance");
+  await expect(subTagsToggle(nav, "Finance")).toHaveAttribute("aria-expanded", "false");
+  await expect(tagEntry(nav, "Bills")).toBeHidden();
+  await expect(tagEntry(nav, "Finance")).toBeVisible();
+  await expandTag(nav, "Finance");
+  await expect(tagEntry(nav, "Bills")).toBeVisible();
 });
 
 test("back and forward restore the search", async ({ page }) => {

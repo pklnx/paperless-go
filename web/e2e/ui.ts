@@ -67,9 +67,35 @@ export function listEntry(nav: Locator, name: string): Locator {
 /** A tag's entry in the navigation: its name, then its count. */
 export const tagEntry = listEntry;
 
-/** The phone's menu button. */
+/** The button that collapses or expands a tag's sub-tags ("Sub-tags of Finance"); aria-expanded says which. */
+export function subTagsToggle(nav: Locator, name: string): Locator {
+  return nav.getByRole("button", { name: `Sub-tags of ${name}`, exact: true });
+}
+
+/** Collapses the sub-tags of the tag named name (they must be expanded). */
+export async function collapseTag(nav: Locator, name: string): Promise<void> {
+  const toggle = subTagsToggle(nav, name);
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+}
+
+/** Expands the sub-tags of the tag named name (they must be collapsed). */
+export async function expandTag(nav: Locator, name: string): Promise<void> {
+  const toggle = subTagsToggle(nav, name);
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+}
+
+/** The header's menu button: on a phone it opens the navigation; from md it is hidden. */
 export function menuButton(page: Page): Locator {
   return page.getByRole("button", { name: "Open menu" });
+}
+
+/** The desktop sidebar (the permanent navigation from md), as opposed to the phone's navigation sheet. */
+export function sidebar(page: Page): Locator {
+  return page.getByTestId("sidebar");
 }
 
 /** Opens the navigation on a phone and returns its dialog. */
@@ -173,9 +199,48 @@ export async function confirmDialog(page: Page, action: () => Promise<void>, con
   await button.click();
 }
 
-/** The theme switch: named after the theme it switches to. */
+/** The theme switch (in the header, or on the login page): named after the theme it switches to. */
 export function themeToggle(page: Page): Locator {
   return page.getByRole("button", { name: /^Switch to (dark|light) mode$/ });
+}
+
+/** Logs out through the header's button. */
+export async function logOut(page: Page): Promise<void> {
+  await page.getByRole("banner").getByRole("button", { name: "Log out", exact: true }).click();
+}
+
+/** The login page's user name field. */
+export function userNameField(page: Page): Locator {
+  return page.getByLabel("User name", { exact: true });
+}
+
+/** The login page's password field. Exact: Carbon's show-password button and other fields' names contain "password". */
+export function passwordField(page: Page): Locator {
+  return page.getByLabel("Password", { exact: true });
+}
+
+/** The "Log in" button. Exact: "Log in with a passkey" is a button too. */
+export function logInButton(page: Page): Locator {
+  return page.getByRole("button", { name: "Log in", exact: true });
+}
+
+/**
+ * The login page's error: the message of its Carbon notification. The
+ * notification is the one alert with text (Carbon's fields keep an empty
+ * alert region of their own), and its message is the element below the
+ * status icon, whose description is not part of the message. The class is
+ * Carbon's; this is the one place that knows it.
+ */
+export function loginError(page: Page): Locator {
+  return page
+    .getByRole("alert")
+    .filter({ hasText: /\S/ })
+    .locator(".cds--inline-notification__subtitle");
+}
+
+/** The product mark (the logo) for the applied theme: exactly one img, with the theme's class (app-mark--light or app-mark--dark). */
+export function productMark(page: Page): Locator {
+  return page.locator(".app-mark");
 }
 
 /**
@@ -199,9 +264,9 @@ export function twoFactorRequiredNotice(page: Page): Locator {
 
 /** Logs in through the login page as a user without 2FA. */
 export async function logInThroughForm(page: Page, name: string, password: string): Promise<void> {
-  await page.getByLabel("User name").fill(name);
-  await page.getByLabel("Password", { exact: true }).fill(password);
-  await page.getByRole("button", { name: "Log in", exact: true }).click();
+  await userNameField(page).fill(name);
+  await passwordField(page).fill(password);
+  await logInButton(page).click();
 }
 
 /**
