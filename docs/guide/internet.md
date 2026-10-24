@@ -324,15 +324,16 @@ dump. See [Backups](./operations#backups).
 
 Read the release notes, back up, then `./pgo migrate` and `docker compose
 up -d web`; see [Upgrades](./operations#upgrades). Do not use an
-auto-updater such as Watchtower or a floating image tag: migrations run
-only with `./pgo migrate`, and the web server refuses to start while any
-are pending, so an automatic pull would take the site down. If a tool
-updates the image anyway, pin an exact version or an `X.Y` tag, as
-described in [Versions](./operations#versions). The bundle's
-`docker-compose.yml` names an exact image version, which a
-`PAPERLESS_GO_IMAGE` line in `.env` overrides; the PostgreSQL image
-`postgres:18` follows the major version only. Subscribe to the repository's
-releases to hear about security fixes.
+auto-updater such as Watchtower or a floating image tag (`latest` or a
+major tag such as `1`): migrations run only with `./pgo migrate`, and
+the web server refuses to start while any are pending, so an automatic
+pull would take the site down. If a tool updates the image anyway, pin
+an exact version or an `X.Y` tag, as described in
+[Versions](./operations#versions). The bundle's `docker-compose.yml`
+names an exact image version, which a `PAPERLESS_GO_IMAGE` line in
+`.env` overrides; the PostgreSQL image `postgres:18` follows the major
+version only. Subscribe to the repository's releases to hear about
+security fixes.
 
 ## Logs and the audit log
 
