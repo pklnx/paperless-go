@@ -45,20 +45,32 @@ function initialFocus(modal: HTMLElement, danger: boolean): HTMLElement | null {
 /** The floating parts of Carbon widgets a Modal may hold, which render outside it: the focus may go there. */
 const floating = '.cds--popover-content, .cds--overflow-menu-options, .cds--tooltip, [role="menu"], [role="listbox"]';
 
+/** The open AppModals, the topmost last: only that one keeps the focus (two traps would bounce it between them). */
+const openModals: object[] = [];
+
 /** The same Modal without the danger style: for forms like Add user. */
 export function AppModal({ onRequestClose, returnFocus, danger = false, ...props }: DangerModalProps & { danger?: boolean }) {
   const modal = useRef<HTMLDivElement>(null);
+  const me = useRef({}).current;
   const opener = useRef<Element | null>(null);
   const fallback = useRef(returnFocus);
   useLayoutEffect(() => {
     fallback.current = returnFocus;
   });
   // Closing: set before the focus goes back, so the trap below lets it.
+  // Reset on (re)mount: StrictMode runs this effect's cleanup once in
+  // development without unmounting.
   const closed = useRef(false);
   useLayoutEffect(() => {
+    closed.current = false;
+    // Topmost from here on, before Carbon's own effect focuses the first
+    // element: a Modal below this one lets that focus go.
+    openModals.push(me);
     opener.current = document.activeElement;
     return () => {
       closed.current = true;
+      const at = openModals.lastIndexOf(me);
+      if (at >= 0) openModals.splice(at, 1);
       const el = opener.current;
       if (canTakeFocus(el)) {
         el.focus();
@@ -75,11 +87,13 @@ export function AppModal({ onRequestClose, returnFocus, danger = false, ...props
   // the last button (Discard) instead of the safe one. So the move is
   // stopped before Carbon sees it (focusout in the capture phase; a focus
   // inside the Modal, or in a floating menu of it, passes), and the focus
-  // comes back to the initial element at once. Whatever moved it.
+  // comes back to the initial element at once. Whatever moved it. Only
+  // the topmost open Modal does this: a focus moving into a Modal above
+  // this one is that Modal's.
   useEffect(() => {
     const outside = (target: EventTarget | null): target is Node => {
       const root = modal.current;
-      return root !== null && !closed.current && target instanceof Node && !root.contains(target) && !(target instanceof Element && target.closest(floating));
+      return root !== null && !closed.current && openModals.at(-1) === me && target instanceof Node && !root.contains(target) && !(target instanceof Element && target.closest(floating));
     };
     const onFocusOut = (e: FocusEvent) => {
       if (outside(e.relatedTarget)) e.stopPropagation();
@@ -93,7 +107,7 @@ export function AppModal({ onRequestClose, returnFocus, danger = false, ...props
       document.removeEventListener("focusout", onFocusOut, true);
       document.removeEventListener("focusin", onFocusIn, true);
     };
-  }, [danger]);
+  }, [danger, me]);
   // Carbon's Escape listener keeps the handler of the render that opened
   // the Modal; this one always calls the current handler, so a guard like
   // "not while it sends" sees the current state.

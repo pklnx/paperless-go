@@ -700,6 +700,47 @@ describe("the unsaved-changes question (#150, part 8)", () => {
     expect(window.location.search).toBe("?doc=d1");
   });
 
+  it("keeps the focus in the question over another open modal (lg: a view's Rename modal, then Back), without a focus fight", async () => {
+    await renderShell(true, "/", false, (s) => {
+      s.savedViews = [savedView("v1", "Steuern", { filter: { "paperless-go": { v: 1, q: "Steuer" } } })];
+      s.document = (_, path) => (path === "/api/documents/d1" ? { status: 200, body: letter } : { status: 404, body: { error: "not found" } });
+    });
+    fireEvent.click(screen.getByRole("link", { name: "Rechnung" }));
+    const title = await waitFor(() => detail().getByLabelText(t.fieldTitle) as HTMLInputElement);
+    await waitFor(() => expect(title.value).toBe("Rechnung"));
+    fireEvent.change(title, { target: { value: "changed" } });
+    // The column next to the open document: a view's Rename modal is open, with the focus in its field.
+    fireEvent.click(await screen.findByRole("button", { name: t.viewActions("Steuern") }));
+    fireEvent.click(within(await screen.findByRole("menu", { name: t.viewActions("Steuern") })).getByRole("menuitem", { name: t.renameView }));
+    const rename = await screen.findByRole("dialog", { name: t.renameView });
+    const nameField = within(rename).getByLabelText(t.viewName);
+    expect(document.activeElement).toBe(nameField);
+    // Back: the question opens over the Rename modal. Only the topmost modal keeps the focus;
+    // two traps would bounce it between them until the stack overflows.
+    const errors: unknown[] = [];
+    const onError = (e: ErrorEvent) => {
+      errors.push(e.error ?? e.message);
+      e.preventDefault();
+    };
+    window.addEventListener("error", onError);
+    try {
+      act(() => window.history.back());
+      const ask = await screen.findByRole("dialog", { name: t.discardChangesTitle });
+      expect(errors).toEqual([]);
+      expect(document.activeElement).toBe(within(ask).getByRole("button", { name: t.keepEditing }));
+      expect(screen.getByRole("dialog", { name: t.renameView })).toBeTruthy();
+      expect(window.location.search).toBe("?doc=d1");
+      // Keep editing: the question closes and the focus goes back to the Rename modal's field.
+      fireEvent.click(within(ask).getByRole("button", { name: t.keepEditing }));
+      await waitFor(() => expect(question()).toBeNull());
+      expect(document.activeElement).toBe(nameField);
+      expect(title.value).toBe("changed");
+      expect(errors).toEqual([]);
+    } finally {
+      window.removeEventListener("error", onError);
+    }
+  });
+
   it("shows the login when the session ends while the question is open, and navigation works after the new login", async () => {
     let session: Reply = { status: 200, body: { user: alice } };
     serverWith(() => session);
