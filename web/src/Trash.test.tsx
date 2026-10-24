@@ -72,6 +72,13 @@ const notice = () => screen.findByTestId("notice");
 const noticeSays = (text: string) => waitFor(() => expect(screen.getByTestId("notice").textContent).toContain(text));
 const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
+/** What a browser does when the focused button is disabled: the focus falls to the body (jsdom keeps it on the button and ignores blur()). */
+function dropFocus() {
+  document.body.tabIndex = -1;
+  document.body.focus();
+  document.body.removeAttribute("tabindex");
+}
+
 async function start(url = "/") {
   window.history.replaceState(null, "", url);
   render(<App />);
@@ -690,13 +697,25 @@ describe("the trash's Carbon modals (#150, part 3)", () => {
 
   it("sends nothing from Empty trash's question on Cancel, Escape or the close button: the dry runs are the only requests", async () => {
     put(doc("2", "Alt", deleted));
-    server.bulk = (b) => (b.dryRun ? { body: { matched: 1, owners: 1, limit: 5000, fingerprint: "v2.f" } } : { body: { updated: 1 } });
+    const counted = { body: { matched: 1, owners: 1, limit: 5000, fingerprint: "v2.f" } };
+    let hold: ReturnType<typeof held> | null = null;
+    server.bulk = (b) => (b.dryRun ? (hold ? hold.promise : counted) : { body: { updated: 1 } });
     await start("/?trash=1");
     const empty = () => screen.getByRole("button", { name: t.emptyTrash });
+    // While the dry run counts, the button is disabled; a browser drops the
+    // focus from a disabled button (jsdom keeps it, so the blur is
+    // simulated), and the modal mounts with the focus on the body.
+    hold = held();
     empty().focus();
     fireEvent.click(empty());
+    expect(empty().hasAttribute("disabled")).toBe(true);
+    act(() => dropFocus());
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => hold!.release(counted));
+    hold = null;
     let ask = within(await dialog(t.emptyTrashTitle));
     expect(ask.getByText(t.purgeText(1))).toBeTruthy();
+    expect(document.activeElement).toBe(ask.getByRole("button", { name: t.cancel }));
     fireEvent.click(ask.getByRole("button", { name: t.cancel }));
     await gone(t.emptyTrashTitle);
     // The focus is back on the button that asked.

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type MouseEvent } from "react";
 import { Button, Checkbox, CheckboxGroup, RadioButton, RadioButtonGroup } from "@carbon/react";
 import { ErrorFilled } from "@carbon/icons-react";
 import { ApiError, bulkApi, type BulkAction, type BulkChange, type BulkMatch, type BulkSelection, type Metadata, type NamedRow } from "./api";
@@ -79,6 +79,12 @@ export function bulkErrorText(err: unknown): { text: string; retry: boolean } {
 
 type Message = { kind: "ok" | "info"; text: string } | { kind: "error"; text: string; retry?: () => void };
 
+/** Where the focus goes when a modal closes: the bar's button that asked (a ref, since the button is disabled while a dry run counts, and a disabled button has already lost the focus when the modal mounts). */
+type ReturnFocus = () => HTMLElement | null | undefined;
+
+/** Carbon's Modal focuses its primary button by default; a confirmation of a change to every match focuses Cancel instead, so a second Enter confirms nothing. */
+const focusCancel = ".cds--modal-footer .cds--btn--secondary";
+
 /** Whether c links documents to one owner's rows, which needs documents of a single owner. */
 function needsOneOwner(c: BulkChange): boolean {
   return (c.addTags?.length ?? 0) > 0 || (c.removeTags?.length ?? 0) > 0 || typeof c.correspondent === "string" || typeof c.documentType === "string";
@@ -151,6 +157,12 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = fal
   // Another selection: forget the old one's error, so going back to it does not show it again.
   useEffect(() => setShown((s) => (s && s.msg.kind !== "ok" && s.key !== targetKey ? null : s)), [targetKey]);
   const several = owners > 1;
+  // The bar's button that opened the current modal: the modal returns the
+  // focus there. While a dry run counts, the buttons are disabled, and a
+  // browser drops the focus from a disabled button, so the modal cannot
+  // find its opener by itself (AppModal falls back to this).
+  const opener = useRef<HTMLButtonElement | null>(null);
+  const returnFocus: ReturnFocus = () => opener.current;
 
   const own = <T extends { ownerId: number }>(rows: readonly T[]) => (ownerId === null ? rows : rows.filter((r) => r.ownerId === ownerId));
 
@@ -314,13 +326,23 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = fal
 
   const count = "ids" in target ? target.ids.length : target.matched;
   const closeSheet = () => setSheet("");
+  // The modal's own forms and confirmations: Cancel, Escape and the close button close without sending anything (Carbon's transactional Modal ignores a click outside).
   return (
     <div role="region" aria-label={t.bulkActions} className="bulk-bar">
       <div className="bulk-bar__row">
         <span className="bulk-bar__count">{t.selectedCount(count)}</span>
         <div className="bulk-bar__actions">
           {actions.map(([label, run]) => (
-            <Button key={label} kind="primary" size="md" disabled={busy} onClick={run}>
+            <Button
+              key={label}
+              kind="primary"
+              size="md"
+              disabled={busy}
+              onClick={(e: MouseEvent<HTMLButtonElement>) => {
+                opener.current = e.currentTarget;
+                run();
+              }}
+            >
               {label}
             </Button>
           ))}
@@ -337,7 +359,7 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = fal
           )}
         </p>
       )}
-      {sheet === "tags" && <TagsModal tags={own(metadata?.tags ?? [])} onApply={run} onClose={closeSheet} />}
+      {sheet === "tags" && <TagsModal tags={own(metadata?.tags ?? [])} onApply={run} onClose={closeSheet} returnFocus={returnFocus} />}
       {sheet === "corr" && (
         <NamedModal
           title={t.bulkCorrespondentTitle}
@@ -346,6 +368,7 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = fal
           clearLabel={t.bulkClearCorrespondent}
           onApply={(id) => run({ correspondent: id })}
           onClose={closeSheet}
+          returnFocus={returnFocus}
         />
       )}
       {sheet === "type" && (
@@ -356,10 +379,11 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = fal
           clearLabel={t.bulkClearType}
           onApply={(id) => run({ documentType: id })}
           onClose={closeSheet}
+          returnFocus={returnFocus}
         />
       )}
       {ask && ask.action !== "purge" && (
-        <AskModal ask={ask} note={askNote} owners={askOwners} confirm={confirmAsk} cancel={() => setAsk(null)} />
+        <AskModal ask={ask} note={askNote} owners={askOwners} confirm={confirmAsk} cancel={() => setAsk(null)} returnFocus={returnFocus} />
       )}
       <PurgeConfirm
         open={ask !== null && ask.action === "purge"}
@@ -369,6 +393,7 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = fal
         note={askNote}
         confirm={confirmAsk}
         cancel={() => setAsk(null)}
+        returnFocus={returnFocus}
       />
       {confirm && (
         <AppModal
@@ -376,6 +401,8 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = fal
           modalHeading={t.bulkConfirmTitle}
           primaryButtonText={t.bulkConfirm(confirm.n)}
           secondaryButtonText={t.cancel}
+          selectorPrimaryFocus={focusCancel}
+          returnFocus={returnFocus}
           onRequestClose={() => setConfirm(null)}
           onRequestSubmit={() => {
             setConfirm(null);
@@ -396,8 +423,8 @@ export function BulkBar({ target, metadata, ownerId, owners, onDone, trash = fal
   );
 }
 
-/** The question before checked or matched documents are moved to the trash (a danger modal) or every match is restored. */
-function AskModal({ ask, note, owners, confirm, cancel }: { ask: Ask; note?: string; owners: readonly string[]; confirm: () => void; cancel: () => void }) {
+/** The question before checked or matched documents are moved to the trash (a danger modal) or every match is restored. Both open with the focus on Cancel. */
+function AskModal({ ask, note, owners, confirm, cancel, returnFocus }: { ask: Ask; note?: string; owners: readonly string[]; confirm: () => void; cancel: () => void; returnFocus: ReturnFocus }) {
   const Modal = ask.action === "trash" ? DangerModal : AppModal;
   return (
     <Modal
@@ -405,6 +432,8 @@ function AskModal({ ask, note, owners, confirm, cancel }: { ask: Ask; note?: str
       modalHeading={ask.action === "restore" ? t.bulkRestoreTitle : t.bulkTrashTitle}
       primaryButtonText={ask.action === "restore" ? t.bulkRestoreConfirm(ask.n) : t.bulkTrashConfirm(ask.n)}
       secondaryButtonText={t.cancel}
+      selectorPrimaryFocus={focusCancel}
+      returnFocus={returnFocus}
       onRequestClose={cancel}
       onRequestSubmit={confirm}
     >
@@ -417,8 +446,13 @@ function AskModal({ ask, note, owners, confirm, cancel }: { ask: Ask; note?: str
   );
 }
 
-/** Tags to add and tags to remove, two columns of checkboxes in tree order. A tag checked in both is refused before anything is sent. */
-function TagsModal({ tags, onApply, onClose }: { tags: readonly NonNullable<Metadata["tags"]>[number][]; onApply: (c: BulkChange) => void; onClose: () => void }) {
+/**
+ * Tags to add and tags to remove, two columns of checkboxes in tree order.
+ * A tag checked in both is refused before anything is sent. The focus
+ * starts on the first checkbox (Apply, Carbon's default, is disabled until
+ * something is chosen and would take no focus); with no tags, on Close.
+ */
+function TagsModal({ tags, onApply, onClose, returnFocus }: { tags: readonly NonNullable<Metadata["tags"]>[number][]; onApply: (c: BulkChange) => void; onClose: () => void; returnFocus: ReturnFocus }) {
   const [add, setAdd] = useState<Set<string>>(new Set());
   const [remove, setRemove] = useState<Set<string>>(new Set());
   const base = useId();
@@ -440,9 +474,15 @@ function TagsModal({ tags, onApply, onClose }: { tags: readonly NonNullable<Meta
   };
   const column = (which: "add" | "remove", legend: string, set: Set<string>, put: (s: Set<string>) => void) => (
     <CheckboxGroup legendText={legend} className="bulk-tags__column">
-      {rows.map(({ tag, depth }) => (
+      {rows.map(({ tag, depth }, i) => (
         <div key={tag.id} className="bulk-tags__row" style={{ paddingInlineStart: `${Math.min(depth, 6) * 0.75}rem` }}>
-          <Checkbox id={`${base}-${which}-${tag.id}`} labelText={tag.name} checked={set.has(tag.id)} onChange={() => toggle(set, put, tag.id)} />
+          <Checkbox
+            id={`${base}-${which}-${tag.id}`}
+            labelText={tag.name}
+            checked={set.has(tag.id)}
+            onChange={() => toggle(set, put, tag.id)}
+            {...(which === "add" && i === 0 ? { "data-modal-primary-focus": "" } : {})}
+          />
         </div>
       ))}
     </CheckboxGroup>
@@ -454,6 +494,8 @@ function TagsModal({ tags, onApply, onClose }: { tags: readonly NonNullable<Meta
       secondaryButtonText={t.cancel}
       primaryButtonDisabled={both || nothing}
       hasScrollingContent
+      selectorPrimaryFocus={rows.length === 0 ? ".cds--modal-close" : undefined}
+      returnFocus={returnFocus}
       onRequestClose={onClose}
       onRequestSubmit={submit}
     >
@@ -482,7 +524,7 @@ function TagsModal({ tags, onApply, onClose }: { tags: readonly NonNullable<Meta
   );
 }
 
-/** One correspondent or type, or none (clears it): a radio group. */
+/** One correspondent or type, or none (clears it): a radio group. The focus starts on the first radio button (Apply is disabled until one is chosen). */
 function NamedModal({
   title,
   rows,
@@ -490,6 +532,7 @@ function NamedModal({
   clearLabel,
   onApply,
   onClose,
+  returnFocus,
 }: {
   title: string;
   rows: readonly NamedRow[];
@@ -498,6 +541,7 @@ function NamedModal({
   clearLabel: string;
   onApply: (id: string | null) => void;
   onClose: () => void;
+  returnFocus: ReturnFocus;
 }) {
   // "" is nothing chosen yet; "-" is the clearing choice.
   const [choice, setChoice] = useState("");
@@ -512,6 +556,7 @@ function NamedModal({
       secondaryButtonText={t.cancel}
       primaryButtonDisabled={!choice}
       hasScrollingContent
+      returnFocus={returnFocus}
       onRequestClose={onClose}
       onRequestSubmit={submit}
     >
@@ -531,7 +576,7 @@ function NamedModal({
           valueSelected={choice}
           onChange={(value) => setChoice(String(value))}
         >
-          <RadioButton id={`${base}-clear`} value="-" labelText={clearLabel} />
+          <RadioButton id={`${base}-clear`} value="-" labelText={clearLabel} data-modal-primary-focus="" />
           {sortByName(rows, (r) => r.name).map((r) => (
             <RadioButton key={r.id} id={`${base}-${r.id}`} value={r.id} labelText={r.name} />
           ))}

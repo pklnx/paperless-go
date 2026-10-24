@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button, InlineNotification } from "@carbon/react";
 import { ApiError, bulkApi, type BulkMatch, type DocumentSummary, type User } from "./api";
 import { bulkErrorText } from "./BulkBar";
@@ -45,9 +45,10 @@ export function foreignOwners(docs: readonly DocumentSummary[], user: User): str
 /**
  * The confirmation of a permanent delete: always asked (maintainer
  * decision 4 on #12), naming other users' documents' owners. A Carbon
- * danger Modal, mounted only while open; Cancel, Escape, the close button
- * and a click outside send nothing (cancel), also while the request runs,
- * so a late failure goes to the caller's notice.
+ * danger Modal, mounted only while open; Cancel, Escape and the close
+ * button send nothing (cancel), also while the request runs, so a late
+ * failure goes to the caller's notice. Carbon's transactional Modal
+ * ignores a click outside.
  */
 export function PurgeConfirm({
   open,
@@ -116,6 +117,10 @@ export function EmptyTrash({ everyone, onDone, notify }: { everyone: boolean; on
   const [confirm, setConfirm] = useState<{ n: number; fingerprint: string; changed: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<Message | null>(null);
+  // The question returns the focus here: the button is disabled while the
+  // dry run counts, and a browser drops the focus from a disabled button
+  // before the modal could record it as the opener.
+  const button = useRef<HTMLButtonElement>(null);
   const count = (changed: boolean) => {
     setBusy(true);
     setMsg({ kind: "info", text: t.bulkCounting });
@@ -164,7 +169,7 @@ export function EmptyTrash({ everyone, onDone, notify }: { everyone: boolean; on
 
   return (
     <div className="trash-actions">
-      <Button kind="danger--tertiary" size="md" disabled={busy} onClick={() => count(false)}>
+      <Button ref={button} kind="danger--tertiary" size="md" disabled={busy} onClick={() => count(false)}>
         {everyone ? t.emptyMyTrash : t.emptyTrash}
       </Button>
       {msg && (
@@ -185,6 +190,7 @@ export function EmptyTrash({ everyone, onDone, notify }: { everyone: boolean; on
         note={confirm?.changed ? t.bulkMatchChanged(confirm.n) : everyone ? t.emptyTrashOwnOnly : undefined}
         confirm={() => confirm && purge(confirm.fingerprint)}
         cancel={() => setConfirm(null)}
+        returnFocus={() => button.current}
       />
     </div>
   );

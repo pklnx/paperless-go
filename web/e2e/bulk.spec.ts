@@ -11,9 +11,11 @@ test("two checked documents get a tag and a correspondent through the bulk bar",
   const bar = bulkBar(page);
   await expect(bar.getByText("2 selected", { exact: true })).toBeVisible();
 
-  // A tag: its sheet lists every tag twice, to add and to remove.
+  // A tag: its sheet lists every tag twice, to add and to remove. It opens
+  // with the focus inside, on the first checkbox (Apply is disabled).
   await bar.getByRole("button", { name: "Tags…" }).click();
   const tags = sheet(page, "Tags of the selected documents");
+  await expect(tags.getByRole("group", { name: "Add", exact: true }).getByRole("checkbox").first()).toBeFocused();
   await tags.getByRole("group", { name: "Add", exact: true }).getByRole("checkbox", { name: bulkNames.tag, exact: true }).check();
   await tags.getByRole("button", { name: "Apply", exact: true }).click();
   await expect(tags).toBeHidden();
@@ -83,17 +85,24 @@ test("Cancel in the every-match confirmation sends no change: the dry run is the
   const bar = bulkBar(page);
   await expect(bar.getByText(`${work.batch.count} selected`, { exact: true })).toBeVisible();
 
-  // The action counts again (a dry run) and asks; Cancel sends nothing.
-  await bar.getByRole("button", { name: "Favorite", exact: true }).click();
+  // The action counts again (a dry run) and asks, with the focus on Cancel
+  // (not on the primary, so a second Enter confirms nothing); Cancel sends
+  // nothing and returns the focus to the button that asked, although that
+  // button was disabled while the dry run counted.
+  const favorite = bar.getByRole("button", { name: "Favorite", exact: true });
+  await favorite.click();
   const confirm = sheet(page, "Change all matches?");
   await expect(confirm).toContainText(`This changes ${work.batch.count} documents: every match of this search, also those not loaded yet.`);
+  await expect(confirm.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
   await confirm.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(confirm).toBeHidden();
-  // Escape sends nothing either.
-  await bar.getByRole("button", { name: "Favorite", exact: true }).click();
+  await expect(favorite).toBeFocused();
+  // Escape sends nothing either, and returns the focus the same way.
+  await favorite.click();
   await expect(sheet(page, "Change all matches?")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(sheet(page, "Change all matches?")).toBeHidden();
+  await expect(favorite).toBeFocused();
   // The selection and its count stay.
   await expect(bar.getByText(`${work.batch.count} selected`, { exact: true })).toBeVisible();
 

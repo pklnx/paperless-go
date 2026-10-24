@@ -41,6 +41,13 @@ const box = (name: string) => {
 };
 const bar = () => within(byLabel<HTMLElement>("[role=region]", t.bulkActions));
 
+/** What a browser does when the focused button is disabled: the focus falls to the body (jsdom keeps it on the button and ignores blur()). */
+function dropFocus() {
+  document.body.tabIndex = -1;
+  document.body.focus();
+  document.body.removeAttribute("tabindex");
+}
+
 async function start() {
   render(<App />);
   await waitFor(() => expect(gets("/api/documents").length).toBeGreaterThan(0));
@@ -705,7 +712,9 @@ describe("the bar's Carbon modals (#150, part 3)", () => {
 
   it("sends nothing from the every-match confirmation on Cancel, Escape or the close button: the dry runs are the only requests", async () => {
     server.documents = twoPages();
-    server.bulk = (b) => (b.dryRun ? { body: { matched: 3, owners: 1, limit: 5000, fingerprint: "v1.fp" } } : { body: { updated: 3 } });
+    const counted = { body: { matched: 3, owners: 1, limit: 5000, fingerprint: "v1.fp" } };
+    let hold: ReturnType<typeof held> | null = null;
+    server.bulk = (b) => (b.dryRun ? (hold ? hold.promise : counted) : { body: { updated: 3 } });
     await start();
     fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
     fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
@@ -713,10 +722,21 @@ describe("the bar's Carbon modals (#150, part 3)", () => {
     const favorite = () => bar().getByRole("button", { name: t.bulkFavorite });
     expect(bar().getByText(t.selectedCount(3))).toBeTruthy();
 
+    // While the dry run counts, the bar's buttons are disabled; a browser
+    // drops the focus from a disabled button (jsdom keeps it, so the blur
+    // is simulated), and the modal mounts with the focus on the body.
+    hold = held();
     favorite().focus();
     fireEvent.click(favorite());
+    expect(favorite().hasAttribute("disabled")).toBe(true);
+    act(() => dropFocus());
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => hold!.release(counted));
+    hold = null;
     let ask = within(await dialog(t.bulkConfirmTitle));
     expect(ask.getByText(t.bulkConfirmText(3))).toBeTruthy();
+    // It opens with the focus on Cancel, not on "Change 3 documents".
+    expect(document.activeElement).toBe(ask.getByRole("button", { name: t.cancel }));
     fireEvent.click(ask.getByRole("button", { name: t.cancel }));
     await gone(t.bulkConfirmTitle);
     // The focus is back on the button that asked.
@@ -818,18 +838,22 @@ describe("the bar's Carbon modals (#150, part 3)", () => {
     server.types = [named("d1", "Rechnung")];
     await start();
     fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 1") }));
-    for (const [button, title] of [
-      [t.bulkTags, t.bulkTagsTitle],
-      [t.bulkCorrespondent, t.bulkCorrespondentTitle],
-      [t.bulkType, t.bulkTypeTitle],
+    for (const [button, title, choose] of [
+      [t.bulkTags, t.bulkTagsTitle, (d: ReturnType<typeof within>) => fireEvent.click(within(d.getAllByRole("group")[0]!).getByRole("checkbox", { name: "Steuer" }))],
+      [t.bulkCorrespondent, t.bulkCorrespondentTitle, (d: ReturnType<typeof within>) => fireEvent.click(d.getByRole("radio", { name: "Finanzamt" }))],
+      [t.bulkType, t.bulkTypeTitle, (d: ReturnType<typeof within>) => fireEvent.click(d.getByRole("radio", { name: "Rechnung" }))],
     ] as const) {
       fireEvent.click(bar().getByRole("button", { name: button }));
       let d = within(await dialog(title));
       expect(d.getByRole("button", { name: t.apply }).hasAttribute("disabled")).toBe(true);
+      // Something chosen, Apply enabled: Cancel still sends nothing.
+      choose(d);
+      expect(d.getByRole("button", { name: t.apply }).hasAttribute("disabled")).toBe(false);
       fireEvent.click(d.getByRole("button", { name: t.cancel }));
       await gone(title);
       fireEvent.click(bar().getByRole("button", { name: button }));
       d = within(await dialog(title));
+      choose(d);
       fireEvent.keyDown(d.getByRole("button", { name: t.cancel }), { key: "Escape" });
       await gone(title);
     }
@@ -886,5 +910,79 @@ describe("the list and the bar in German", () => {
     for (const s of ["Cancel", ">Close<", "Select all rows", "Dismiss", "Clear search input", "Clear filter", "Focus sentinel", "items selected", ">Apply<", "Load more", "Download"]) {
       expect(html, s).not.toContain(s);
     }
+  });
+});
+
+describe("the focus of the bar's modals (#190 review round 1)", () => {
+  const dialog = (name: string) => screen.findByRole("dialog", { name });
+  const inside = (name: string) => screen.getByRole("dialog", { name }).contains(document.activeElement);
+
+  it("moves the focus into the tag, correspondent and type forms when they open: the first choice, or Close without tags", async () => {
+    server.documents = () => page([doc("1", "Doc 1")]);
+    server.tags = [tag("t1", "Steuer"), tag("t2", "2024", "t1")];
+    server.correspondents = [named("c1", "Finanzamt")];
+    server.types = [named("d1", "Rechnung")];
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 1") }));
+    const tags = () => bar().getByRole("button", { name: t.bulkTags });
+    tags().focus();
+    fireEvent.click(tags());
+    let d = within(await dialog(t.bulkTagsTitle));
+    // The first checkbox of "Add" (Apply is disabled and could take no focus).
+    expect(document.activeElement).toBe(within(d.getAllByRole("group")[0]!).getByRole("checkbox", { name: "Steuer" }));
+    expect(inside(t.bulkTagsTitle)).toBe(true);
+    fireEvent.click(d.getByRole("button", { name: t.cancel }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.bulkTagsTitle })).toBeNull());
+    expect(document.activeElement).toBe(tags());
+
+    fireEvent.click(bar().getByRole("button", { name: t.bulkCorrespondent }));
+    d = within(await dialog(t.bulkCorrespondentTitle));
+    expect(document.activeElement).toBe(d.getByRole("radio", { name: t.bulkClearCorrespondent }));
+    fireEvent.keyDown(d.getByRole("radio", { name: t.bulkClearCorrespondent }), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.bulkCorrespondentTitle })).toBeNull());
+
+    fireEvent.click(bar().getByRole("button", { name: t.bulkType }));
+    d = within(await dialog(t.bulkTypeTitle));
+    expect(document.activeElement).toBe(d.getByRole("radio", { name: t.bulkClearType }));
+    fireEvent.click(d.getByRole("button", { name: t.cancel }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.bulkTypeTitle })).toBeNull());
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(0);
+  });
+
+  it("moves the focus to Close when the tag form has no tags to offer", async () => {
+    server.documents = () => page([doc("1", "Doc 1")]);
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 1") }));
+    fireEvent.click(bar().getByRole("button", { name: t.bulkTags }));
+    const d = within(await dialog(t.bulkTagsTitle));
+    expect(d.getByText(t.bulkNoTags)).toBeTruthy();
+    expect(document.activeElement).toBe(d.getByRole("button", { name: t.carbon.closeModal }));
+    expect(inside(t.bulkTagsTitle)).toBe(true);
+  });
+
+  it("opens the every-match restore question with the focus on Cancel, and returns it to the button that asked, which was disabled meanwhile", async () => {
+    const trashed = { deletedAt: "2026-10-01T08:00:00Z", purgeAt: "2026-10-31T08:00:00Z" };
+    server.documents = (p) => (p.get("cursor") ? page([doc("3", "Doc 3", trashed)]) : page([doc("1", "Doc 1", trashed), doc("2", "Doc 2", trashed)], "c1"));
+    const counted = { body: { matched: 3, owners: 1, limit: 5000, fingerprint: "v1.fp" } };
+    let hold: ReturnType<typeof held> | null = null;
+    server.bulk = (b) => (b.dryRun ? (hold ? hold.promise : counted) : { body: { updated: 3 } });
+    window.history.replaceState(null, "", "/?trash=1");
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    await screen.findByText(t.allMatchesSelected(3));
+    const restore = () => bar().getByRole("button", { name: t.restore });
+    hold = held();
+    restore().focus();
+    fireEvent.click(restore());
+    act(() => dropFocus());
+    await act(async () => hold!.release(counted));
+    hold = null;
+    const ask = within(await dialog(t.bulkRestoreTitle));
+    expect(document.activeElement).toBe(ask.getByRole("button", { name: t.cancel }));
+    fireEvent.keyDown(ask.getByRole("button", { name: t.cancel }), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: t.bulkRestoreTitle })).toBeNull());
+    expect(document.activeElement).toBe(restore());
+    expect(requests.filter((r) => r.method !== "GET" && !(r.body && r.body.dryRun === true))).toHaveLength(0);
   });
 });
