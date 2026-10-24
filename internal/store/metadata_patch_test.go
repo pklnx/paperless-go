@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -120,15 +119,15 @@ func TestPatchErrors(t *testing.T) {
 }
 
 // Two patches of different fields of one tag both survive: the second one
-// waits for the first one's row lock and then reads its result. Without
-// the lock it would read the old row and write the old name back.
+// waits for the first one (at the owner gate of their store) and then
+// reads its result. Without the locks it would read the old row and write
+// the old name back.
 func TestConcurrentPatchesBothSurvive(t *testing.T) {
-	st, url := storetest.NewWithURL(t)
+	st := storetest.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
 	tag := mustTag(t, st, alice, "Old", nil)
-	watch := connect(t, url)
 
 	locked, release := make(chan struct{}), make(chan struct{})
 	first := make(chan error, 1)
@@ -152,25 +151,20 @@ func TestConcurrentPatchesBothSurvive(t *testing.T) {
 	}
 
 	second := make(chan error, 1)
+	gated := make(chan struct{})
 	go func() {
-		_, err := st.PatchTag(ctx, alice, tag.ID, store.TagPatch{ColorHex: ptr("#00FF00")})
+		// In one store the second patch waits at the owner gate, before
+		// it takes a connection.
+		wait := store.WithGateWait(ctx, func() { close(gated) })
+		_, err := st.PatchTag(wait, alice, tag.ID, store.TagPatch{ColorHex: ptr("#00FF00")})
 		second <- err
 	}()
-	// Wait until the second patch waits for the row lock.
-	for {
-		var waiting bool
-		err := watch.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%-- name: LockTag%')`).Scan(&waiting)
-		if err == nil && waiting {
-			break
-		}
-		select {
-		case err := <-second:
-			t.Fatalf("second patch finished without waiting for the lock: %v", err)
-		case <-ctx.Done():
-			t.Fatal("second patch never waited for the lock")
-		default:
-		}
+	select {
+	case <-gated:
+	case err := <-second:
+		t.Fatalf("second patch finished without waiting for the first: %v", err)
+	case <-ctx.Done():
+		t.Fatal("second patch never waited for the first")
 	}
 	close(release)
 	if err := <-first; err != nil {
@@ -186,98 +180,94 @@ func TestConcurrentPatchesBothSurvive(t *testing.T) {
 }
 
 // Opposite moves (X under Y while Y goes under X) give one success and one
-// tag_cycle, not a deadlock. With FOR UPDATE in LockTag, A's foreign-key
-// check on Y (FOR KEY SHARE) waited for B's row lock while A held the
-// owner's cycle-check advisory lock that B then waited for: PostgreSQL
-// aborted one of them (ErrRetry, 503).
+// tag_cycle, not a deadlock (#84): both take alice's owner lock before any
+// row, so B waits for it while A is held after its locks; released, A
+// moves X under Y, and B then finds the cycle. Without the owner lock B
+// reaches its own row lock while A is held (the moves no longer
+// serialise before their rows; FOR NO KEY UPDATE in LockTag and the
+// trigger's lock still keep the result right).
 func TestOppositeTagMovesGiveCycle(t *testing.T) {
-	st, url := storetest.NewWithURL(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
-	x := mustTag(t, st, alice, "X", nil)
-	y := mustTag(t, st, alice, "Y", nil)
-	watch := connect(t, url)
+	withAndWithoutOwnerLock(t, func(t *testing.T, locked bool) {
+		st, url := storetest.NewWithURL(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+		x := mustTag(t, st, alice, "X", nil)
+		y := mustTag(t, st, alice, "Y", nil)
+		watch := connect(t, url)
+		mover := openWith(t, url, map[string]string{"application_name": "mover-b"})
 
-	move := func(id, parent string, locked, release chan struct{}, done chan<- error) {
-		e := &store.AuditEntry{Actor: store.ActorCLI, Action: "tag.update"}
-		e.SetTarget(store.TargetTag, "", "")
-		held := store.WithAfterLock(store.WithAudit(ctx, e), func() {
-			close(locked)
-			select { // a failing test cancels ctx, so the pool can close
-			case <-release:
-			case <-ctx.Done():
+		move := func(s *store.Store, id, parent string, ctx context.Context) error {
+			e := &store.AuditEntry{Actor: store.ActorCLI, Action: "tag.update"}
+			e.SetTarget(store.TargetTag, "", "")
+			_, err := s.PatchTag(store.WithAudit(ctx, e), alice, id, store.TagPatch{SetParent: true, ParentID: &parent})
+			return err
+		}
+		a := holdAfterLock(ctx, t, "move A", func(ctx context.Context) error { return move(st, x.ID, y.ID, ctx) })
+		lockedB := make(chan struct{}, 1)
+		doneB := make(chan error, 1)
+		go func() {
+			doneB <- move(mover, y.ID, x.ID, store.WithAfterLock(ctx, func() { lockedB <- struct{}{} }))
+		}()
+		if locked {
+			// B waits for alice's owner lock, before any row.
+			for {
+				var waiting bool
+				err := watch.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+					WHERE datname = current_database() AND application_name = 'mover-b'
+					AND wait_event_type = 'Lock' AND wait_event = 'advisory')`).Scan(&waiting)
+				if err == nil && waiting {
+					break
+				}
+				select {
+				case <-lockedB:
+					t.Fatal("move B locked its row while A held the owner lock")
+				case err := <-doneB:
+					t.Fatalf("move B finished while A held the owner lock: %v", err)
+				case <-ctx.Done():
+					t.Fatal("move B never waited for the owner lock")
+				default:
+				}
 			}
-		})
-		_, err := st.PatchTag(held, alice, id, store.TagPatch{SetParent: true, ParentID: &parent})
-		done <- err
-	}
-	lockedA, releaseA, doneA := make(chan struct{}), make(chan struct{}), make(chan error, 1)
-	lockedB, releaseB, doneB := make(chan struct{}), make(chan struct{}), make(chan error, 1)
-	go move(x.ID, y.ID, lockedA, releaseA, doneA)
-	go move(y.ID, x.ID, lockedB, releaseB, doneB)
-	for _, l := range []struct {
-		name   string
-		locked chan struct{}
-		done   chan error
-	}{{"A", lockedA, doneA}, {"B", lockedB, doneB}} {
-		select {
-		case <-l.locked:
-		case err := <-l.done:
-			t.Fatalf("move %s finished before it locked: %v", l.name, err)
-		case <-ctx.Done():
-			t.Fatalf("move %s never locked its row", l.name)
+		} else {
+			select {
+			case <-lockedB:
+			case err := <-doneB:
+				t.Fatalf("move B finished before it locked: %v", err)
+			case <-ctx.Done():
+				t.Fatal("move B never locked its row")
+			}
 		}
-	}
-
-	// Release A; it either finishes or waits for a lock in UpdateTag (Y's
-	// row, the old lock mode).
-	close(releaseA)
-	var errA error
-	finishedA := false
-	for !finishedA {
-		select {
-		case errA = <-doneA:
-			finishedA = true
-			continue
-		case err := <-doneB:
-			t.Fatalf("move B finished before it was released: %v", err)
-		case <-ctx.Done():
-			t.Fatal("move A neither finished nor waited for a lock")
-		default:
+		close(a.release)
+		errA, errB := <-a.done, <-doneB
+		if !locked {
+			// Unserialised, either move may come first; one fails.
+			if (errA == nil) == (errB == nil) || !errors.Is(errA, store.ErrTagCycle) && !errors.Is(errB, store.ErrTagCycle) {
+				t.Errorf("moves without the owner lock: %v, %v; want one success and one ErrTagCycle", errA, errB)
+			}
+			return
 		}
-		var waiting bool
-		err := watch.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%-- name: UpdateTag%')`).Scan(&waiting)
-		if err == nil && waiting {
-			break
+		if errA != nil {
+			t.Errorf("move A: %v, want success", errA)
 		}
-	}
-	close(releaseB)
-	if !finishedA {
-		errA = <-doneA
-	}
-	errB := <-doneB
-	if errA != nil {
-		t.Errorf("move A: %v, want success", errA)
-	}
-	if !errors.Is(errB, store.ErrTagCycle) {
-		t.Errorf("move B: %v, want ErrTagCycle", errB)
-	}
-	if gx, err := st.GetTag(ctx, alice, x.ID); err != nil || gx.ParentID == nil || *gx.ParentID != y.ID {
-		t.Errorf("X after the moves: %+v, %v; want parent Y", gx, err)
-	}
-	if gy, err := st.GetTag(ctx, alice, y.ID); err != nil || gy.ParentID != nil {
-		t.Errorf("Y after the moves: %+v, %v; want a root", gy, err)
-	}
-	var entries []string
-	rows, err := watch.Query(ctx, `SELECT target_id FROM audit_log WHERE action = 'tag.update'`)
-	if err == nil {
-		entries, err = pgx.CollectRows(rows, pgx.RowTo[string])
-	}
-	if err != nil || len(entries) != 1 || entries[0] != x.ID {
-		t.Errorf("audit entries of the moves: %v, %v; want only X's", entries, err)
-	}
+		if !errors.Is(errB, store.ErrTagCycle) {
+			t.Errorf("move B: %v, want ErrTagCycle", errB)
+		}
+		if gx, err := st.GetTag(ctx, alice, x.ID); err != nil || gx.ParentID == nil || *gx.ParentID != y.ID {
+			t.Errorf("X after the moves: %+v, %v; want parent Y", gx, err)
+		}
+		if gy, err := st.GetTag(ctx, alice, y.ID); err != nil || gy.ParentID != nil {
+			t.Errorf("Y after the moves: %+v, %v; want a root", gy, err)
+		}
+		var entries []string
+		rows, err := watch.Query(ctx, `SELECT target_id FROM audit_log WHERE action = 'tag.update'`)
+		if err == nil {
+			entries, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		}
+		if err != nil || len(entries) != 1 || entries[0] != x.ID {
+			t.Errorf("audit entries of the moves: %v, %v; want only X's", entries, err)
+		}
+	})
 }
 
 // An admin may create a row for another user; nobody else may, and an
@@ -379,34 +369,29 @@ func TestMetadataCounts(t *testing.T) {
 	}
 }
 
-// A metadata delete that PostgreSQL aborts as a deadlock victim is tried
-// again; after deadlockAttempts aborted attempts the error is ErrRetry and
-// nothing changed. A test trigger raises the deadlock on the first n
-// attempts; the sequence it counts with is not rolled back.
-func TestMetadataDeleteRetriesDeadlock(t *testing.T) {
+// A deadlock (40P01) gives ErrRetry on the first attempt, with nothing
+// written and no audit entry: the store no longer retries (the owner lock
+// rules out deadlocks between its writers; ErrRetry is the net for SQL
+// outside the store). A test trigger raises the deadlock once per
+// statement; the sequence it counts with is not rolled back.
+func TestDeadlockMapsToRetry(t *testing.T) {
 	st, url := storetest.NewWithURL(t)
 	ctx := context.Background()
 	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
 	conn := connect(t, url)
-	setup := func(failures int) {
-		t.Helper()
-		if _, err := conn.Exec(ctx, `DROP TRIGGER IF EXISTS deadlock ON correspondents;
-			DROP TRIGGER IF EXISTS deadlock ON tags;
-			DROP SEQUENCE IF EXISTS deadlock_attempts;
-			CREATE SEQUENCE deadlock_attempts;`); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := conn.Exec(ctx, `CREATE OR REPLACE FUNCTION deadlock() RETURNS trigger LANGUAGE plpgsql AS $$
-			BEGIN
-				IF nextval('deadlock_attempts') <= `+strconv.Itoa(failures)+` THEN
-					RAISE EXCEPTION 'test deadlock' USING ERRCODE = 'deadlock_detected';
-				END IF;
-				RETURN OLD;
-			END $$;
-			CREATE TRIGGER deadlock BEFORE DELETE ON correspondents FOR EACH ROW EXECUTE FUNCTION deadlock();
-			CREATE TRIGGER deadlock BEFORE DELETE ON tags FOR EACH ROW EXECUTE FUNCTION deadlock();`); err != nil {
-			t.Fatal(err)
-		}
+	c := mustCorrespondent(t, st, alice, "Bank")
+	tag := mustTag(t, st, alice, "Tax", nil)
+	doc := mustDoc(t, st, alice, newDoc("doc"))
+	if _, err := conn.Exec(ctx, `CREATE SEQUENCE deadlock_attempts;
+		CREATE FUNCTION deadlock() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			PERFORM nextval('deadlock_attempts');
+			RAISE EXCEPTION 'test deadlock' USING ERRCODE = 'deadlock_detected';
+		END $$;
+		CREATE TRIGGER deadlock BEFORE DELETE ON correspondents FOR EACH ROW EXECUTE FUNCTION deadlock();
+		CREATE TRIGGER deadlock BEFORE DELETE ON tags FOR EACH ROW EXECUTE FUNCTION deadlock();
+		CREATE TRIGGER deadlock BEFORE UPDATE ON documents FOR EACH ROW EXECUTE FUNCTION deadlock();`); err != nil {
+		t.Fatal(err)
 	}
 	attempts := func() int64 {
 		t.Helper()
@@ -416,32 +401,145 @@ func TestMetadataDeleteRetriesDeadlock(t *testing.T) {
 		}
 		return n
 	}
-
-	setup(2)
-	c := mustCorrespondent(t, st, alice, "Bank")
-	e := &store.AuditEntry{Actor: store.ActorCLI, Action: "correspondent.delete"}
-	e.SetTarget(store.TargetCorrespondent, "", "")
-	if err := st.DeleteCorrespondent(store.WithAudit(ctx, e), alice, c.ID); err != nil {
-		t.Fatalf("delete after two deadlocks: %v", err)
+	entry := func(action, typ string) context.Context {
+		e := &store.AuditEntry{Actor: store.ActorCLI, Action: action}
+		e.SetTarget(typ, "", "")
+		return store.WithAudit(ctx, e)
 	}
-	if n := attempts(); n != 3 {
-		t.Errorf("%d attempts, want 3", n)
+	for i, call := range []struct {
+		name string
+		run  func() error
+	}{
+		{"delete correspondent", func() error {
+			return st.DeleteCorrespondent(entry("correspondent.delete", store.TargetCorrespondent), alice, c.ID)
+		}},
+		{"delete tag", func() error { return st.DeleteTag(entry("tag.delete", store.TargetTag), alice, tag.ID) }},
+		{"patch document", func() error {
+			_, err := st.PatchDocument(entry("document.update", store.TargetDocument), alice, doc.ID, store.DocumentPatch{Title: ptr("x")})
+			return err
+		}},
+		{"bulk change", func() error {
+			_, err := st.BulkUpdateDocuments(entry("document.bulk_update", ""), alice, store.BulkSelection{IDs: []string{doc.ID}},
+				store.BulkChange{IsFavorite: ptr(true)}, "document.update")
+			return err
+		}},
+	} {
+		if err := call.run(); !errors.Is(err, store.ErrRetry) {
+			t.Errorf("%s: %v, want ErrRetry", call.name, err)
+		}
+		if n := attempts(); n != int64(i+1) {
+			t.Errorf("%s: %d attempts in all, want %d (one each)", call.name, n, i+1)
+		}
 	}
-	var entries int
-	if err := conn.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'correspondent.delete' AND target_id = $1`, c.ID).Scan(&entries); err != nil || entries != 1 {
-		t.Errorf("audit entries of the delete: %d, %v", entries, err)
-	}
-
-	setup(3)
-	tag := mustTag(t, st, alice, "Tax", nil)
-	if err := st.DeleteTag(ctx, alice, tag.ID); !errors.Is(err, store.ErrRetry) {
-		t.Fatalf("delete with deadlocks on every attempt: %v, want ErrRetry", err)
-	}
-	if n := attempts(); n != 3 {
-		t.Errorf("%d attempts, want 3", n)
+	if _, err := st.GetCorrespondent(ctx, alice, c.ID); err != nil {
+		t.Errorf("correspondent gone after ErrRetry: %v", err)
 	}
 	if _, err := st.GetTag(ctx, alice, tag.ID); err != nil {
 		t.Errorf("tag gone after ErrRetry: %v", err)
+	}
+	if g := getDoc(t, st, doc.ID); g.Title != "doc" || g.IsFavorite {
+		t.Errorf("document changed after ErrRetry: %+v", g)
+	}
+	if n := len(auditRows(t, conn)); n != 0 {
+		t.Errorf("%d audit entries after ErrRetry, want 0", n)
+	}
+}
+
+// A metadata delete holds the owner lock before it deletes: held there
+// (WithAfterLock), a bulk change of the row's documents that links
+// nothing waits for it (at the owner lock). After the release both
+// succeed and the documents lost the link.
+func TestMetadataDeleteHoldsOwnerLock(t *testing.T) {
+	for _, kind := range []string{"tag", "correspondent", "documentType"} {
+		t.Run(kind, func(t *testing.T) {
+			st, dbURL := storetest.NewWithURL(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+			var id string
+			var del func(context.Context, *store.Store) error
+			var link func(in *store.NewDocument)
+			switch kind {
+			case "tag":
+				id = mustTag(t, st, alice, "T", nil).ID
+				link = func(in *store.NewDocument) { in.TagIDs = []string{id} }
+				del = func(ctx context.Context, s *store.Store) error { return s.DeleteTag(ctx, alice, id) }
+			case "correspondent":
+				id = mustCorrespondent(t, st, alice, "C").ID
+				link = func(in *store.NewDocument) { in.CorrespondentID = &id }
+				del = func(ctx context.Context, s *store.Store) error { return s.DeleteCorrespondent(ctx, alice, id) }
+			default:
+				id = mustDocType(t, st, alice, "Y").ID
+				link = func(in *store.NewDocument) { in.DocumentTypeID = &id }
+				del = func(ctx context.Context, s *store.Store) error { return s.DeleteDocumentType(ctx, alice, id) }
+			}
+			var docs []string
+			for _, name := range []string{"d1", "d2"} {
+				in := newDoc(name)
+				link(&in)
+				docs = append(docs, mustDoc(t, st, alice, in).ID)
+			}
+			deleter, bulkStore := lockOrderStores(t, dbURL, "deleter", "bulk")
+			conn := connect(t, dbURL)
+
+			h := holdAfterLock(ctx, t, "delete", func(ctx context.Context) error { return del(ctx, deleter) })
+			changed := startChange(ctx, func(ctx context.Context) error {
+				_, err := bulkStore.BulkUpdateDocuments(ctx, alice, store.BulkSelection{IDs: docs}, store.BulkChange{IsFavorite: ptr(true)}, "document.update")
+				return err
+			})
+			waitForLock(ctx, t, conn, "bulk", changed)
+			close(h.release)
+			if err := <-h.done; err != nil {
+				t.Errorf("delete: %v", err)
+			}
+			if err := <-changed; err != nil {
+				t.Errorf("bulk change: %v", err)
+			}
+			for _, d := range docs {
+				if g := getDoc(t, st, d); !g.IsFavorite || len(g.TagIDs) != 0 || g.CorrespondentID != nil || g.DocumentTypeID != nil {
+					t.Errorf("after both: %+v", g)
+				}
+			}
+		})
+	}
+}
+
+// Deletes of a tag P and of its child C on a document with both do not
+// deadlock: held after its owner lock, P's delete makes C's wait at the
+// owner lock before C's delete holds anything; after the release both
+// succeed. Before #99 C's delete held C and waited for the document while
+// P's SET NULL (parent_id) waited for C (then #99 locked the children
+// first; with the owner lock no row order is needed).
+func TestDeleteParentAndChildTagNoDeadlock(t *testing.T) {
+	st, dbURL := storetest.NewWithURL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	alice := store.Scope{UserID: storetest.User(t, st, "alice", false).ID}
+	p := mustTag(t, st, alice, "P", nil)
+	c := mustTag(t, st, alice, "C", p)
+	in := newDoc("doc")
+	in.TagIDs = []string{p.ID, c.ID}
+	doc := mustDoc(t, st, alice, in)
+	childStore, parentStore := lockOrderStores(t, dbURL, "child", "parent")
+	conn := connect(t, dbURL)
+
+	h := holdAfterLock(ctx, t, "parent's delete", func(ctx context.Context) error { return parentStore.DeleteTag(ctx, alice, p.ID) })
+	deleted := startChange(ctx, func(ctx context.Context) error { return childStore.DeleteTag(ctx, alice, c.ID) })
+	waitForLock(ctx, t, conn, "child", deleted)
+	close(h.release)
+	if err := <-h.done; err != nil {
+		t.Errorf("parent's delete: %v", err)
+	}
+	if err := <-deleted; err != nil {
+		t.Errorf("child's delete: %v", err)
+	}
+	for _, tag := range []*store.Tag{p, c} {
+		if _, err := st.GetTag(ctx, alice, tag.ID); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("tag %s after the deletes: %v", tag.Name, err)
+		}
+	}
+	if g := getDoc(t, st, doc.ID); len(g.TagIDs) != 0 {
+		t.Errorf("document after the deletes: %+v", g)
 	}
 }
 

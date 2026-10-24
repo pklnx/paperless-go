@@ -18,7 +18,8 @@ INSERT INTO documents (
 RETURNING id;
 
 -- name: DocumentByOriginal :one
-SELECT id, title FROM documents WHERE owner_id = $1 AND original_sha256 = $2;
+-- Also a trashed document: it still holds the owner's copy of the file.
+SELECT id, title, deleted_at, purge_at FROM documents WHERE owner_id = $1 AND original_sha256 = $2;
 
 -- name: GetDocument :one
 -- The columns are listed: the search vectors (search_text, search_links)
@@ -27,38 +28,47 @@ SELECT d.id, d.owner_id, d.title, d.document_date, d.created_at, d.modified_at, 
        d.is_inbox, d.archive_serial_number, d.page_count, d.extracted_text, d.text_source, d.source,
        d.original_file_name, d.original_sha256, d.original_size, d.original_mime, d.archive_sha256,
        d.archive_size, d.correspondent_id, d.document_type_id, d.thumbnail_sha256, d.processing_note,
+       d.deleted_at, d.purge_at,
        COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
                  WHERE dt.document_id = d.id), '{}')::uuid[] AS tag_ids
 FROM documents d
-WHERE d.id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR d.owner_id = sqlc.narg(owner));
+WHERE d.id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR d.owner_id = sqlc.narg(owner))
+  -- A trashed document is found until it is due for purge (store.trashDue).
+  AND (d.deleted_at IS NULL
+       OR coalesce(d.purge_at, d.deleted_at + sqlc.arg(retention_us)::bigint * interval '1 microsecond')
+          > sqlc.arg(now)::timestamptz);
 
 -- name: ListDocuments :many
 SELECT d.id, d.owner_id, d.title, d.document_date, d.created_at, d.modified_at, d.notes, d.is_favorite,
        d.is_inbox, d.archive_serial_number, d.page_count, d.extracted_text, d.text_source, d.source,
        d.original_file_name, d.original_sha256, d.original_size, d.original_mime, d.archive_sha256,
        d.archive_size, d.correspondent_id, d.document_type_id, d.thumbnail_sha256, d.processing_note,
+       d.deleted_at, d.purge_at,
        COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
                  WHERE dt.document_id = d.id), '{}')::uuid[] AS tag_ids
 FROM documents d
-WHERE sqlc.narg(owner)::bigint IS NULL OR d.owner_id = sqlc.narg(owner)
+WHERE (sqlc.narg(owner)::bigint IS NULL OR d.owner_id = sqlc.narg(owner)) AND d.deleted_at IS NULL
 ORDER BY d.created_at DESC, d.id;
 
--- name: UpdateDocument :execrows
-UPDATE documents
-SET title = sqlc.arg(title),
-    document_date = COALESCE(sqlc.narg(document_date)::timestamptz, document_date), notes = sqlc.arg(notes),
-    is_favorite = sqlc.arg(is_favorite), is_inbox = sqlc.arg(is_inbox),
-    archive_serial_number = sqlc.narg(archive_serial_number),
-    correspondent_id = sqlc.narg(correspondent_id), document_type_id = sqlc.narg(document_type_id),
-    modified_at = now()
+-- DocumentOwner and DocumentOwners read the owner of documents in the
+-- scope, without a lock, so a writer can take the owner's write lock
+-- (store.lockOwners) before it locks or writes the rows.
+-- name: DocumentOwner :one
+SELECT owner_id FROM documents
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner));
 
--- LockDocument locks the document row for a change of its tags and returns
--- its owner. FOR NO KEY UPDATE: no key column changes, so the foreign-key
--- checks of rows referencing the document (document_tags, jobs; FOR KEY
--- SHARE) need not wait for the change.
+-- name: DocumentOwners :many
+SELECT DISTINCT owner_id FROM documents
+WHERE id = ANY (sqlc.arg(ids)::uuid[]) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
+ORDER BY owner_id;
+
+-- LockDocument locks the document row for a change and returns its owner,
+-- modified_at (PatchDocument's precondition) and its trash state. FOR NO KEY UPDATE: no
+-- key column changes, so the foreign-key checks of rows referencing the
+-- document (document_tags, jobs; FOR KEY SHARE) need not wait for the
+-- change.
 -- name: LockDocument :one
-SELECT owner_id FROM documents
+SELECT owner_id, modified_at, deleted_at, purge_at FROM documents
 WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
 FOR NO KEY UPDATE;
 
@@ -71,16 +81,18 @@ SELECT sqlc.arg(owner_id)::bigint, sqlc.arg(document_id)::uuid, t
 FROM unnest(sqlc.arg(tag_ids)::uuid[]) AS t
 ON CONFLICT DO NOTHING;
 
--- name: TouchDocument :exec
-UPDATE documents SET modified_at = now() WHERE id = $1;
-
--- name: DeleteDocument :execrows
+-- name: DeleteDocument :one
 DELETE FROM documents
-WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner));
+WHERE id = sqlc.arg(id) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
+RETURNING owner_id;
 
 -- name: PatchDocument :execrows
 -- Sets only the given columns: a NULL narg, or a false set_* flag, keeps
 -- the stored value. The caller has locked the row (LockDocument).
+-- Every write of a PATCH-able field or of document_tags advances
+-- modified_at strictly (GREATEST: now() is the transaction's start, so two
+-- writes in one transaction, or in the same microsecond, would otherwise
+-- get the same value); equal modified_at means unchanged since read.
 UPDATE documents
 SET title = COALESCE(sqlc.narg(title)::text, title),
     document_date = COALESCE(sqlc.narg(document_date)::timestamptz, document_date),
@@ -93,18 +105,17 @@ SET title = COALESCE(sqlc.narg(title)::text, title),
                             ELSE correspondent_id END,
     document_type_id = CASE WHEN sqlc.arg(set_document_type)::boolean THEN sqlc.narg(document_type_id)::uuid
                             ELSE document_type_id END,
-    modified_at = now()
+    modified_at = GREATEST(now(), modified_at + interval '1 microsecond')
 WHERE id = sqlc.arg(id);
 
 -- name: DocumentByASN :one
-SELECT id, title FROM documents WHERE owner_id = $1 AND archive_serial_number = $2;
+SELECT id, title, deleted_at, purge_at FROM documents WHERE owner_id = $1 AND archive_serial_number = $2;
 
--- LockDocuments locks the documents of ids in the scope, in id order, so
--- two bulk changes over overlapping sets wait for each other instead of
--- deadlocking. It returns the locked ids with their owners. FOR NO KEY
+-- LockDocuments locks the documents of ids in the scope, in id order, and
+-- returns the locked ids with their owners and trash state. FOR NO KEY
 -- UPDATE as in LockDocument.
 -- name: LockDocuments :many
-SELECT id, owner_id FROM documents
+SELECT id, owner_id, deleted_at, purge_at FROM documents
 WHERE id = ANY (sqlc.arg(ids)::uuid[]) AND (sqlc.narg(owner)::bigint IS NULL OR owner_id = sqlc.narg(owner))
 ORDER BY id
 FOR NO KEY UPDATE;
@@ -125,7 +136,7 @@ ON CONFLICT DO NOTHING;
 
 -- name: BulkUpdateDocuments :exec
 -- Sets the given columns of the locked documents as PatchDocument does,
--- and touches modified_at of every one of them.
+-- and advances modified_at of every one of them.
 UPDATE documents
 SET is_favorite = COALESCE(sqlc.narg(is_favorite)::boolean, is_favorite),
     is_inbox = COALESCE(sqlc.narg(is_inbox)::boolean, is_inbox),
@@ -133,5 +144,41 @@ SET is_favorite = COALESCE(sqlc.narg(is_favorite)::boolean, is_favorite),
                             ELSE correspondent_id END,
     document_type_id = CASE WHEN sqlc.arg(set_document_type)::boolean THEN sqlc.narg(document_type_id)::uuid
                             ELSE document_type_id END,
-    modified_at = now()
+    modified_at = GREATEST(now(), modified_at + interval '1 microsecond')
 WHERE id = ANY (sqlc.arg(ids)::uuid[]);
+
+-- The trash (documents_trash.go). The callers have locked the rows
+-- (LockDocument, LockDocuments) and checked their state. None of these
+-- touches a column of the search triggers, and modified_at stays: the
+-- document itself did not change.
+
+-- name: TrashDocuments :exec
+UPDATE documents SET deleted_at = sqlc.arg(now)::timestamptz
+WHERE id = ANY (sqlc.arg(ids)::uuid[]) AND deleted_at IS NULL;
+
+-- name: RestoreDocuments :exec
+UPDATE documents SET deleted_at = NULL, purge_at = NULL
+WHERE id = ANY (sqlc.arg(ids)::uuid[]) AND deleted_at IS NOT NULL;
+
+-- name: PurgeDocuments :exec
+-- Marks the documents for the sweeper: from now on they are due.
+UPDATE documents SET purge_at = sqlc.arg(now)::timestamptz
+WHERE id = ANY (sqlc.arg(ids)::uuid[]) AND deleted_at IS NOT NULL;
+
+-- name: DueDocuments :many
+-- Trashed documents due for purge at now: their purge was asked for, or
+-- the retention passed. Without a lock: the sweeper locks and checks them
+-- again per owner.
+SELECT id, owner_id FROM documents
+WHERE deleted_at IS NOT NULL
+  AND coalesce(purge_at, deleted_at + sqlc.arg(retention_us)::bigint * interval '1 microsecond') <= sqlc.arg(now)::timestamptz
+ORDER BY owner_id, id
+LIMIT sqlc.arg(lim);
+
+-- name: DeleteDueDocuments :many
+-- Deletes the locked documents the sweeper checked, with their tag links,
+-- deadlines and jobs (cascades), and returns what the audit and the file
+-- removal need.
+DELETE FROM documents
+WHERE id = ANY (sqlc.arg(ids)::uuid[]) AND deleted_at IS NOT NULL
+RETURNING id, owner_id, purge_at, original_sha256, archive_sha256, thumbnail_sha256;

@@ -34,6 +34,27 @@ func (f *searchFixture) doc(id string) *store.Document {
 	return d
 }
 
+// confirmed adds the fingerprint of a dry run of body's match to body, as
+// the UI does before it sends a change by search; a dry run that is
+// refused or has no fingerprint (above the limit) adds nothing.
+func (f *searchFixture) confirmed(body map[string]any) map[string]any {
+	f.t.Helper()
+	_, dry := body["dryRun"]
+	_, has := body["fingerprint"]
+	if body["match"] == nil || dry || has {
+		return body
+	}
+	dryRun := map[string]any{"match": body["match"], "dryRun": true}
+	if a, ok := body["action"]; ok {
+		dryRun["action"] = a // the fingerprint is bound to the action
+	}
+	resp, out := f.do("POST", "/api/documents/bulk", dryRun)
+	if fp, ok := out["fingerprint"].(string); resp.StatusCode == 200 && ok {
+		body["fingerprint"] = fp
+	}
+	return body
+}
+
 func TestPatchDocumentAPI(t *testing.T) {
 	f := newSearchFixture(t)
 	id := f.ids["Telekom"]
@@ -249,7 +270,7 @@ func TestBulkDocumentsByMatch(t *testing.T) {
 	rootDoc := searchDoc(t, f.st, store.Scope{UserID: root.ID}, "Root", "Eine Rechnung von root.")
 	bulk := func(body map[string]any, want int) map[string]any {
 		t.Helper()
-		return f.expect("POST", "/api/documents/bulk", body, want)
+		return f.expect("POST", "/api/documents/bulk", f.confirmed(body), want)
 	}
 	favorites := func() []string {
 		t.Helper()
@@ -269,7 +290,7 @@ func TestBulkDocumentsByMatch(t *testing.T) {
 
 	// Alice: the search and her own documents only, with filters.
 	if out := bulk(map[string]any{"match": map[string]any{"q": "rechnung"}, "dryRun": true}, 200); out["matched"] != float64(2) ||
-		out["owners"] != float64(1) || out["limit"] != float64(store.MaxBulkMatches) {
+		out["owners"] != float64(1) || out["limit"] != float64(store.MaxBulkMatches) || !strings.HasPrefix(fmt.Sprint(out["fingerprint"]), "v2.") {
 		t.Errorf("dry run: %v", out)
 	}
 	if got := favorites(); len(got) != 0 {
@@ -322,7 +343,7 @@ func TestBulkDocumentsByMatch(t *testing.T) {
 	if got := favorites(); !slices.Equal(got, []string{"Bob"}) {
 		t.Errorf("admin, bob's: %v", got)
 	}
-	resp, out := f.do("POST", "/api/documents/bulk", map[string]any{"match": map[string]any{"q": "rechnung"}, "addTags": []string{f.tag(f.alice, "X")}})
+	resp, out := f.do("POST", "/api/documents/bulk", f.confirmed(map[string]any{"match": map[string]any{"q": "rechnung"}, "addTags": []string{f.tag(f.alice, "X")}}))
 	if resp.StatusCode != 400 || out["code"] != codeSeveralOwners {
 		t.Errorf("admin match with a tag: %d %v", resp.StatusCode, out)
 	}
@@ -332,12 +353,82 @@ func TestBulkDocumentsByMatch(t *testing.T) {
 		INSERT INTO documents (owner_id, title, source, original_sha256, original_size, original_mime)
 		SELECT $1, 'Massenbrief', 'file', encode(sha256(('mass-' || g)::bytea), 'hex'), 1, 'application/pdf'
 		FROM generate_series(1, $2) AS g`, f.bob.UserID, store.MaxBulkMatches+1)
-	resp, out = f.do("POST", "/api/documents/bulk", map[string]any{"match": map[string]any{"q": "massenbrief"}, "favorite": true})
+	// The limit comes before the fingerprint.
+	resp, out = f.do("POST", "/api/documents/bulk", map[string]any{"match": map[string]any{"q": "massenbrief"}, "favorite": true, "fingerprint": "v1.stale"})
 	if resp.StatusCode != 400 || out["code"] != codeTooMany || out["matched"] != float64(store.MaxBulkMatches+1) || out["limit"] != float64(store.MaxBulkMatches) {
 		t.Errorf("over the limit: %d %v", resp.StatusCode, out)
 	}
 	if out := bulk(map[string]any{"match": map[string]any{"q": "massenbrief"}, "dryRun": true}, 200); out["matched"] != float64(store.MaxBulkMatches+1) {
 		t.Errorf("dry run over the limit: %v", out)
+	} else if _, ok := out["fingerprint"]; ok {
+		t.Errorf("dry run over the limit has a fingerprint: %v", out)
+	}
+}
+
+// A change by search sends its dry run's fingerprint and is refused with
+// 409 match_changed (and the count it would cover now, also 0) when the
+// matches changed since; fingerprints are refused where they do not
+// belong (#106).
+func TestBulkDocumentsMatchChanged(t *testing.T) {
+	f := newSearchFixture(t)
+	match := map[string]any{"q": "rechnung"}
+	dry := f.expect("POST", "/api/documents/bulk", map[string]any{"match": match, "dryRun": true}, 200)
+	fp, _ := dry["fingerprint"].(string)
+	if dry["matched"] != float64(2) || fp == "" {
+		t.Fatalf("dry run: %v", dry)
+	}
+	// One more match since the count.
+	searchDoc(t, f.st, f.alice, "Neu", "Noch eine Rechnung.")
+	n := len(auditLog(t, f.st))
+	resp, out := f.do("POST", "/api/documents/bulk", map[string]any{"match": match, "fingerprint": fp, "favorite": true})
+	if resp.StatusCode != 409 || out["code"] != codeMatchChanged || out["matched"] != float64(3) {
+		t.Errorf("one more: %d %v", resp.StatusCode, out)
+	}
+	// Nothing matches any more: matched 0 is sent.
+	resp, out = f.do("POST", "/api/documents/bulk", map[string]any{"match": map[string]any{"q": "rechnung", "favorite": true}, "fingerprint": fp, "inbox": false})
+	if m, ok := out["matched"]; resp.StatusCode != 409 || out["code"] != codeMatchChanged || !ok || m != float64(0) {
+		t.Errorf("now empty: %d %v", resp.StatusCode, out)
+	}
+	if got := newEntries(t, f.st, n); len(got) != 0 {
+		t.Errorf("refused changes logged %+v", got)
+	}
+	for title, id := range f.ids {
+		if d := f.doc(id); d.IsFavorite {
+			t.Errorf("%s changed by a refused change", title)
+		}
+	}
+	// With the new count's fingerprint it goes through.
+	if out := f.expect("POST", "/api/documents/bulk", f.confirmed(map[string]any{"match": match, "favorite": true}), 200); out["updated"] != float64(3) {
+		t.Errorf("after counting again: %v", out)
+	}
+	// Missing or misplaced fingerprints.
+	for _, c := range []struct {
+		name string
+		body map[string]any
+	}{
+		{"match without fingerprint", map[string]any{"match": match, "favorite": true}},
+		{"ids with fingerprint", map[string]any{"ids": []string{f.ids["Strom"]}, "fingerprint": fp, "favorite": true}},
+		{"dry run with fingerprint", map[string]any{"match": match, "dryRun": true, "fingerprint": fp}},
+	} {
+		if resp, out := f.do("POST", "/api/documents/bulk", c.body); resp.StatusCode != 400 || out["code"] != codeInvalidSelect {
+			t.Errorf("%s: %d %v", c.name, resp.StatusCode, out)
+		}
+	}
+}
+
+// A non-admin's dry run naming another owner is refused before any count,
+// and an admin's names the empty set for an owner without matches: every
+// dry-run path that answers carries a fingerprint (#106).
+func TestBulkDryRunFingerprintEveryPath(t *testing.T) {
+	f := newSearchFixture(t)
+	f.expect("POST", "/api/documents/bulk", map[string]any{"match": map[string]any{"owner": fmt.Sprint(f.bob.UserID)}, "dryRun": true}, 403)
+	empty := f.expect("POST", "/api/documents/bulk", map[string]any{"match": map[string]any{"q": "nirgends"}, "dryRun": true}, 200)
+	if fp, _ := empty["fingerprint"].(string); empty["matched"] != float64(0) || !strings.HasPrefix(fp, "v2.") {
+		t.Errorf("empty dry run: %v", empty)
+	}
+	// An empty confirmation that is still empty: {updated: 0}.
+	if out := f.expect("POST", "/api/documents/bulk", map[string]any{"match": map[string]any{"q": "nirgends"}, "fingerprint": empty["fingerprint"], "favorite": true}, 200); out["updated"] != float64(0) {
+		t.Errorf("still empty: %v", out)
 	}
 }
 
@@ -417,7 +508,9 @@ func TestBulkDocumentsAdminOwnerID(t *testing.T) {
 	} {
 		c.body["favorite"] = true
 		n := len(auditLog(t, f.st))
-		f.expect("POST", "/api/documents/bulk", c.body, 200)
+		// The dry run's fingerprint is taken in the same owner scope as
+		// the change: otherwise the change would answer 409.
+		f.expect("POST", "/api/documents/bulk", f.confirmed(c.body), 200)
 		perDoc := 0
 		for _, e := range newEntries(t, f.st, n) {
 			if e.Action != "document.update" {

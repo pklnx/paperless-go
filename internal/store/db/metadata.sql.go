@@ -12,6 +12,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const correspondentOwner = `-- name: CorrespondentOwner :one
+SELECT owner_id FROM correspondents
+WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+`
+
+type CorrespondentOwnerParams struct {
+	ID    pgtype.UUID
+	Owner *int64
+}
+
+// CorrespondentOwner, DocumentTypeOwner and TagOwner read a row's owner
+// in the scope, without a lock, so a writer can take the owner's write
+// lock (store.lockOwners) first.
+func (q *Queries) CorrespondentOwner(ctx context.Context, arg CorrespondentOwnerParams) (int64, error) {
+	row := q.db.QueryRow(ctx, correspondentOwner, arg.ID, arg.Owner)
+	var owner_id int64
+	err := row.Scan(&owner_id)
+	return owner_id, err
+}
+
 const createCorrespondent = `-- name: CreateCorrespondent :one
 
 INSERT INTO correspondents (owner_id, name, match_text, match_mode)
@@ -199,24 +219,58 @@ func (q *Queries) DeleteTag(ctx context.Context, arg DeleteTagParams) (DeleteTag
 }
 
 const documentCounts = `-- name: DocumentCounts :one
-SELECT count(*) FILTER (WHERE is_inbox)::bigint AS inbox,
-       count(*) FILTER (WHERE is_favorite)::bigint AS favorites,
-       count(*)::bigint AS total
+SELECT count(*) FILTER (WHERE deleted_at IS NULL AND is_inbox)::bigint AS inbox,
+       count(*) FILTER (WHERE deleted_at IS NULL AND is_favorite)::bigint AS favorites,
+       count(*) FILTER (WHERE deleted_at IS NULL)::bigint AS total,
+       count(*) FILTER (WHERE deleted_at IS NOT NULL
+                        AND coalesce(purge_at, deleted_at + $1::bigint * interval '1 microsecond')
+                            > $2::timestamptz)::bigint AS trash
 FROM documents
-WHERE $1::bigint IS NULL OR owner_id = $1
+WHERE $3::bigint IS NULL OR owner_id = $3
 `
+
+type DocumentCountsParams struct {
+	RetentionUs int64
+	Now         time.Time
+	Owner       *int64
+}
 
 type DocumentCountsRow struct {
 	Inbox     int64
 	Favorites int64
 	Total     int64
+	Trash     int64
 }
 
-func (q *Queries) DocumentCounts(ctx context.Context, owner *int64) (DocumentCountsRow, error) {
-	row := q.db.QueryRow(ctx, documentCounts, owner)
+// The live documents' counts, and the trash: trashed documents not yet
+// due for purge (store.trashDue).
+func (q *Queries) DocumentCounts(ctx context.Context, arg DocumentCountsParams) (DocumentCountsRow, error) {
+	row := q.db.QueryRow(ctx, documentCounts, arg.RetentionUs, arg.Now, arg.Owner)
 	var i DocumentCountsRow
-	err := row.Scan(&i.Inbox, &i.Favorites, &i.Total)
+	err := row.Scan(
+		&i.Inbox,
+		&i.Favorites,
+		&i.Total,
+		&i.Trash,
+	)
 	return i, err
+}
+
+const documentTypeOwner = `-- name: DocumentTypeOwner :one
+SELECT owner_id FROM document_types
+WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+`
+
+type DocumentTypeOwnerParams struct {
+	ID    pgtype.UUID
+	Owner *int64
+}
+
+func (q *Queries) DocumentTypeOwner(ctx context.Context, arg DocumentTypeOwnerParams) (int64, error) {
+	row := q.db.QueryRow(ctx, documentTypeOwner, arg.ID, arg.Owner)
+	var owner_id int64
+	err := row.Scan(&owner_id)
+	return owner_id, err
 }
 
 const getCorrespondent = `-- name: GetCorrespondent :one
@@ -337,7 +391,7 @@ const listCorrespondentsWithCounts = `-- name: ListCorrespondentsWithCounts :man
 SELECT c.id, c.owner_id, c.name, c.match_text, c.match_mode, c.created_at, c.modified_at,
        count(d.id)::bigint AS document_count
 FROM correspondents c
-LEFT JOIN documents d ON d.correspondent_id = c.id
+LEFT JOIN documents d ON d.correspondent_id = c.id AND d.deleted_at IS NULL
 WHERE $1::bigint IS NULL OR c.owner_id = $1
 GROUP BY c.id
 ORDER BY c.owner_id, lower(c.name), c.id
@@ -423,7 +477,7 @@ const listDocumentTypesWithCounts = `-- name: ListDocumentTypesWithCounts :many
 SELECT t.id, t.owner_id, t.name, t.symbol, t.match_text, t.match_mode, t.created_at, t.modified_at,
        count(d.id)::bigint AS document_count
 FROM document_types t
-LEFT JOIN documents d ON d.document_type_id = t.id
+LEFT JOIN documents d ON d.document_type_id = t.id AND d.deleted_at IS NULL
 WHERE $1::bigint IS NULL OR t.owner_id = $1
 GROUP BY t.id
 ORDER BY t.owner_id, lower(t.name), t.id
@@ -518,11 +572,13 @@ WITH RECURSIVE scoped AS (
     SELECT subtree.root, c.id FROM subtree JOIN tags c ON c.parent_id = subtree.id
 ), own AS (
     SELECT dt.tag_id, count(*) AS n FROM document_tags dt
+    JOIN documents d ON d.id = dt.document_id AND d.deleted_at IS NULL
     WHERE dt.tag_id IN (SELECT scoped.id FROM scoped)
     GROUP BY dt.tag_id
 ), deep AS (
     SELECT subtree.root, count(DISTINCT dt.document_id) AS n
     FROM subtree JOIN document_tags dt ON dt.tag_id = subtree.id
+    JOIN documents d ON d.id = dt.document_id AND d.deleted_at IS NULL
     GROUP BY subtree.root
 )
 SELECT t.id, t.owner_id, t.name, t.color_hex, t.symbol, t.parent_id, t.match_text, t.match_mode,
@@ -552,7 +608,8 @@ type ListTagsWithCountsRow struct {
 
 // ListTagsWithCounts counts per tag its own documents (document_count) and
 // the distinct documents of the tag and its descendants (subtree_count),
-// which is what a tag filter (SearchTagIDs) lists.
+// which is what a tag filter (SearchTagIDs) lists. Like the other counts
+// it leaves trashed documents out.
 func (q *Queries) ListTagsWithCounts(ctx context.Context, owner *int64) ([]ListTagsWithCountsRow, error) {
 	rows, err := q.db.Query(ctx, listTagsWithCounts, owner)
 	if err != nil {
@@ -669,6 +726,23 @@ func (q *Queries) LockTag(ctx context.Context, arg LockTagParams) (Tag, error) {
 		&i.ModifiedAt,
 	)
 	return i, err
+}
+
+const tagOwner = `-- name: TagOwner :one
+SELECT owner_id FROM tags
+WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+`
+
+type TagOwnerParams struct {
+	ID    pgtype.UUID
+	Owner *int64
+}
+
+func (q *Queries) TagOwner(ctx context.Context, arg TagOwnerParams) (int64, error) {
+	row := q.db.QueryRow(ctx, tagOwner, arg.ID, arg.Owner)
+	var owner_id int64
+	err := row.Scan(&owner_id)
+	return owner_id, err
 }
 
 const tagRootNameConflict = `-- name: TagRootNameConflict :one

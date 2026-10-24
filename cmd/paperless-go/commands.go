@@ -16,6 +16,7 @@ import (
 	"github.com/pklnx/paperless-go/internal/consume"
 	"github.com/pklnx/paperless-go/internal/crypto"
 	"github.com/pklnx/paperless-go/internal/store"
+	"github.com/pklnx/paperless-go/internal/sweep"
 	"github.com/pklnx/paperless-go/internal/web"
 )
 
@@ -29,10 +30,14 @@ func openApp(ctx context.Context) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	st, err := store.Open(ctx, cfg.DatabaseURL)
+	// Every writer of a hash checks that its file is in this data
+	// directory (store.Blobs); no command opens the store without it.
+	st, err := store.Open(ctx, cfg.DatabaseURL, blobstore.OpenFiles(cfg.DataDir))
 	if err != nil {
 		return nil, err
 	}
+	// Every command decides "due for purge" with the configured retention.
+	st.TrashRetention = cfg.TrashRetention
 	ensureAuditPartitions(ctx, st)
 	return &app{cfg: cfg, store: st}, nil
 }
@@ -63,6 +68,7 @@ func newMigrateCmd() *cobra.Command {
 		for _, m := range applied {
 			fmt.Fprintln(cmd.OutOrStdout(), "applied", m)
 		}
+		bindFreshDataDir(cmd, a)
 		return nil
 	}
 	cmd := &cobra.Command{
@@ -204,7 +210,12 @@ With ` + config.EnvConsumeDir + ` set, it imports the files put into the
 consume folder: consume/<user>/ for each user (created by the server), checked
 every 10 seconds. A file is imported once it has not changed for two scans,
 then deleted (also a duplicate); a file that cannot be imported moves to
-consume/<user>/failed/ with a .error.txt file that says why.`,
+consume/<user>/failed/ with a .error.txt file that says why. A file whose
+document is in the user's trash restores that document.
+
+Deleted documents stay in the trash for ` + config.EnvTrashRetention + ` (default
+720h, 30 days); every minute, and right after "delete permanently", the
+server removes the documents whose time is up.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			a, err := openApp(cmd.Context())
@@ -255,10 +266,16 @@ consume/<user>/failed/ with a .error.txt file that says why.`,
 				log.Info("watching the consume folder", "dir", a.cfg.ConsumeDir, "every", consume.DefaultInterval)
 				worker.Go(func() { consumer.Run(ctx, ticker.C) })
 			}
+			warnBinding(cmd.Context(), a.store, a.cfg.DataDir, log)
+			sweeper, wake, wakeSweeper := newSweeper(a, log, blobs)
+			sweepTicker := time.NewTicker(sweep.DefaultInterval)
+			defer sweepTicker.Stop()
+			log.Info("sweeping the trash", "retention", a.cfg.TrashRetention, "every", sweep.DefaultInterval)
+			worker.Go(func() { sweeper.Run(ctx, sweepTicker.C, wake) })
 			srv := web.New(a.store, log, web.Options{
 				AllowedHosts: a.cfg.AllowedHosts, TrustedProxies: a.cfg.TrustedProxies,
 				Sealer: sealer, SecretKey: a.cfg.SecretKey, Require2FA: a.cfg.Require2FA, PublicURL: a.cfg.PublicURL,
-				Blobs: blobs, MaxUploadSize: a.cfg.MaxUploadSize,
+				Blobs: blobs, MaxUploadSize: a.cfg.MaxUploadSize, SweepWake: wakeSweeper,
 			})
 			log.Info("listening", "addr", listen, "version", version)
 			err = srv.ListenAndServe(ctx, listen)
@@ -271,6 +288,62 @@ consume/<user>/failed/ with a .error.txt file that says why.`,
 	}
 	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:8080", "address to listen on")
 	return cmd
+}
+
+// newSweeper sets up the trash's sweeper with the store's clock and
+// retention and the data directory's files, and the channel and function
+// that wake it.
+func newSweeper(a *app, log *slog.Logger, blobs *blobstore.Store) (*sweep.Sweeper, <-chan struct{}, func()) {
+	wake, wakeFn := sweep.Wake()
+	return &sweep.Sweeper{Store: a.store, Blobs: blobs, Log: log, Now: a.store.Now, Retention: a.store.TrashRetention}, wake, wakeFn
+}
+
+// bindFreshDataDir is migrate's last step: it binds a fresh data directory
+// (no marker, no document file) to the database's installation, so the
+// sweep's walk may queue unreferenced files there (sweep.BindFresh). It
+// never fails the migration: a data directory it cannot bind is only
+// reported.
+func bindFreshDataDir(cmd *cobra.Command, a *app) {
+	dir := a.cfg.DataDir
+	warn := func(format string, args ...any) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: "+format+"\n", args...)
+	}
+	inst, err := a.store.Installation(cmd.Context())
+	if err != nil {
+		warn("could not read the installation to bind the data directory %s: %v", dir, err)
+		return
+	}
+	res, err := sweep.BindFresh(dir, inst.ID)
+	switch {
+	case res == sweep.Bound:
+		fmt.Fprintf(cmd.OutOrStdout(), "bound the data directory %s to this installation\n", dir)
+	case res == sweep.LeftUnbound:
+		warn("the data directory %s is not bound to this installation yet, so the daily sweep removes no unreferenced "+
+			"files there; check that it is this installation's, then run %s sweep --bind once", dir, commandName())
+	case res == sweep.BoundElsewhere:
+		warn("%v; the daily sweep refuses this data directory. Check %s and the data directory (DATA_DIR)",
+			err, config.EnvDatabaseURL)
+	case err != nil:
+		warn("could not bind the data directory %s to this installation: %v; the daily sweep refuses it until "+
+			"%s sweep --bind", dir, err, commandName())
+	}
+}
+
+// warnBinding logs at start when the data directory is not bound to the
+// database's installation: the walk then removes no unreferenced file.
+func warnBinding(ctx context.Context, st *store.Store, dir string, log *slog.Logger) {
+	inst, err := st.Installation(ctx)
+	if err != nil {
+		log.Warn("read the installation", "err", err)
+		return
+	}
+	switch err := sweep.CheckBinding(dir, inst.ID); {
+	case errors.Is(err, sweep.ErrUnbound):
+		log.Warn("the data directory is not bound to this installation, so unreferenced files are not removed; "+
+			"run sweep --bind once", "dir", dir, "command", commandName()+" sweep --bind")
+	case err != nil:
+		log.Error("the sweep refuses the data directory", "dir", dir, "err", err)
+	}
 }
 
 // warnWithoutUsers logs how to create the first admin while no user

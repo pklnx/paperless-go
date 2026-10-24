@@ -21,7 +21,8 @@ export function targetLabel(e: AuditEntry): string {
  * The detail worth a glance: a login's method, passkey, second factor and
  * reason, a failed login's name, the role of a new user, the factor that
  * confirmed a 2FA change, the passkey added or removed, the text of a
- * search, the counts of an import.
+ * search, the counts of an import (with the documents it restored from the
+ * trash).
  */
 export function entryDetail(e: AuditEntry, m: Messages = t): string {
   const d = e.details;
@@ -35,7 +36,9 @@ export function entryDetail(e: AuditEntry, m: Messages = t): string {
   if (e.action === "document.search") return str(d.q) && m.logTriedName(str(d.q));
   if (e.action === "document.consume" || e.action === "document.import") {
     const count = (v: unknown, text: (n: number) => string) => (typeof v === "number" && v > 0 ? text(v) : "");
-    const counts = [count(d.imported, m.logImported), count(d.duplicates, m.logDuplicates), count(d.failed, m.logFailedFiles)].filter(Boolean).join(", ");
+    const counts = [count(d.imported, m.logImported), count(d.duplicates, m.logDuplicates), count(d.restored, m.logRestored), count(d.failed, m.logFailedFiles)]
+      .filter(Boolean)
+      .join(", ");
     return d.interrupted === true ? [counts, m.logInterrupted].filter(Boolean).join(" · ") : counts;
   }
   if (e.action === "user.passkeys_removed" && typeof d.count === "number") return m.passkeyCount(d.count);

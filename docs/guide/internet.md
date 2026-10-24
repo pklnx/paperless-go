@@ -39,7 +39,7 @@ Each line links to its section. Names like `example.com` stand for yours.
 
 | Path | What it gives | Limits |
 |---|---|---|
-| `/` and `/assets/` | The web UI's page and code; no data. | none |
+| `/`, `/assets/`, `/manifest.webmanifest` and the app icons (`/favicon-32.png`, `/apple-touch-icon.png`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png`) | The web UI's page and code, the web app manifest and its icons; no data. | none |
 | `/healthz` | `ok`, or `503` when the database does not answer. It pings the database (5 seconds at most). | none; see [Health check](#health-check) |
 | `POST /api/session`, `POST /api/session/2fa` | Password login and its second step. | [Login limits](#logins-on-the-internet) |
 | `POST /api/session/passkey/begin` and `/finish` | Passkey login (needs `PAPERLESS_GO_PUBLIC_URL`, else `503`). | 30 starts per minute and address, and caps on open logins |
@@ -79,6 +79,11 @@ Whatever proxy you use needs the same things:
 
 The server sends `Strict-Transport-Security: max-age=31536000` itself over
 HTTPS. Do not set it a second time in the proxy, or give it the same value.
+Browsers that have seen the header then switch to HTTPS for this host name,
+on every port, and the year counts from the last HTTPS visit: a service
+under the same name that only speaks plain HTTP becomes unreachable in those
+browsers, so do not serve it that way later (see
+[Headers](../reference/security#headers)).
 
 ### Caddy on the host
 
@@ -230,11 +235,18 @@ before you open the site to others:
 
 To find the address, log in through the proxy once and read the client
 address of that login on the Log page; that is the proxy as the server
-sees it.
+sees it. Whenever that first login did not count as HTTPS (in Docker
+Compose, or with a proxy over a tunnel, for example), you log in once more
+after setting the variable.
 
 List only the proxy, and only if all access goes through it: whoever can
 connect from a listed address can claim any client address. The server
 takes the last address in `X-Forwarded-For` that is not a trusted proxy.
+
+Set it before users log in through the proxy: over HTTPS only the
+`__Host-` session cookie counts, over plain HTTP only the plain one, so
+setting or changing the variable later, in a way that changes whether
+requests count as HTTPS, makes every user log in once more.
 
 ### A remote proxy over a tunnel
 
@@ -314,12 +326,16 @@ dump. See [Backups](./operations#backups).
 
 Read the release notes, back up, then `./pgo migrate` and `docker compose
 up -d web`; see [Upgrades](./operations#upgrades). Do not use an
-auto-updater such as Watchtower or a floating image tag: migrations run
-only with `./pgo migrate`, and the web server refuses to start while any
-are pending, so an automatic pull would take the site down. The bundle
-names an exact image version in `PAPERLESS_GO_IMAGE`; the PostgreSQL image
-`postgres:18` follows the major version only. Subscribe to the repository's
-releases to hear about security fixes.
+auto-updater such as Watchtower or a floating image tag (`latest` or a
+major tag such as `1`): migrations run only with `./pgo migrate`, and
+the web server refuses to start while any are pending, so an automatic
+pull would take the site down. If a tool updates the image anyway, pin
+an exact version or an `X.Y` tag, as described in
+[Versions](./operations#versions). The bundle's `docker-compose.yml`
+names an exact image version, which a `PAPERLESS_GO_IMAGE` line in
+`.env` overrides; the PostgreSQL image `postgres:18` follows the major
+version only. Subscribe to the repository's releases to hear about
+security fixes.
 
 ## Logs and the audit log
 

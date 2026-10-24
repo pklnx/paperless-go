@@ -174,7 +174,7 @@ func TestSearchAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.st.SetDocumentTags(ctx, f.alice, f.ids["Strom"], []string{tag.ID}); err != nil {
+	if _, err := f.st.PatchDocument(ctx, f.alice, f.ids["Strom"], store.DocumentPatch{SetTags: true, TagIDs: []string{tag.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	f.search([]string{"Strom"}, "tag", tag.ID)
@@ -271,9 +271,9 @@ func TestListDocumentsUnchanged(t *testing.T) {
 		t.Errorf("answer: %v", out)
 	}
 	want := []string{
-		"archiveSerialNumber", "archiveSize", "correspondentId", "createdAt", "documentDate", "documentTypeId", "hasArchive", "id",
-		"isFavorite", "isInbox", "modifiedAt", "notes", "originalFileName", "originalMime", "originalSize", "ownerId",
-		"pageCount", "processing", "processingNote", "source", "tagIds", "thumbnailUrl", "title",
+		"archiveSerialNumber", "archiveSize", "correspondentId", "createdAt", "deletedAt", "documentDate", "documentTypeId",
+		"hasArchive", "id", "isFavorite", "isInbox", "modifiedAt", "notes", "originalFileName", "originalMime", "originalSize",
+		"ownerId", "pageCount", "processing", "processingNote", "purgeAt", "source", "tagIds", "thumbnailUrl", "title",
 	}
 	for _, d := range listed(t, out) {
 		var keys []string
@@ -349,4 +349,35 @@ func TestSearchAudit(t *testing.T) {
 	}
 	f.expect("GET", "/api/documents", nil, 200)
 	f.expect("GET", searchPath("q", "rechnung", "cursor", cursor, "limit", "1"), nil, 200)
+}
+
+// A search stopped at the store's time limit answers 422 with the code
+// search_too_broad, not 500. The test holds a lock on documents, so the
+// search waits for it until its statement_timeout ends it.
+func TestSearchTooBroad(t *testing.T) {
+	f := newSearchFixture(t)
+	ctx := context.Background()
+	f.st.SearchTimeout = 50 * time.Millisecond
+	conn, err := pgx.Connect(ctx, f.dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `LOCK TABLE documents IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	for _, sort := range []string{"relevance", "added"} {
+		out := f.expect("GET", searchPath("q", "rechnung", "sort", sort), nil, 422)
+		if out["code"] != "search_too_broad" || !strings.Contains(out["error"].(string), "search too broad") {
+			t.Errorf("sort %s: %v", sort, out)
+		}
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.expect("GET", searchPath("q", "rechnung"), nil, 200)
 }

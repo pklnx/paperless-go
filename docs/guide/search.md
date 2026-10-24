@@ -6,14 +6,17 @@ and the names of their correspondent, document type and tags. Words in
 German and English are found in their inflected forms too. Filters narrow a
 search to tags, correspondents, types, dates and status flags.
 
-You only ever find your own documents. An admin searches all users'
-documents.
+You only ever find your own documents. An admin searches their own
+documents too, and all users' documents with "Everyone's documents" in the
+sidebar (see [Documents](./documents)); through the API an admin searches
+all users' documents.
 
-Type a search into the field on the start page and press Enter. The
-results replace the recent documents; "Load more" shows the next 25, and
-clearing the field brings the recent documents back. Each search is
-recorded in your [audit log](./audit-log), with the text you searched
-for. Scripts search with `GET /api/documents?q=…` and an API key with the
+Type a search into the field above the document list and press Enter. The
+results replace the list; "Load more" shows the next 50, and clearing the
+field brings the whole list back. An entry chosen in the sidebar (a tag,
+the inbox) narrows the search further. Each search you type is recorded in
+your [audit log](./audit-log), with the text you searched for; choosing
+an entry in the sidebar is browsing and is not recorded. Scripts search with `GET /api/documents?q=…` and an API key with the
 `read` scope (see [Architecture](../development/architecture#documents-api)
 for the parameters).
 
@@ -31,11 +34,29 @@ Case and accents do not matter: `cafe` finds `Café`, `strasse` finds
 `Straße`, and `Gebuhren` finds `Gebühren`. From PostgreSQL 18 on, which the
 Compose setup uses, `Gebuehren` finds `Gebühren` too.
 
+**Compound words.** A word of 4 or more characters also finds the longer
+words that contain it: `rechnung` finds `Stromrechnung` and `Gasrechnung`,
+`erinnerung` finds `Zahlungserinnerung`, `arzt` finds `Zahnarzt`, in every
+field. Inflected forms work the same way (`Rechnungen` finds
+`Stromrechnungen` and `Stromrechnung`), and so do accents (`bäckerei` and
+`backerei` find `Großbäckerei`). The start of a compound is found as
+before: `Strom` finds `Stromrechnung` as a prefix. This is a plain
+substring match, like the search in the Document Archive app, so it also
+finds words that are not compounds: `rechnung` finds `Berechnung` and
+`Verrechnung`. Numbers work alike: `2023` also finds `15.01.2023`, `RE2023`
+and `12023`. An excluded word (`-rechnung`) excludes these longer words
+too.
+
 Some limits of the word match:
 
-- **Compound words.** A word inside a German compound is not found:
-  `rechnung` does not find `Stromrechnung`. The start of a compound is:
-  `Strom` finds it as a prefix.
+- **Compound words.** For each word the search uses at most the 100 longer
+  words that occur in the most of your documents (with "Everyone's
+  documents", in all users' documents), and at most 250 for the whole
+  search: with three or more such words they share them, so each gets
+  fewer (with 32 words about 8 each). A rarer compound beyond them is
+  not found by its part. Within a phrase (`"Rechnung für Juli"`) words
+  match exactly, never inside longer words, and a word of fewer than 4
+  characters never does either.
 - **Short words.** A word of one or two characters matches only whole
   words and whole names, never as a prefix or part of a name.
 - **Phrases in long texts.** A phrase is found within roughly the first
@@ -70,7 +91,10 @@ are plain text. A tag, correspondent or type name that does not exist finds
 no documents. `-` before any filter excludes what it matches.
 
 A search has at most 1000 characters and 32 words, phrases and filter
-values.
+values. A search that takes longer than 30 seconds is stopped with "The
+search took too long": typically many short words sorted by best match.
+Fewer or longer words, a filter (`tag:`, `date:`) or sorting by date
+helps.
 
 ## Order
 
@@ -78,9 +102,9 @@ A search with words lists the best matches first: a word in the title
 counts most, then the tags, correspondent and type, then the notes and file
 name, then the text. Without words, or with only excluded words (`-Mahnung`), the newest added
 documents come first.
-Through the API (`sort`, `order`), a search can also be sorted by the
-date added or by the document's date, newest or oldest first; the web UI
-gets sort menus with the document list.
+The sort menu next to the list's heading (or `sort` and `order` through the
+API) sorts a search by the date added or by the document's date instead,
+newest or oldest first.
 
 Each result shows up to two passages of the text around the words it
 matched.

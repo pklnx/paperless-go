@@ -44,9 +44,9 @@ export function UsersPage() {
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-8">
+    <div className="legacy mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-8">
       <div className="flex items-center gap-3">
-        <h2 className="flex-1 text-lg font-semibold">{t.usersTitle}</h2>
+        <h2 tabIndex={-1} className="flex-1 text-lg font-semibold outline-none">{t.usersTitle}</h2>
         {!adding && (
           <button type="button" className={primary} onClick={() => setAdding(true)}>
             {t.addUser}

@@ -50,7 +50,23 @@ describe("sendFile", () => {
     expect(await outcome((x) => x.respond(200, { duplicate: true, existing: { id: "9", title: "Old" } }))).toEqual({
       kind: "duplicate",
       existingTitle: "Old",
+      existingId: "9",
     });
+    // In the trash (#12): the row offers Restore.
+    expect(await outcome((x) => x.respond(200, { duplicate: true, existing: { id: "9", title: "Old" }, trashed: true }))).toEqual({
+      kind: "duplicate",
+      existingTitle: "Old",
+      existingId: "9",
+      trashed: true,
+    });
+    // A 503 with Retry-After (busy, or the trashed copy is being deleted permanently): send again later.
+    expect(await outcome((x) => x.respond(503, { error: "being removed" }, { "Retry-After": "60" }))).toEqual({
+      kind: "failed",
+      reason: undefined,
+      message: "being removed",
+      retryAfter: 60,
+    });
+    expect(await outcome((x) => x.respond(503, { error: "no audit log" }))).toEqual({ kind: "failed", reason: undefined, message: "no audit log" });
     expect(await outcome((x) => x.respond(200, { duplicate: true }))).toEqual({ kind: "duplicate", existingTitle: undefined });
     expect(await outcome((x) => x.respond(415, { error: "not a PDF", reason: "unsupported" }))).toEqual({
       kind: "failed",
@@ -152,6 +168,44 @@ describe("UploadQueue", () => {
   });
 });
 
+describe("Retry-After and restore", () => {
+  it("keeps the file of a row the server asked to send later, and sends it again on retry", async () => {
+    const { calls, send } = manualSend();
+    const q = new UploadQueue(send);
+    q.add([file("a.pdf")]);
+    const id = q.list[0]!.id;
+    expect(q.canRetry(id)).toBe(false);
+    calls[0]!.finish({ kind: "failed", message: "busy", retryAfter: 60 });
+    await flush();
+    await flush();
+    expect(q.list[0]!.state).toMatchObject({ kind: "failed", retryAfter: 60 });
+    expect(q.canRetry(id)).toBe(true);
+    q.retry(id);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.name).toBe("a.pdf");
+    expect(q.canRetry(id)).toBe(false);
+    calls[1]!.finish({ kind: "failed", message: "boom" });
+    await flush();
+    await flush();
+    // Another failure is not one to send again.
+    expect(q.canRetry(id)).toBe(false);
+  });
+
+  it("marks a trashed duplicate restored, and nothing else", async () => {
+    const { calls, send } = manualSend();
+    const q = new UploadQueue(send);
+    q.add([file("a.pdf"), file("b.pdf")]);
+    calls[0]!.finish({ kind: "duplicate", existingId: "9", trashed: true });
+    calls[1]!.finish({ kind: "failed" });
+    await flush();
+    await flush();
+    q.markRestored(q.list[0]!.id);
+    q.markRestored(q.list[1]!.id);
+    expect(q.list[0]!.state).toEqual({ kind: "duplicate", existingId: "9", trashed: false, restored: true });
+    expect(q.list[1]!.state).toEqual({ kind: "failed" });
+  });
+});
+
 describe("failures to start", () => {
   it("fails a row whose send throws and frees its slot", async () => {
     const { calls, send } = manualSend();
@@ -230,6 +284,11 @@ describe("display", () => {
     expect(stateText({ kind: "failed", message: "boom" }, en, "")).toBe("could not be imported");
     expect(stateText({ kind: "failed", message: "boom" }, de, "")).toBe("konnte nicht importiert werden");
     expect(stateText({ kind: "failed" }, en, "")).toBe("upload failed; check the connection");
+    expect(stateText({ kind: "duplicate", existingTitle: "Alt", existingId: "9", trashed: true }, en, "")).toBe("already there, in the trash → Alt");
+    expect(stateText({ kind: "duplicate", existingId: "9", trashed: true }, de, "")).toBe("schon vorhanden, im Papierkorb");
+    expect(stateText({ kind: "duplicate", existingId: "9", restored: true }, en, "")).toBe("restored from the trash");
+    expect(stateText({ kind: "failed", message: "x", retryAfter: 60 }, en, "")).toBe("not imported yet; try again in 1 min");
+    expect(stateText({ kind: "failed", message: "x", retryAfter: 5 }, en, "")).toBe("not imported yet; try again in 5 s");
   });
 
   it("sends the browser's type only when the server takes it", () => {

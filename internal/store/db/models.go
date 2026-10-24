@@ -47,6 +47,13 @@ type AuditUserAgent struct {
 	UserAgent string
 }
 
+type BlobRemoval struct {
+	Sha256    string
+	QueuedAt  time.Time
+	DueAt     time.Time
+	RemovedAt *time.Time
+}
+
 type Correspondent struct {
 	ID         pgtype.UUID
 	OwnerID    int64
@@ -99,6 +106,8 @@ type Document struct {
 	ProcessingNote      string
 	SearchText          interface{}
 	SearchLinks         interface{}
+	DeletedAt           *time.Time
+	PurgeAt             *time.Time
 }
 
 type DocumentTag struct {
@@ -164,6 +173,12 @@ type SavedView struct {
 	Filter     []byte
 	CreatedAt  time.Time
 	ModifiedAt time.Time
+}
+
+type SearchVocabulary struct {
+	OwnerID int64
+	Lexeme  string
+	N       int32
 }
 
 type Session struct {

@@ -30,8 +30,8 @@ const (
 	ActorSystem = "system"
 )
 
-// What an audit entry is about. Documents, tags, correspondents and
-// document types are named by their UUID.
+// What an audit entry is about. Documents, tags, correspondents, document
+// types and saved views are named by their UUID.
 const (
 	TargetDocument      = "document"
 	TargetUser          = "user"
@@ -39,6 +39,7 @@ const (
 	TargetTag           = "tag"
 	TargetCorrespondent = "correspondent"
 	TargetDocumentType  = "document_type"
+	TargetSavedView     = "saved_view" // from 00020 (#12, part 4 writes it)
 )
 
 // ErrAuditUnavailable wraps every failure to write an audit entry. Whatever
@@ -156,15 +157,20 @@ func (s *Store) Audit(ctx context.Context, e AuditEntry) error {
 	return nil
 }
 
-// inTx runs fn in a transaction. With an entry from WithAudit in ctx, the
-// entry is written after fn succeeded, in the same transaction.
+// inTx runs fn in a transaction that writes none of the owner tables
+// (users, sessions, jobs, ...): the guard refuses such a write, since it
+// holds no owner lock. With an entry from WithAudit in ctx, the entry is
+// written after fn succeeded, in the same transaction.
 func (s *Store) inTx(ctx context.Context, fn func(*db.Queries) error) error {
-	return s.inTxWith(ctx, func(_ pgx.Tx, q *db.Queries) error { return fn(q) })
+	return s.inTxWith(ctx, func(t *writeTx) error { return fn(t.q) })
 }
 
-// inTxWith is inTx for a function that also needs the transaction itself
-// (for the search queries' unnamed statements).
-func (s *Store) inTxWith(ctx context.Context, fn func(pgx.Tx, *db.Queries) error) error {
+// inTxWith is inTx for a writer of the owner tables, which calls
+// t.lockOwners first (locking.go), or for a function that needs the
+// guarded connection itself (the search queries' unnamed statements). It
+// is the only place a writing transaction begins: its queries run on the
+// guard (db.New, never WithTx, which would put the raw transaction back).
+func (s *Store) inTxWith(ctx context.Context, fn func(*writeTx) error) error {
 	p, _ := ctx.Value(auditKey{}).(*pendingAudit)
 	if p != nil && p.written {
 		p = nil
@@ -184,8 +190,9 @@ func (s *Store) inTxWith(ctx context.Context, fn func(pgx.Tx, *db.Queries) error
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	q := s.q.WithTx(tx)
-	if err := fn(tx, q); err != nil {
+	g := guardedDB{d: tx, tx: &txLocks{}}
+	q := db.New(g)
+	if err := fn(&writeTx{q: q, g: g}); err != nil {
 		return err
 	}
 	if p != nil {

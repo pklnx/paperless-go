@@ -25,19 +25,20 @@ upload, consume folder, CLI import ──▶ internal/ingest ──▶ internal/
 
 | Path | Purpose |
 |---|---|
-| `cmd/paperless-go` | Command line (cobra): `migrate`, `serve`, `keygen`, `user`, `audit export`, `prepare-data` (hidden, run by `./pgo migrate`). |
+| `cmd/paperless-go` | Command line (cobra): `migrate`, `serve`, `keygen`, `user`, `audit export`, `sweep`, `prepare-data` (hidden, run by `./pgo migrate`). |
 | `internal/auth` | Argon2id password hashes, session tokens, TOTP (RFC 6238) and recovery codes, the failed-login limiter and a rate limit, all with an injectable clock. |
 | `internal/crypto` | AES-256-GCM sealing of small secrets (the TOTP secrets) with `PAPERLESS_GO_SECRET_KEY`. |
 | `internal/config` | Configuration from `PAPERLESS_GO_*` environment variables. |
 | `internal/blobstore` | Content-addressed document files: named by their SHA-256 without extension (`documents/ab/cd/<sha256>`), published and removed durably (see [Blob durability](#blob-durability)). |
 | `internal/ingest` | Imports one file as a document: type detection from the content (PDF, JPEG, PNG, HEIC/HEIF), the size and 50-megapixel limits, then the blob store, the duplicate check and the row (see [Ingest](#ingest)). |
 | `internal/consume` | The consume folder: polls `consume/<user>/`, imports settled files through `internal/ingest`, deletes or moves them (see [Consume folder](#consume-folder)). |
+| `internal/sweep` | The trash's sweeper: deletes the documents due for purge, removes the queued files no document names, and walks the data directory once a day behind the installation marker (see [Trash](#trash) and [Blob removal](#blob-removal)). |
 | `internal/process` | The processing queue's worker: claims jobs, runs the tools (`Runner`) in a work directory, stores text, page count and archive PDF (see [Processing](#processing)). |
 | `internal/store` | PostgreSQL access: migrations (goose, embedded), queries (sqlc, generated into `internal/store/db`). |
 | `internal/store/storetest` | A throwaway, migrated database per test. |
 | `internal/web` | HTTP server: the route table with each route's access, login and sessions, user management, the Host and same-origin checks, `/healthz`. |
 | `internal/web/ui` | Embeds the built web UI (`web/` → `internal/web/ui/dist`) and serves it with a strict CSP. |
-| `web` | React UI (TypeScript, Vite, Tailwind CSS). |
+| `web` | React UI (TypeScript, Vite, Tailwind CSS). The view (sidebar filter, search, sort, page, an admin's "Everyone's documents") lives in the URL query (`urlState.ts`), so back, reload and bookmarks work and `GET /` serves every view. The sidebar's filters go to `GET /api/documents` as parameters (`tag`, `correspondent`, `type`, `inbox`, `favorite`), never as `q`, so only a typed search is a search for the audit log. `?doc=<id>` opens a document's detail with the PDF viewer (see [PDF viewer](#pdf-viewer)). |
 | `docs` | This site (VitePress). |
 
 ## Data model
@@ -52,7 +53,7 @@ app and the server through the app's archive folder format:
 | App (SwiftData) | Server table |
 |---|---|
 | — | `users` (`BIGSERIAL` id, lowercase name, is_admin, password hash, lock, login times; `00004_users_login.sql`; 2FA columns in `00006_two_factor.sql`, `webauthn_handle` in `00008_passkeys.sql`), `sessions`, `two_factor_recovery_codes`, `two_factor_challenges`, `passkeys`, `webauthn_ceremonies` (network columns in `00014_ceremony_networks.sql`), `api_keys` (`00009_api_keys.sql`) |
-| — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; actor `system` in `00015_audit_system_actor.sql`; metadata targets in `00016_audit_metadata_targets.sql`; see [Audit log](#audit-log)) |
+| — | `audit_log`, `audit_user_agents` (`00005_audit_log.sql`; actor `system` in `00015_audit_system_actor.sql`; metadata targets in `00016_audit_metadata_targets.sql`, the saved-view target in `00020_trash.sql`; see [Audit log](#audit-log)) |
 | `Document`: id (UUID), title, documentDate, createdAt, modifiedAt, notes, isFavorite, isInbox, archiveSerialNumber, pageCount, fileSize, extractedText, source, originalFileName, textSource, contentHash | `documents`, with the UUID as primary key; the original file (`original_sha256`, size, MIME type) and the archive PDF (`archive_sha256`, size) |
 | `Tag`: name, colorHex, symbol, parent, matchText, matchMode | `tags`, `document_tags` (nested through `parent_id`) |
 | `Correspondent`, `DocumentType`: name, matchText, matchMode | `correspondents`, `document_types` |
@@ -60,6 +61,8 @@ app and the server through the app's archive folder format:
 | `SavedView`: name, symbol, sortIndex, createdAt, filterJSON | `saved_views`, with the filter as a `JSONB` object |
 | — | `jobs` (`00007_jobs.sql`; see [Processing](#processing)); `documents.thumbnail_sha256`, `documents.processing_note` |
 | — | `documents.search_text`, `documents.search_links` (`00011_search.sql`; see [Search index](#search-index)) |
+| — | `search_vocabulary` (`00018_search_vocabulary.sql`): per owner, the lexemes of `search_text` and how many documents hold each (see [Search index](#search-index), Vocabulary) |
+| (the app's `Deleted/` folder, 30 days) | `documents.deleted_at`, `documents.purge_at`, `blob_removals` (`00020_trash.sql`; see [Trash](#trash)) |
 
 UUIDs as keys (not serials) keep imported and exported records stable across
 the app and the server.
@@ -93,14 +96,17 @@ the new document would get, never through a scope: an admin's upload is
 checked only against the admin's own documents.
 `archive_sha256` is the PDF with a text layer from OCR, `NULL` until
 processed and equal to the original for a PDF that already has text. Export
-writes the archive PDF, or the original when there is none. Deleting a row
-leaves its files; the orphan sweep comes with the trash.
+writes the archive PDF, or the original when there is none. Deleting a
+document moves it to the [trash](#trash); the sweeper's purge of the row
+queues its files in `blob_removals`, and its queue pass removes those no
+document names any more (see [Blob removal](#blob-removal)).
 
 **Deletes.** Deleting a correspondent or document type leaves its documents
 without one; deleting a tag removes it from its documents and makes its
 children root tags (refused with `ErrTagNameConflict` when a child would
 collide with a root tag of the same name; nothing is renamed). Deleting a
-document removes its tag links and its deadlines. The trigger `tags_no_cycle` refuses a parent
+document moves it to the trash with everything it has; purging the row
+(the sweeper) removes its tag links, its deadlines and its jobs. The trigger `tags_no_cycle` refuses a parent
 that would make a tag its own ancestor (`ErrTagCycle`); a per-owner advisory
 lock keeps two concurrent changes from building a cycle together.
 
@@ -120,6 +126,21 @@ refuses anything else; the store gives `ErrInvalidFilter`). The server does
 not interpret it: unknown keys and values are kept, while whitespace and key
 order are normalized by PostgreSQL. Lists are ordered as in the app: by
 `sort_index`, then `created_at`, then `id`.
+
+The web keeps its own list parameters in that object under one key,
+`paperless-go`: `{"v": 1, "q", "tag", "correspondent", "type", "inbox",
+"favorite", "sort", "order", "everyone"}`, the parameters of
+`GET /api/documents` and an admin's "Everyone's documents". The app's
+schema is in `DocumentArchive/Services/DocumentFilter.swift` (`tags`,
+`tagMode`, `includeSubTags`, `excludedTags`, `correspondents`,
+`documentTypes` as `Ref {id, name, key}`, `dateField`, `dateRange`,
+`inbox`, `favorite`, `hasASN`, `query`, `sort`, `ascending`), and
+`DocumentFilter.json(_:preserving:)` keeps unknown keys, so the
+`paperless-go` key survives a round trip through the app and the app's keys
+survive the web. The two do not map one to one (the server's `q` syntax is
+not the app's `query`, nor are its IDs the app's `Ref.key` merge names), so
+the mapping between them is the archive import's and export's (#10); until
+then the web shows only views with its key.
 
 **Locale and text indexes.** Unique names (`users.name`, `lower(name)` of
 tags, correspondents and document types, passkey and API key names) and a
@@ -205,6 +226,8 @@ free-text items as bound arrays. Each item becomes, joined by `|`:
 `plainto_tsquery` (or `phraseto_tsquery`) in the three configurations; for
 a word of 3 or more characters, a prefix query from the lexemes
 `paperless_simple` makes of it, each quoted by a fixed escaper plus `:*`;
+for a word of 4 or more characters, the compounds from the search
+vocabulary that contain it (Compounds, below; `00021_search_infix.sql`);
 and the link lexemes of the tags (with their descendants), correspondents
 and document types whose name contains the term, ignoring case and accents
 (`ILIKE` over `unaccent`, wildcards escaped; a term under 3 characters
@@ -224,14 +247,189 @@ document; only a document's own link changes touch its row.
 **Concurrency.** `documents_search_links_vector` reads `document_tags` and
 is `VOLATILE` (plpgsql) on purpose: each statement takes a fresh snapshot,
 so a trigger that waited for the document's row lock sees tags committed
-meanwhile. Every writer of `document_tags` locks the document row first
-(`SetDocumentTags` through `LockDocument`; the bulk edit (#7) and automatic
-tagging must do the same), so two rebuilds of one document never interleave. A tag's delete takes the locks the other way round (`document_tags`,
-then the documents), so it can deadlock with a concurrent `SetDocumentTags`
-on the same document; PostgreSQL then fails one of them (`40P01`), nothing
-hangs or is half-written. `document_tags` rows are never updated, so there
-is no `UPDATE` trigger. Down drops `unaccent` only when the current user
-owns it and nothing outside the extension uses it.
+meanwhile. Every writer of `document_tags` holds the owner's write lock
+(Write locking, below) and, except a tag's delete, locks the document row
+first (`PatchDocument` through `LockDocument`, the bulk edit through
+`LockDocuments`); automatic tagging must do the same, so two rebuilds of
+one document never interleave. A tag's delete cascades to its
+`document_tags` rows under the owner's write lock, so its trigger only
+updates documents no other store writer touches meanwhile; this replaces
+the order the comments in `00011_search.sql` describe. `document_tags`
+rows are never updated, so there is no `UPDATE` trigger. Down drops
+`unaccent` only when the current user owns it and nothing outside the
+extension uses it.
+
+**Vocabulary** (#56, part 1; `00018_search_vocabulary.sql`). `search_vocabulary
+(owner_id, lexeme, n)` holds, per owner, every lexeme of 5 to 64
+characters in the owner's `search_text` vectors and the number of the
+owner's documents that hold it (`CHECK (n > 0)`, primary key `(owner_id,
+lexeme)`). A GIN trigram index (`public.gin_trgm_ops`, extension
+`pg_trgm`) on `lexeme` lets a search find the lexemes that contain a typed
+word (Compounds, below). The vocabulary is never returned by any API.
+- **One rule.** `search_vocabulary_lexemes(tsvector)` (immutable SQL) is the
+  only definition of what the vocabulary holds: the distinct lexemes of
+  `tsvector_to_array`, `char_length` 5 to 64 (characters, not bytes), in
+  primary key order. Every configuration's lexemes go in, stems too; link
+  lexemes live in `search_links` and never do.
+- **Upkeep.** A row-level trigger function, `search_vocabulary_trigger`,
+  on `AFTER INSERT OR DELETE` and on `AFTER UPDATE OF title,
+  archive_serial_number, notes, original_file_name, extracted_text,
+  search_text, owner_id` with `WHEN (OLD.search_text IS DISTINCT FROM
+  NEW.search_text OR OLD.owner_id <> NEW.owner_id)`. The column list
+  names the source columns because the `00011` BEFORE trigger sets
+  `search_text`, and `UPDATE OF` looks only at the statement's SET list.
+  The `WHEN` makes an update that leaves the vector alone (a patch that
+  repeats the title, an OCR run with the same text) nearly free, and the
+  bulk change (flags, links, tags) does not fire it at all. A new document
+  adds 1 for each of its lexemes (`INSERT … ON CONFLICT DO UPDATE`), a
+  deleted one subtracts 1, an update only the set difference. The
+  decrement deletes rows with `n <= 1` and decreases the others (`n > 1`),
+  so no path can violate the `CHECK`, also after a count drifted (raw
+  SQL); a count that drifted is not repaired. Statement-level triggers
+  with transition tables are not possible: PostgreSQL refuses them on a
+  trigger with a column list.
+- **Locking.** The trigger runs inside the writer's transaction, which
+  holds the owner's write lock (Write locking, below), and writes only
+  that owner's rows. So writers of one owner never touch the vocabulary at
+  the same time, and writers of different owners touch disjoint rows.
+  Safety comes from the owner lock alone: the add, subtract and delete
+  statements each go in primary key order, but together their row locks
+  are not taken in one monotone order. SQL outside the store that writes
+  one owner's documents concurrently can therefore deadlock on vocabulary
+  rows (`40P01`; a store writer it met gets `ErrRetry`).
+  `TestSearchVocabularyConcurrentWriters` holds one writer after its lock
+  (`WithAfterLock`), sees the same owner's second writer wait at the
+  advisory lock and the other owner's finish without a lock wait, and
+  checks the counts. `search_vocabulary` is in the guard's table list, so
+  a store statement that ever wrote it directly would need the lock too.
+- **Long transactions.** Each document's upsert rewrites the rows of its
+  common lexemes. Within one transaction their old versions cannot be
+  pruned, so a transaction that writes thousands of documents walks ever
+  longer version chains (one statement adding 2 000 generated documents
+  took 140 s instead of 6 s). The store writes one document per
+  transaction. A future migration that rewrites `search_text` table-wide
+  should disable the trigger and rebuild the vocabulary set-based, as the
+  backfill does.
+- **Backfill.** The migration takes `SHARE ROW EXCLUSIVE` on `documents`
+  as its first statement (before `CREATE TABLE … REFERENCES users` locks
+  `users`), so no writer can commit between the backfill's snapshot and the
+  triggers (`TestSearchVocabularyMigrationWaitsForWriters`); readers go
+  on. Then one `INSERT … SELECT … GROUP BY owner_id, lexeme` over
+  `search_vocabulary_lexemes(search_text)`, then the primary key and the
+  trigram index, then the triggers.
+- **Collation.** `lexeme` keeps the database's default collation, so both
+  indexes have a non-`C` `indcollation` and the rebuild after a locale
+  change (Locale and text indexes, above) covers them: `pg_trgm` splits
+  words by the database's ctype. `TestMigrateRebuildsIndexesAfterLocaleChange`
+  lists both.
+- **Cost** (`TestSearchBench`, 100 000 documents of one owner and 50 000
+  of another, 2.1 and 2.0 million vocabulary rows, 4 CPUs, #114; before =
+  the same generator on 00017). Per-document p95: a text update 5.2 →
+  17.8 ms, `CompleteJob` with new text 6.7 → 18.3 ms, `CreateDocument`
+  with text 6.0 → 13.9 ms, `DeleteDocument` 1.5 → 12.5 ms; an upload
+  without text is unchanged. The generation (100 documents per
+  transaction) took 35 instead of 10 minutes, a retitle of 1 000
+  documents 4.5 instead of 3.1 s. The vocabulary with its indexes is 415
+  MB (17 % of `documents`) when the backfill builds it and 623 MB (26 %)
+  when the trigger builds it document by document; a `fillfactor` of 70
+  made the generation 20 % faster and the table 15 % larger. The backfill
+  took 1 min 40 s. Searches are unchanged.
+- **`pg_trgm`** is a trusted extension like `unaccent` and must be in
+  `public`; the migration checks `pg_extension.extnamespace` and fails
+  with the fix in its message: the extension's owner or a superuser runs
+  `ALTER EXTENSION pg_trgm SET SCHEMA public` (the app's role cannot), or
+  drops it when nothing else uses it.
+  Down drops the triggers, the function, the table and, under the
+  conditions of `unaccent` in `00011`, `pg_trgm` (owned by the current user,
+  nothing outside the extension depends on it; the `pg_amproc` entries of
+  `pg_trgm`'s own operator families count as part of it).
+
+**Compounds** (#56, part 2; `00021_search_infix.sql`, which replaces
+`document_search_tsquery` and whose Down restores `00011`'s body). A word
+also matches the vocabulary's lexemes that contain it, so `rechnung` finds
+`Stromrechnung` without a second index on the documents: the expansion only
+makes the constant `tsquery` longer (`rechnung | 'stromrechnung' |
+'gasrechnung' | …`), and the six search queries, `documents_search_idx`,
+ranking, cursors, the bulk match and saved views are unchanged.
+- **Which items.** A non-phrase item of 4 or more characters whose
+  `paperless_simple` parse is one lexeme of 4 or more characters (a term
+  such as `Strom-Rechnung` makes several, whose parts match already). The
+  patterns are that lexeme and, when it differs and has 4 or more
+  characters, the term's `german` stem (`rechnungen` → `rechnung`).
+- **The lookup.** `lexeme LIKE ANY ('%p%', …) AND lexeme NOT LIKE ALL
+  ('p%', …)` over `search_vocabulary` within `owner` (all owners for
+  `NULL`, the counts summed), wildcards escaped like the name pattern.
+  Lexemes that start with a pattern are left out: the word's prefix query
+  covers those of the simple lexeme, and the stem's own prefixes stay
+  unmatched as before (a stem prefix would let `Zufallsende`, stem
+  `zufalls`, find `Zufallstext`). At most 100 lexemes per item, ordered by
+  `n DESC, lexeme`, so the result is deterministic and `-X` excludes
+  exactly what `X` finds; each is quoted by the fixed escaper and ORed into
+  the item before `!!`.
+- **Cap per search** (#140). At most 250 compounds per search: a first
+  pass looks up every item (`document_search_compound_patterns` decides
+  which items expand), then the 250 are shared max-min fair, in ascending
+  order of what each item found (then by position), each getting what it
+  found but at most an equal share of what is left. A single word keeps
+  its 100, two words 100 each, three 83/83/84, 32 words 7 or 8 each; an
+  item that finds few leaves the rest to the others
+  (`TestSearchCompoundCapPerSearch`). It runs through `EXECUTE … USING`, so it is planned
+  with its values and the trigram index serves it
+  (`TestSearchCompoundLookupUsesTrigramIndex` reads the statement between
+  `$lookup$` from `pg_proc` and checks its plan).
+- **Behaviour.** A plain substring match, like the app's search: `Berechnung`
+  and `Verrechnung` match `rechnung` (decision 1 of #56), a number such as
+  `2023` matches `15.01.2023`, `re2023` and `12023`. A compound counts in
+  `ts_rank_cd` like the word itself. Accents: the pattern is the unaccented
+  simple lexeme, which every field has, so `bäckerei` finds
+  `grossbackerei`; an `english` lexeme with an accent (`großbäckerei`) does
+  not contain the unaccented pattern and takes no slot. A compound with an
+  accent outside the pattern (`mülltonnenrechnung` for `rechnung`) has two
+  lexemes, the `english` and the simple one, and takes two of the 100
+  slots.
+- **Snippets.** The `german` pass of `ts_headline` does not mark
+  `Stromrechnung` (its stem is `stromrechn`), the `english` or
+  `paperless_simple` pass behind it does (`TestSearchCompoundSnippets`,
+  `TestSearchCompoundUmlauts`).
+- **Privacy.** The lookup sees only the scope's vocabulary: a user's words
+  never expand into another user's lexemes, an admin's "my documents" uses
+  only their own, "Everyone's documents" all owners'. The expanded
+  `tsquery` stays a bound parameter inside the store, like before: never
+  logged, never returned (`TestSearchCompoundScope`). Trashed documents
+  keep their words in the vocabulary until the purge, so the trash's own
+  search finds them by a compound too; live searches never return them
+  (`TestSearchCompoundTrash`).
+- **Cost** (`TestSearchBench`, the #114 data, 4 CPUs, #115; before = the
+  same generator at `00018`). The lookup alone takes under 1 ms p95 for a
+  word, up to 9 ms for a 4-letter part that many lexemes contain;
+  `document_search_tsquery` with 32 such items 22–107 ms. Searches that
+  rank few matches or sort by date stay within noise (`erinnerung` finds
+  its 0.8 % in about 100 ms). A broad word's ranking grows with its extra
+  matches and alternatives (`rechnung`: 55 000 → 64 000 hits, 4.5 s →
+  5.8–8.1 s). Many short words are the worst case. Before the cap per
+  search, 32 items of 4 characters made a `tsquery` of about 3 300
+  alternatives: AND by relevance 78 ms → 3.6–5.2 s, OR by relevance 5 min
+  → over an hour. With it (#140, the same data with and without `00021`):
+  129 → 379 alternatives, AND by relevance 56 ms → 3.2–3.5 s p95 (the
+  planner still checks the owner's rows one by one), OR by date 56 →
+  188 ms, OR by relevance 2 min 41 s → 14 min unlimited, stopped at the
+  30 s time limit by default; `rechnung` by relevance 3.6 → 4.1 s,
+  `erinnerung` by date 2.7 s (no hits) → 136 ms p95. The foreign key of
+  `search_vocabulary` to `users` costs no measurable time.
+
+**Time limit** (#140). `SearchDocuments` runs its query, in every sort,
+in a read-only transaction with `statement_timeout` set to
+`Store.SearchTimeout` (`DefaultSearchTimeout`, 30 s; `set_config(…,
+true)`, so it ends with the transaction). A query stopped by it (`57014`
+while the context is still live) is `store.ErrSearchTooBroad`, which the
+API answers `422` with `{"error": "search too broad; …", "code":
+"search_too_broad"}` and the UI explains; a cancelled request stays the
+context's error. A broad word ranked over 100 000 documents takes 5 to 8
+s; many short words ranked over every document took over an hour before
+the cap, and 5 minutes even without the expansion. `SearchTsquery` and the
+bulk change's match run outside this limit (`TestSearchTimeout`,
+`TestSearchTooBroad` hold a lock on `documents` so the search waits into
+its limit).
 
 **Reads.** No query reads the vectors back: `GetDocument` and
 `ListDocuments` list their columns instead of `d.*`.
@@ -298,8 +496,503 @@ fragments of up to 25 words. It tries `german` first, then `english`
 marks a match. `ts_headline` leaves out what its parser takes for HTML
 tags.
 
-A deadlock (`40P01`, see Concurrency) maps to `store.ErrRetry`; the call
-can be repeated.
+**Write locking** (#102). Every store transaction that writes
+`documents`, `document_tags`, `tags`, `correspondents` or `document_types`
+first takes the per-owner, transaction-level advisory lock of each owner
+whose rows it writes; a transaction over several owners (an admin's bulk
+change across owners) takes them in ascending owner id. Every row of these
+five tables belongs to exactly one owner, `owner_id` is never updated, and
+every link between them goes through a composite `(owner_id, …)` foreign
+key, so a foreign-key check, a cascade or a `SET NULL` never reaches
+another owner's row. All writes of one owner therefore serialise, no wait
+between store writers can form a cycle, and deadlocks between them are
+excluded by construction. This replaces the row-lock order of #99/#103
+(key shares before the documents, deletes locking their documents
+first) and its retry loop.
+
+- **The key.** `hashtextextended('paperless-go:tags:' || owner_id::text,
+  0)` with `pg_advisory_xact_lock` (`LockOwner` in `queries/locking.sql`;
+  the prefix is `store.ownerLockPrefix`). It is the key the
+  `tags_no_cycle` trigger already takes (`00002_documents.sql`), so the
+  trigger's lock is folded in without a migration: inside a store writer
+  the trigger re-acquires a lock its transaction holds (transaction-level
+  advisory locks are re-entrant; `pg_locks` shows one row), and SQL
+  outside the store keeps the trigger's own protection. It reads "tags"
+  because the trigger came first; `TestOwnerLockMatchesTrigger` breaks if
+  either side changes. The other advisory locks in the code base
+  (`hashtext('audit_log_ensure_partitions')`,
+  `hashtext('webauthn_login_ceremonies')`, goose's session lock) share the
+  single-`bigint` key space; a collision has odds of about 2⁻³² and would
+  only cause a false wait, never a cycle, since none of their holders
+  holds an owner lock.
+- **The helper.** `writeTx.lockOwners(ctx, owners...)`
+  (`internal/store/locking.go`) dedupes and sorts the owners and takes one
+  `LockOwner` per owner (a Go loop: SQL does not promise the order in
+  which a function runs over rows). Only `ownerTx` calls it, as the first
+  statement of its transaction and with the owners it gated (other owners
+  are `errNotGated`, an internal error). It runs once per transaction (a
+  second call is an internal error, so composed helpers cannot break the
+  order) and never with an empty list: a writer answers an empty
+  selection before (`ErrNotFound` for IDs that are all outside the scope,
+  the empty-match answer of a bulk change by search). The lock is
+  released at commit or rollback, also on an error or a cancelled
+  context, so a pool connection never carries it into the next request.
+- **The gate** (#117, `internal/store/ownergate.go`). A writer that waits
+  at `pg_advisory_xact_lock` holds a pool connection, and the pool is
+  pgxpool's default `max(4, NumCPU)`: a few waiting writers of one owner
+  took every connection, so every other user, logins and `/healthz` waited
+  for that owner's bulk change. So before its transaction (and so before
+  it takes a connection) a writer takes the owner's token of the store's
+  in-process gate, one one-slot channel per owner (entries live only
+  while used), and gives it back after the commit or rollback. In one
+  process at most one writer per owner holds a connection for that
+  owner's lock; the others wait in Go, without a connection.
+  `Store.ownerTx(ctx, owners, fn)` is the only entry point: gate, then
+  `inTxWith`, then `lockOwners` over the same owners, then `fn`; the
+  owners are known before (below). The gate is not reentrant: `fn` gets a
+  context marked as gated, and a writer started with it fails
+  (`errNestedOwnerTx`) instead of waiting for itself. One gate per
+  `Store`, shared by the handlers and the worker inside `serve`; the
+  advisory lock stays the guarantee across processes (an `import` run, a
+  second server), each of which waits with at most one connection per
+  owner. Deadlock freedom: gates are taken in ascending owner id like the
+  locks; a writer waiting at the gate holds only lower gates, no
+  connection and no advisory lock; a transaction never waits for a gate.
+  Gate waits therefore form ascending chains ending at a writer that holds
+  or waits for advisory locks, whose waits are acyclic as before, and a
+  gate holder waiting for a pool connection waits for transactions that
+  wait only for locks. `DisableOwnerLock` leaves the gate on; the
+  test-only `DisableOwnerGate` turns it off.
+- **Bounded wait.** `store.WithOwnerWait(ctx, d)` bounds the wait at the
+  gate and at the owner lock together, from the start of `ownerTx`: at the
+  gate by a timer, at the lock by `SET LOCAL lock_timeout` of the time
+  left before each `LockOwner` (at least 1 ms; none left gives up without
+  the statement) and `SET LOCAL lock_timeout TO DEFAULT` after the last,
+  so row locks and triggers never run under it. Giving up is
+  `store.ErrBusy` (`55P03` counts only at `LockOwner`); nothing was
+  written. The web server sets 15 s on every request in `Handler()`
+  (`ownerWait`, a constant), and `failStore` answers `503` with
+  `Retry-After: 5` and `another change of these documents is still
+  running; try again`. Without it a request's write waited as long as its
+  context: about 30 s for most handlers (the request context ends with
+  the `ReadTimeout`, see Web server), an hour for an upload. The worker
+  (`CompleteJob`, limited by its lease), the consume folder and the import
+  set no bound: they wait gated, without a connection, and failing an OCR
+  attempt because the owner is busy would gain nothing.
+- **Owners the writer does not know.** A writer of an existing row reads
+  its owner in the scope first, on the pool before its transaction and
+  the gate (`DocumentOwner`, `DocumentOwners`, `TagOwner`,
+  `CorrespondentOwner`, `DocumentTypeOwner`; out of scope stays
+  `ErrNotFound`, now answered without a transaction), takes the gate and
+  the lock, then locks or writes the row and checks that the row's owner
+  is one it locked (`writeTx.holds`; owners never change, so a mismatch is
+  an internal error, never a silent write under the wrong lock). A row
+  deleted between the read and the lock gives `ErrNotFound` from the row
+  lock as before. A bulk change by search locks its one owner before the
+  match; in an admin's scope over all owners the first match runs on the
+  pool before the gate (the limit and an empty match answer there, as
+  before without an audit entry), and the change gates and locks the
+  owners of that match, whose locked documents are a subset of it (the
+  recheck only removes; under READ COMMITTED the match inside the
+  transaction ran on its own snapshot before the locks too).
+- **Every writer:** `CreateDocument` (upload, consume folder, import),
+  `DeleteDocument`, `PatchDocument`, `BulkUpdateDocuments` (also its
+  trash actions), `TrashDocument`, `RestoreDocument`, `PurgeDocument`,
+  `PurgeDueDocuments` (the sweeper, one owner per transaction),
+  `Create/Update/Patch/Delete` of tags, correspondents and document
+  types, and `CompleteJob` (OCR results; it reads the document's owner
+  without a scope). The triggers (`tags_no_cycle`, the `00011` search
+  triggers, the `00018` vocabulary trigger), the cascades to `document_tags` and `jobs` and the `SET
+  NULL` of `documents.correspondent_id`/`document_type_id` and
+  `tags.parent_id` run inside the writer's transaction, under its lock.
+- **Not writers of the five tables** take no owner lock: the jobs writers
+  (`EnqueueDocument`, `Reprocess`, `ClaimJob`, the lease updates,
+  `ReapJobs`, `DeleteDoneJobs`), deadlines, users (`DeleteUser` refuses
+  while the user owns rows), sessions, API keys, passkeys, saved views and
+  the audit log. A jobs writer never waits for an advisory lock, and the
+  owner-lock holders it can wait for (`CompleteJob`, `CreateDocument`,
+  through the jobs unique index or a document's key share) never wait for
+  a jobs writer, so no cycle closes through them. Two jobs writers can
+  still deadlock with each other (two concurrent "reprocess all" runs on
+  the jobs unique index): the store as a whole is not deadlock-free, only
+  its writers of the five tables.
+- **No slow work under the lock.** A store transaction does no I/O, no
+  network and no blob-store access: uploads write the blob and detect the
+  type before `CreateDocument`, OCR runs before `CompleteJob`, the audit
+  user agent is looked up before the transaction begins. The longest
+  holder is a bulk change over 5 000 documents. The one named exception
+  is `holdBlobs` (see [Blob removal](#blob-removal)): one `stat` per hash
+  a writer is about to name, microseconds and no `fsync`.
+- **Blob locks** come after the owner locks: `CreateDocument` and
+  `CompleteJob` take the shared lock of each hash they name right after
+  `lockOwners`, so the order is owner locks → blob locks → row locks. The
+  sweeper holds one blob lock and no owner lock, so no cycle forms through
+  them.
+- **What the row locks still do.** `LockDocument`/`LockDocuments` (`FOR
+  NO KEY UPDATE`) return the owner, `modified_at` and the IDs in scope,
+  and keep a document safe against SQL outside the store; `LockTag`,
+  `LockCorrespondent`, `LockDocumentType` make the patches'
+  read-modify-write safe; the bulk change's recheck after the lock
+  (`stillMatching`) stays for an admin's change over all owners and SQL
+  outside the store. No global row-lock order is needed any more.
+- **The guard.** Every query of the store runs through `guardedDB`: the
+  pool in `Open`, each transaction in `inTxWith` (`db.New` on the guarded
+  transaction, never `WithTx`, which would put the raw transaction back)
+  and the relevance search's read-only transaction (`readTx`). Before
+  each statement it decides whether the statement writes or row-locks
+  one of the five tables: a sqlc query by its name in `writerQueries`,
+  any other SQL by the same regular expression (`writesOwnerTables`), so
+  unnamed SQL fails closed. Such a statement outside a transaction, or in
+  one before `lockOwners`, returns `errUnlockedWrite` (`500`). Three
+  tests keep it complete: `TestWriterQueriesComplete` (the set equals the
+  queries in `queries/*.sql` that write or row-lock the five tables),
+  `TestEveryWriterLocksItsOwner` (a row per writer and admin variant with
+  the owners it must lock, ascending, before its first guarded write; a
+  reflection check fails for a new `*Store` method that is neither in the
+  table nor on the list of non-writers) and
+  `TestTransactionsOnlyThroughTheGuard` (a static check that `Begin`,
+  `pgx.BeginFunc`, `WithTx` and `db.New` appear only in the guarded
+  constructors, `pgx.Connect`, `pgx.ConnectConfig` and `Acquire` only in
+  `ListenJobs`, and `lockOwners` only in `ownerTx`; `collation.go`'s
+  `REINDEX` is allowed). The regular expression also matches quoted table
+  names (`UPDATE "documents"`, `public."tags"`).
+- **`ErrRetry` stays** (`40P01`, `503` with `Retry-After: 1`) as the net
+  for SQL outside the store and for deadlocks among jobs-only writers;
+  store writers of the five tables no longer retry.
+- **Raw SQL and future code outside the store** (migrations, a data
+  transfer between users) are not covered by the guard. The data transfer
+  of #21 must lock both owners, ascending.
+- **Tests.** The regression tests of the four rounds of deadlock holes
+  (#84 opposite tag moves, the #99 pairs, review A's three-party
+  `PatchTag`, review B's foreign-key re-check) hold one side after its
+  locks (`WithAfterLock`), wait for the other at the advisory lock in
+  `pg_stat_activity`, and give the side that would lose a deadlock a
+  10 ms `deadlock_timeout` (the other an hour). The competing sides run
+  on stores of their own (a gate each, as other processes would see it),
+  so they really meet at the SQL lock; a second writer of the same store
+  waits at the gate instead, which tests see through
+  `store.WithGateWait` or `Store.OwnerGateWaiters`. With
+  `store.DisableOwnerLock` (test-only; it also turns the guard off; a
+  package-global switch, so no `t.Parallel`) the cases that can deadlock
+  (the #99 pairs, review A's and review B's) fail with `ErrRetry`; the
+  others (#84, parent and child delete, the serialisation tests) fail on
+  their serialisation assertion. With the lock they pass.
+  `TestOtherOwnerNotDelayedByWaitingWriters` (pool of 4, alice's patch
+  held after its lock, 6 more of her writers waiting) checks that bob's
+  patch, read and tag create and a ping go through and that at most one
+  connection is in use; `PAPERLESS_GO_TEST_WITHOUT_GATE=1` runs it with
+  `DisableOwnerGate`, where it fails (bob's calls run into their 5 s
+  failure deadline).
+- **Cost** (the load test of `scripts/loadtest`, before and after on one
+  host, 4 CPUs, the server's default pool of 4 connections; #108): one
+  user's concurrent writes (S2, 21 threads as one user) went from 22.7 to
+  25.6 requests/s (bulk p99 3.6 s → 2.4 s, patch p99 3.4 s → 2.6 s), since
+  the 56 deadlocks and their retries are gone; with two users (S1) from
+  33.9 to 38.1 requests/s, 45 deadlocks and one `503` → none. An upload of
+  the owner whose bulk changes over 5 000 documents loop waits for at
+  most one of them (S3: p99 2.6 s, the bulk loop's p99 2.8 s; 8 ms p50
+  alone). Another owner's request does not wait for the lock, and since
+  the gate (#117) it does not wait for a pool connection either while any
+  number of one owner's writers wait for each other: the pool fills up
+  only with real concurrent work of different owners
+  (`TestOtherOwnerNotDelayedByWaitingWriters`; before the gate four
+  waiting writers of alice took bob's PATCH from 8 ms to 156 ms p50 and
+  `/healthz` to its 5 s timeout). The accepted cost: one owner's
+  concurrent writes serialise even when they touch different rows (review
+  B of #116 measured an adversarial mix of one owner's non-overlapping
+  writes about 15× slower than without the lock). The pool size is
+  `pool_max_conns` in `PAPERLESS_GO_DATABASE_URL`
+  (`docs/reference/configuration.md`).
+
+## Trash
+
+#12, part 1 (`00020_trash.sql`, `internal/store/documents_trash.go`,
+`internal/sweep`). Deleting a document is two steps. **Trash** sets
+`documents.deleted_at`: the row stays with everything it has (tags, ASN,
+the unique `(owner_id, original_sha256)`, deadlines, the search vectors and
+its words in the vocabulary), so a restore only clears the column and never
+conflicts, and the duplicate check keeps finding it. The document leaves
+every list, search, count (the sidebar's and the metadata lists', the tag
+counts through a join to `documents`) and bulk match, and shows only in the
+trash, which lists and searches with the same endpoint and filter code
+(`trashed=true`). **Purge** happens when the document is *due*:
+`coalesce(purge_at, deleted_at + retention) <= now`. "Delete permanently"
+and "empty trash" set `purge_at = now`, which makes it due at once; the
+retention is `PAPERLESS_GO_TRASH_RETENTION` (default 720 h). A due document
+is hidden from every read (`GET` and the file routes are `404`, restore and
+purge too), and the sweeper deletes its row.
+
+- **One clock.** The store has `Now` (the wall clock in `serve`, injected
+  in tests) and `TrashRetention` (every command sets it from the
+  configuration). Every trash write takes `now` as a parameter (`deleted_at`,
+  `purge_at`) and every read of the state compares against it, also the
+  sweeper's scan, which gets the same clock and retention. The retention is
+  read at every decision: shortening it applies at once to documents
+  already in the trash; with `0` a trashed document is due at once (the
+  UI's Undo then fails).
+- **The filter** is two explicit branches in every copy of the search's
+  filter block (the six search queries, `SearchDocumentsDeletedDesc` and
+  `MatchDocumentIDs`; `TestSearchFilterCopies`): `(NOT trashed AND
+  deleted_at IS NULL) OR (trashed AND deleted_at IS NOT NULL AND not
+  due)`. The queries run as unnamed statements, so the constant folds one
+  branch away: the trash list uses the partial index `documents_trash_idx
+  (owner_id, deleted_at DESC, id) WHERE deleted_at IS NOT NULL`, and the
+  live lists keep `documents_owner_created_idx`, `documents_owner_date_idx`
+  and `documents_search_idx` (`TestTrashFilterUsesIndexes`, with
+  `EXPLAIN`). The sort `deleted` (descending only, keyset over
+  `(deleted_at, id)`) is the trash's default without ranked text and
+  refused outside it.
+- **Writers** (all through `ownerTx`, with the row lock and a state check
+  under it): `TrashDocument` (a trashed one is `ErrInTrash`, `409
+  in_trash`), `RestoreDocument` and `PurgeDocument` (a live one is
+  `ErrNotInTrash`, `409 not_in_trash`: permanent deletion is always two
+  steps); a due document is `ErrNotFound` for all three. None of them
+  touches a column of the search triggers, and `modified_at` stays (the
+  document did not change; a `PATCH` of a trashed document is refused, so
+  the precondition loses nothing). `PatchDocument`, a bulk `update`, and
+  `reprocess` of one document refuse a trashed one (`ErrInTrash`);
+  `reprocess --all`/`--failed` skip trashed documents; a queued or running
+  job of a trashed document finishes normally, so a restored document has
+  its text. `GetDocument` returns a trashed document with `DeletedAt` and
+  `PurgeAt` (the due time), so a link and the file and thumbnail routes
+  keep working for the preview. `OwnedRowCounts` counts trashed rows: a
+  user with documents in the trash cannot be deleted until they are
+  purged.
+- **Bulk.** `BulkSelection.Action` is `update` (the field change), `trash`,
+  `restore` or `purge`; the trash actions take no fields and are one
+  `UPDATE … WHERE id = ANY` each. By IDs every locked document must be in
+  the action's state (else the whole change fails with `409`); by search
+  the match must select the trash (`trashed`) for restore and purge and
+  the live documents otherwise, and a purge by search needs an owner, so
+  "empty trash" is always one user's trash, also for an admin who sees
+  everyone's documents. The fingerprint (`v2.`) covers the action and the
+  sorted IDs, so a dry run confirmed for `restore` is no confirmation of a
+  `purge` of the same set; a `v1.` fingerprint never matches.
+- **The sweeper** (`sweep.Sweeper`, in `serve` every minute and at once
+  after a purge request in the same process, through `web.Options.SweepWake`).
+  `RunOnce` loops `store.PurgeDueDocuments` in batches of 100 until a
+  scan finds fewer: it scans due rows on the pool without a lock (`ORDER
+  BY owner_id, id`), then per owner one `ownerTx` locks them, checks again
+  that each is still due (a restore may have come first), deletes them
+  (`RETURNING` the three hashes; cascades to `document_tags`, `deadlines`,
+  `jobs`; the vocabulary trigger runs, about 12 ms per row, so the owner
+  lock is held for about 1.5 s per batch at most), queues the original,
+  archive and thumbnail hashes in `blob_removals` (`ON CONFLICT DO
+  NOTHING`, `due_at = now + 1 h`) and writes `document.purge` by `system`
+  with `reason: retention` and `ownerId` for each document whose retention
+  passed (a requested purge was audited when it was asked for). Measured
+  on the test machine: trashing 1 000 documents by search takes 91 ms,
+  marking them for purge 104 ms, the row purge of all 1 000 330 ms.
+- **Re-ingesting a trashed file.** `ingest.Import` reports a duplicate
+  with `Existing.Trashed`; the callers decide (maintainer decision on
+  #12). A web upload and a key with `read` answer `duplicate` with
+  `trashed: true`, and the UI offers Restore. Where nobody sees a Restore
+  button, the caller restores the document at once, audited as
+  `document.restore` with `via`: an upload with a key without `read`
+  (`upload`, the iPhone Shortcut; its answer stays `{"duplicate": true}`),
+  the consume folder (`system`, then the file is deleted and counted under
+  `restored`) and `import` (the operator; counted as `restored`). A
+  duplicate whose document is due for purge is neither duplicate nor new:
+  `store.ErrPurgePending`, a transient error on every path (`503` with
+  `Retry-After: 60` for every upload, the consume folder keeps the file,
+  `import` reports a failure), because a client that heard "duplicate"
+  would not retry while the only copy goes. The same holds when the
+  restore itself finds the document due (`ErrNotFound`, a window of at
+  most a minute), and when the lookup after an insert's collision finds
+  no document any more (purged in between). A restore that finds the
+  document live (someone restored it meanwhile, `ErrNotInTrash`) is a
+  plain duplicate for an upload-only key.
+- **Files.** A purged row's files are queued with `due_at = now + 1 h`
+  and removed by the sweeper's queue pass once no document names them
+  (see [Blob removal](#blob-removal)): disk space comes back about an
+  hour and a minute after a purge. #10's export decides
+  what to do with trashed documents (the app's format has `Deleted/`), and
+  #11's upcoming deadlines must leave them out.
+
+## Blob removal
+
+#12, part 2 (`internal/store/blob_removals.go`, `internal/sweep`). The
+sweeper's **queue pass** is the only remover of document files; a purge
+and the walk only queue hashes in `blob_removals`. Files are shared
+between owners and between an original and an archive, so a file goes only
+when no document names it as original, archive or thumbnail (the three
+hash indexes), and a writer that is about to name a file must not lose it
+to a removal in between: an upload whose `Put` found the file
+(`created=false`) inserts its row only later, the worker stores the archive
+and thumbnail minutes before `CompleteJob`.
+
+- **The blob lock.** A transaction-level advisory lock per hash, in the
+  two-`int4` key space (`pg_advisory_xact_lock(class, key)`, class
+  `0x70676f62`, key the first four bytes of the hash), apart from the
+  single-`bigint` keys of the owner lock and the other advisory locks, so a
+  blob key never equals an owner key. Two hashes with the same key only
+  serialise. It is taken inside the writer's transaction, after the owner
+  lock, so no connection is held during an upload.
+- **Writers** (`CreateDocument`: original and archive; `CompleteJob`:
+  archive and thumbnail) call `holdBlobs` right after `lockOwners`: the
+  shared lock of each hash in ascending key; `DELETE FROM blob_removals …
+  RETURNING removed_at` (a row the sweeper marked gives `ErrBlobRemoved`);
+  `Present` for each hash (a missing file gives `ErrBlobRemoved`; a lookup
+  that fails otherwise, such as a permission or I/O error, is an error of
+  its own, never taken for a removal). Then the
+  row is written. The guard refuses the statements that write a hash
+  column (`hashWriterQueries`; unnamed SQL by `writesHashColumns`) unless
+  `holdBlobs` ran in the transaction, and `TestEveryWriterLocksItsOwner`
+  checks that exactly the hash writers hold. A rolled-back writer (a
+  duplicate) rolls its dequeue back too. `ErrBlobRemoved` writes nothing:
+  an upload answers `503` ("the file is being cleaned up; try again") with
+  `Retry-After: 1` for a missing file, `5` for a mark younger than 10 s
+  (most likely a live pass, which finishes within moments), and, for an
+  older mark, the time until a crashed pass's mark would be taken over
+  (`MarkStale` plus a minute's round, at most 350 s;
+  `store.BlobRemovedError`), the
+  consume folder leaves the file for the next
+  scan, `import` reports the file as failed, and the worker's attempt is
+  retried. The retry's `Put` publishes a fresh copy.
+- **`Blobs` is required.** `store.Open` takes the blob store's lookup
+  (`blobstore.Files`, which creates nothing) and refuses `nil`, so no
+  command can skip the check; `openApp` passes the data directory for
+  every command (`TestOpenAppChecksTheDataDir`, and
+  `TestOnlyOpenAppOpensTheStore` keeps it the only caller). Tests that store
+  no files pass `storetest.AnyBlob`.
+- **One sweep at a time.** The queue pass and the walk each hold the sweep
+  lock for their whole run (`store.ExclusiveSweep`): a session-level
+  `pg_try_advisory_lock(0x70676f73, 0)` on a connection of its own, a class
+  no blob key uses. Another pass, in this process or another (`serve` and
+  `./pgo sweep`), does nothing and gets `store.ErrSweepRunning` (`serve`
+  tries again at the next round, `sweep` says so and exits 1). A crash
+  releases the lock with the connection; an unlock that fails closes it.
+  Steps 1 and 3 of the queue pass run on that same connection
+  (`store.SweepSession`), so it is never idle during a pass and a session
+  that was terminated or timed out makes them fail; right before each
+  `Remove` the pass checks on it that it still holds the lock and that the
+  row still carries its own mark (`StillMarked`), and stops otherwise
+  without removing anything more. Otherwise a pass whose session was lost
+  could, after another pass took its mark over and a writer named the file
+  again, remove that file (`TestQueuePassWithALostLockRemovesNothing`).
+  Each mark carries the time it was set, not the pass's start, so a mark
+  set late in a long pass never looks stale.
+  Without this, two passes that both marked a hash could interleave so
+  that the second removes a fresh copy that a writer stored and named after
+  the first pass finished (`TestConcurrentQueuePassesKeepACommittedFile`).
+- **The queue pass** (every minute in `serve`, after the row pass; up to
+  1 000 rows a run), per hash: (1) one transaction without I/O, at READ
+  COMMITTED whatever the database's default: the exclusive blob lock, then
+  `UPDATE blob_removals SET removed_at = now` for a due unmarked row that
+  no document names (`MarkBlobRemoval`); a hash a document names loses its
+  row instead (a later purge queues it again). The exclusive lock waits for
+  every writer that holds the shared one, and under READ COMMITTED the
+  `UPDATE` takes its snapshot after the wait, so it sees every reference
+  such a writer committed (under REPEATABLE READ the snapshot would be the
+  lock statement's, from before the wait: `TestMarkBlobRemovalReadCommitted`).
+  A row marked by another pass is taken over only once the mark is
+  `store.MarkStale` (5 minutes) old, so a pass never acts on a live mark
+  even without the sweep lock. (2) `blobstore.Remove`, with no lock held;
+  idempotent. (3) `DELETE` the row this pass marked (`removed_at` equal to
+  its mark). A failed `Remove` is logged at error level and the row is
+  unmarked and due again after the grace (`RequeueBlobRemoval`), so uploads
+  of that file are not refused while the disk misbehaves; the pass goes on
+  with the next hash.
+- **Every order is safe.** A writer that commits before step 1 makes the
+  sweeper see its reference. A writer holding its shared lock makes step 1
+  wait, then see it. A writer arriving while step 1 holds the lock waits,
+  then sees the mark. A writer between step 1 and 3 sees the mark, or
+  `Exists` fails; one after step 3 (its `Put` long before) fails at
+  `Exists`. A hash queued between a writer's `DELETE` and its commit
+  cannot be marked before the commit (the lock). Tests (a)–(d) in
+  `TestBlobRemovalRaces` run these orders for both writers, plus the
+  upload API (`TestUploadPutSweepInsert`, `TestUploadWhileTheFileIsMarked`)
+  and the worker (`TestWorkerArchiveRemovedBeforeCompletion`).
+- **Crash safety.** A crash after step 1 leaves the row marked: a pass
+  takes it over once the mark is `MarkStale` old (writers of the hash fail
+  and retry meanwhile, for about 5 minutes), rechecks, removes and deletes
+  it. A crash after step 2 leaves a
+  marked row whose file is gone: `Remove` is fine with that. A writer whose
+  `Put` re-created the file between step 2 and 3 fails once at the mark;
+  its retry finds the file.
+- **The residual bound.** A committed file can only be lost when all of
+  these happen together:
+  - a sweep pass stalls for more than `MarkStale` (5 min) between its
+    `StillMarked` check and the unlink;
+  - its database session is lost during that stall;
+  - another sweep process takes the mark over and finishes;
+  - a writer stores and commits the same file before the stalled unlink
+    runs.
+
+  If the session survives the stall, no other pass gets the sweep lock;
+  if it is lost, the other pass's lock is already the proof that it is,
+  and what is left is an unlink already under way, which no check on the
+  database side can stop. This is the limit of any check-then-act between
+  a database and a filesystem. Closing it fully would need a fence in the
+  filesystem (rename the file to a tombstone, check again, then unlink or
+  rename it back, plus tombstone recovery after a crash), which is out of
+  proportion to the window.
+
+  `MarkStale` stays at 5 minutes. A raise to 15–60 minutes would only
+  require a longer stall, but the stalls that matter here are either short
+  (a pause of seconds) or open-ended (a frozen process, a suspended VM),
+  and an open-ended one outlasts an hour as easily as 5 minutes. The cost
+  of a raise is real: after a crashed pass, writers of the marked hash are
+  refused for `MarkStale` plus a round. `Retry-After` tells uploads how
+  long (at most 350 s now, about an hour then), but the processing worker
+  retries after 1 and 5 minutes only, so with a longer `MarkStale` every
+  attempt of a job whose archive or thumbnail is that hash would fail, and
+  the job with it.
+- **The grace** (`store.BlobGrace`, 1 h, `due_at` of every queued row) is
+  not needed for correctness. It keeps a file that an upload or the worker
+  has just stored, and no row names yet, from being queued by the walk and
+  removed before the writer's `DELETE` takes the row away, which would fail
+  that writer once.
+- **The walk** (at `serve`'s start, then every 24 h of the sweeper's clock,
+  and `sweep`): `blobstore.Walk` in batches of 1 000 hashes, the
+  candidates being files no document names and not queued yet
+  (`WalkCandidates`); it queues them due in an hour and removes `tmp/put-*`
+  files older than 24 hours (an upload's `Put` is bounded by its one-hour
+  transfer timeout; a name left after publication is only a second link).
+  Unexpected entries are logged (up to 20 per walk) and never touched.
+  Guards, each of which queues and removes nothing: the data directory must
+  hold the marker file `installation` with the database's installation
+  UUID (`store.Installation`; `ErrUnbound` without it, a warning at
+  `serve`'s start and at every walk; `ErrOtherInstallation` with another);
+  and, unless `sweep --force`, the database must have documents when the
+  directory has files (`ErrEmptyDatabase`) and one walk may queue at most
+  10 % of the files it saw or at most 100 (`ErrTooMany`), counted over all
+  candidates before any is queued. Unless `--force`, the walk also keeps
+  (does not queue) the candidates whose file was written after the
+  database's newest document change (`store.NewestDocumentChange`: the
+  latest `created_at` or `modified_at` of a document, or `finished_at` of a
+  job, since a processing result does not touch `modified_at`), counts them
+  in `WalkStats.Newer`, and `serve` logs a warning, `sweep` a warning line.
+  Such files most likely belong to documents the database does not have:
+  an older dump of the same installation restored with the newer data
+  directory, where the marker matches and the newer files are below the
+  10 % stop (`TestWalkKeepsFilesNewerThanTheDatabase`). Every error of
+  this check keeps a file: an orphan of an upload that failed after the
+  last change is kept until a later change, and a file written before the
+  first change after such a restore counts as older again, so it only
+  helps right after the restore (at `serve`'s first walk, or `sweep
+  --dry-run` before it). The reference is read before the files are
+  walked, so a document created or processed during the walk cannot make
+  the newer files count as older (`TestWalkReadsTheNewestChangeFirst`).
+  The file times come from the data directory's clock, the change times
+  from the database's (`created_at`, `modified_at`) and the worker's
+  (`finished_at`). A skew that makes files look newer only keeps them. In
+  the other direction, a database or worker clock ahead of the data
+  directory's by d moves the reference d into the future: files written
+  within d after the restored database's newest change count as older and
+  are queued. The protection shrinks by the skew and is never worse than
+  without the check. `migrate` writes the marker into a data
+  directory without a marker and without a file below `documents/`; an
+  existing installation binds once with `sweep --bind`, which needs
+  documents in the database and `--force` over another installation's
+  marker. A `PAPERLESS_GO_DATABASE_URL` typo, a restore into the wrong
+  database or a reinstall that kept `DATA_DIR` therefore cannot queue the
+  whole store. The queue pass checks the marker too, before it removes
+  anything: with another installation's marker (a database URL that points
+  at another installation's database, a wrong dump) it removes nothing,
+  logs an error and returns `ErrOtherInstallation` (`./pgo sweep` exits 1).
+  It keeps working while the data directory is unbound, since it removes
+  only what this database queued.
 
 ## Blob durability
 
@@ -338,7 +1031,7 @@ about durability.
   A writer that finds the file (before or through a lost link race)
   synchronizes that file and the same directories itself before it returns
   `created=false`: the file may be what an earlier, failed call published.
-  If a removal (the orphan sweep, #12) takes the file away between the
+  If a removal (the sweeper's queue pass) takes the file away between the
   lookup and its synchronization, `Put` publishes its own copy instead.
   After a failure the final file stays for the retry; the temporary name is
   removed, but not durably.
@@ -346,11 +1039,12 @@ about durability.
   file was already gone: an earlier call may have unlinked it and failed
   before the barrier. If shard directories are missing, it synchronizes the
   nearest existing one and its ancestors through the store root; a missing
-  store root is an error. The caller makes sure no row refers to the file;
-  deleting a document row leaves its file, and the orphan sweep that removes
-  unreferenced files comes with the trash (#12).
+  store root is an error. The caller makes sure no row refers to the file
+  and no writer is about to name it: only the sweeper's queue pass calls it,
+  under the protocol of [Blob removal](#blob-removal).
 
-Every call that takes a hash (`OpenHash`, `Exists`, `Remove`) accepts only
+Every call that takes a hash (`OpenHash`, `Exists`, `Remove`, and
+`Files.Exists`) accepts only
 a lowercase hex SHA-256 and builds the path itself, so no input reaches a
 file outside `documents/`; a malformed hash gives `ErrNotHash` (`Exists`:
 false). There is no access by path.
@@ -359,7 +1053,8 @@ Stale temporary names in `tmp/` are possible after a crash. A name left
 after publication is a second hard link to a live blob. `Walk` reports every
 file below `documents/` and `tmp/` (blobs, temporary files with their age,
 and anything unexpected such as symlinks, wrong names or extensions) without
-following symlinks, for the sweep and a later consistency check.
+following symlinks, for the sweep's walk and a later consistency check;
+`RemoveTemp` removes a `tmp/put-*` name the walk found stale.
 
 The guarantee holds on Linux, for a data directory on one local filesystem
 that supports hard links and `fsync` on regular files and directories, on a
@@ -406,7 +1101,8 @@ The result is `Imported`, `Duplicate` (with the existing document's ID and
 title) or `Refused` (`unsupported`, `too_large`, `too_many_pixels`,
 `unreadable`); an error is transient, nothing was created and a retry may
 succeed. Nothing calls `blobstore.Remove`: a blob left by a failure is
-reused by the retry or swept as an orphan (#12). Images are stored as
+reused by the retry or queued by the sweep's daily walk (see [Blob
+removal](#blob-removal)). Images are stored as
 originals; the CLI `import` walks a path (files only, symlinks skipped, sources
 untouched), calls `Import` per file and writes one `document.import` audit
 entry per run (the importer's per-file transactions have no audit entry of
@@ -645,7 +1341,16 @@ another user's document answers `404` and an admin sees all.
   (`existing` left out if the lookup failed, and for an API key without
   `read`, so an `upload` key learns only that the file is there), `413` `too_large`, `415`
   `unsupported`, `422` `unreadable` or `too_many_pixels` (with `reason`),
-  `400` for a body that broke off, `503` without the audit log.
+  `400` for a body that broke off, `503` without the audit log, `503`
+  with `Retry-After: 5` when another change of the caller's documents ran
+  longer than 15 s (Write locking, bounded wait; the body must be sent
+  again). A duplicate of a trashed document adds `trashed: true` for a
+  caller that may read; for a key without `read` the server restores it
+  instead (see [Trash](#trash)); one due for purge answers `503` with
+  `Retry-After: 60`. An upload of a file the sweeper is removing answers
+  `503` "the file is being cleaned up; try again", with `Retry-After: 1`
+  when the file is gone (the retry stores it again), `5` while a fresh mark
+  of the sweeper is on it and up to 350 for an older one (see [Blob removal](#blob-removal)).
 - **`GET /api/documents`** lists and searches the scope's documents
   through `store.SearchDocuments`, without their text, with
   `maxUploadSize` for the UI. Parameters (`listQuery`):
@@ -656,7 +1361,8 @@ another user's document answers `404` and an admin sees all.
   | `tag`, `correspondent`, `type` | UUIDs, repeatable (at most 100 each), any of them; joined with `q` by AND. |
   | `inbox`, `favorite` | `true` or `false`: an `is:inbox` or `is:favorite` filter. |
   | `owner` | `me`: only the caller's own documents (an admin's default view; without it an admin lists everyone's, the "Everyone's documents" switch). For an admin also a user ID: only that user's. A non-admin may name only themselves (`403`). The same `listScope` as the metadata lists. |
-  | `sort` | `relevance` (the default with free text that is not only negated), `added` (the default otherwise: with only negated words every match ranks 0, and ranking them all took 4–5 s on 100 000 documents) or `date`. |
+  | `trashed` | `true`: the trash instead of the live documents (trashed documents not yet due for purge), with every other parameter. |
+  | `sort` | `relevance` (the default with free text that is not only negated), `added` (the default otherwise: with only negated words every match ranks 0, and ranking them all took 4–5 s on 100 000 documents), `date`, or `deleted` (the trash only, descending; its default without ranked text). |
   | `order` | `desc` (default) or `asc`; relevance has no ascending order. |
   | `tz` | An IANA zone (`time.LoadLocation`, zones built in through `time/tzdata`) for the days of `date:` and `added:`; default UTC. `Local` is refused. |
   | `limit` | 1 to 100, default 100 (the start page asks for 10, the search for 25); more is capped. |
@@ -673,8 +1379,13 @@ another user's document answers `404` and an admin sees all.
   order`, `invalid time zone`, `invalid tag id` (likewise for
   `correspondent` and `type`), `too many tag ids`, `inbox must be true or
   false`, `limit must be a positive number`. `failStore` maps the store's
-  `ErrInvalidCursor` and `ErrInvalidSort` to `400` and `ErrRetry` to `503`
-  with `Retry-After: 1`; any other error is a logged `500` with `internal
+  `ErrInvalidCursor` and `ErrInvalidSort` to `400`, `ErrRetry` to `503`
+  with `Retry-After: 1` and `ErrBusy` (a write that waited 15 s for
+  another change of the same owner) to `503` with `Retry-After: 5`,
+  `ErrSearchTooBroad` (the search's 30 s limit, Search index above) to
+  `422` with `search too broad; use fewer or longer words, or a filter`
+  and `"code": "search_too_broad"` (a warning in the log, not an
+  audit entry); any other error is a logged `500` with `internal
   error`, so no database message reaches the client.
   The first page of a typed search (`q` with free text or search syntax,
   no cursor) writes `document.search` after the search ran, with `q` as
@@ -685,7 +1396,17 @@ another user's document answers `404` and an admin sees all.
   searches (maintainer decision on #7).
 - **Document JSON** has `ownerId`; for admins also `ownerName`, the
   owner's user name, so the UI can mark other users' documents and load
-  that owner's metadata.
+  that owner's metadata. `deletedAt` and `purgeAt` (when it is removed for
+  good) are `null` while the document is live.
+- **`DELETE /api/documents/{id}`** (write) moves a document to the trash
+  (`204`; `409` `in_trash` when it is there already), **`POST
+  /api/documents/{id}/restore`** brings it back (`200` with the document
+  as `GET`; `409` `not_in_trash`), **`POST /api/documents/{id}/purge`**
+  asks for its permanent deletion (`204`; `409` `not_in_trash`) and wakes
+  the sweeper. A document due for purge is `404` for all three. Audit:
+  `document.delete`, `document.restore`, `document.purge`, target the
+  document, `ownerId` for an admin's change of another user's (see
+  [Trash](#trash)).
 - **`GET /api/documents/{id}`** returns one document with its text.
 - **`GET /api/documents/{id}/file?kind=original|archive`** sends the file
   from the blob store (`OpenHash`) with `Content-Disposition: attachment`
@@ -711,7 +1432,8 @@ another user's document answers `404` and an admin sees all.
   transaction, with the document as target and `selection: ids`, like
   `reprocess ID`. Answers: `202` with the document when it was queued,
   `200` when it was queued or running already, `404` outside the scope,
-  `503` without the audit log.
+  `409` `in_trash` for a document in the trash, `503` without the audit
+  log.
 - **`PATCH /api/documents/{id}`** (write) changes only the fields sent
   (`store.PatchDocument`): `title` (at most 1 024 characters and no
   control characters (Unicode Cc: NUL, tab, line breaks, escape …), like
@@ -722,11 +1444,19 @@ another user's document answers `404` and an admin sees all.
   `isInbox`, `archiveSerialNumber`, `correspondentId`, `documentTypeId`
   (`null` clears these three) and `tagIds` (replaces the tags). `null` for
   any other field answers `400` `invalid_field`, an empty body `400`
-  `nothing_to_change`. One transaction locks the row (`LockDocument`,
+  `nothing_to_change`. The optional `expectedModifiedAt` is a precondition,
+  no field to change (not in `fields`, alone it is `nothing_to_change`):
+  the document's `modifiedAt` exactly as `GET` or the last `PATCH`
+  answered it (RFC 3339 with microseconds; the UI keeps the string and
+  never passes it through a `Date`, which has milliseconds only). It
+  reads the document's owner, then one transaction takes the owner's gate
+  and write lock (Write locking, under Search index), locks the row (`LockDocument`,
   `FOR NO KEY UPDATE`: no key column changes, so a foreign-key check of a
-  row referencing the document, such as a new job, does not wait),
-  updates the given
-  columns (the search triggers follow), replaces the tags, touches
+  row referencing the document, such as a new job, does not wait; it also
+  returns `modified_at`), checks the precondition after the lock (`404`
+  first, then `409` `document_changed` with the current `modifiedAt`:
+  nothing changes, no audit entry, no retry), updates the given
+  columns (the search triggers follow), replaces the tags, advances
   `modified_at` and writes `document.update` (target the document, no
   target name; `fields`, the names of the fields sent; `ownerId` for an
   admin's change of another user's document). Processing writes only its
@@ -735,8 +1465,36 @@ another user's document answers `404` and an admin sees all.
   `400` `owner_mismatch` (a tag, correspondent or type that is not the
   document owner's, also for an admin), `invalid_title`, `invalid_notes`,
   `invalid_asn`, `404` outside the scope, `409` `asn_taken` with
-  `documentId` of the document that has the number, `503` without the
-  audit log or after 3 deadlocks (`Retry-After: 1`).
+  `documentId` of the document that has the number, `409`
+  `document_changed` with `modifiedAt`, `409` `in_trash` for a document
+  in the trash (`asn_taken` adds `trashed: true` when the document with
+  the number is in the trash, where it keeps it), `503` without the
+  audit log or after a deadlock with SQL outside the store (`Retry-After:
+  1`), `503` with `Retry-After: 5` when another change of the owner ran
+  longer than 15 s (nothing changes). Without
+  `expectedModifiedAt` a change goes through as before (API clients that
+  set one field need not read first); the UI always sends it, and on
+  `document_changed` loads the document again and keeps the user's edits
+  on top (`rebaseForm`: the user's changed fields, tags as added/removed),
+  then asks to save again; it never saves by itself (#105).
+- **`modified_at` advances strictly on every document write** (#105). A
+  write of a field `PATCH` sends or of `document_tags` must advance
+  `modified_at`, with `modified_at = GREATEST(now(), modified_at +
+  interval '1 microsecond')`: `now()` is the transaction's start, so two
+  writes in one transaction, in the same microsecond or after the clock
+  stepped back would otherwise get the same value, and an equal value
+  must mean "unchanged since read". `PatchDocument` and
+  `BulkUpdateDocuments` use it;
+  processing (`SetDocumentProcessed`) writes no such field and leaves
+  `modified_at` alone, so OCR finishing causes no false conflict. A new
+  writer (classification, an import into existing documents) must use the
+  same form; `TestDocumentUpdatesAdvanceModifiedAt` checks every `UPDATE
+  documents` in `internal/store/queries` with `SetDocumentProcessed` and
+  the trash's three writes (`TrashDocuments`, `RestoreDocuments`,
+  `PurgeDocuments`: no field of the document changes) as the only
+  exceptions. Foreign-key actions (a deleted correspondent, type
+  or tag) do not advance it: `PATCH` sends only changed fields, and a
+  stale deleted tag ends in `owner_mismatch`.
 - **`POST /api/documents/bulk`** (write) changes several documents, all
   or nothing (`store.BulkUpdateDocuments`). The selection is exactly one
   of:
@@ -756,13 +1514,47 @@ another user's document answers `404` and an admin sees all.
   an admin's selection across owners answers `400` `several_owners`;
   inbox, favourite and clearing work across owners. Nothing to change is
   `400` `nothing_to_change`. The answer is `{updated}`, `0` for a search
-  without matches (which writes no entry).
+  whose dry run matched nothing either (which writes no entry).
+
+  **Actions.** `action` `trash`, `restore` or `purge` (absent or `update`:
+  the change above; another value is `400` `invalid_action`) takes no
+  fields (`400` `invalid_field`). By `ids` every document must be in the
+  action's state, else `409` `in_trash` or `not_in_trash` and nothing
+  changes; `match.trashed` must be `true` for restore and purge and
+  absent for the others, and a purge by `match` needs `match.owner`
+  (both `400` `invalid_selection`). The dry run takes the `action` too:
+  its fingerprint is for that action. Audit: `document.bulk_delete`,
+  `bulk_restore`, `bulk_purge` as the summary and `document.delete`,
+  `restore`, `purge` per document (see [Trash](#trash)).
 
   **Dry run.** `{"match": {...}, "dryRun": true}` changes nothing and
-  answers `{matched, owners, limit}`: the number of matches (also above the
-  limit), their owners (`0` above the limit) and the limit, so the UI
-  shows the count and asks before it sends the change. The list itself
+  answers `{matched, owners, limit, fingerprint}`: the number of matches
+  (also above the limit), their owners (`0` above the limit), the limit,
+  and the fingerprint of the matched set (left out above the limit, where
+  the change is refused anyway; for no matches, the empty set's), so the
+  UI shows the count and asks before it sends the change. The list itself
   has no total.
+
+  **The confirmed set (#106).** A change by `match` must send the dry
+  run's `fingerprint` (else `400` `invalid_selection`; a `fingerprint`
+  with `ids` or with `dryRun` is refused the same way). It is applied
+  only to exactly the documents the user confirmed: when the matches after
+  the recheck under the lock (below) are not that set (one more, one less,
+  or the same count with another document), nothing changes, no entry is
+  written, and the answer is `409` `{"code": "match_changed", "matched":
+  n}`. `n` is the number the change would cover now (also `0`), for
+  information only: the client counts again with a dry run (which also
+  gives `owners` and `limit`) and asks again; the UI never resends by
+  itself. The fingerprint is opaque: `v2.` and the unpadded base64url
+  (`RawURLEncoding`) SHA-256 of the action's name, a zero byte and the
+  matched IDs, sorted by their 16 bytes and concatenated
+  (`store.matchFingerprint`; `v1.` without the action is refused as
+  `match_changed`); clients pass it back
+  unchanged, never compute it, and compare nothing. It grants nothing (it
+  only narrows a change the caller may make anyway), so it carries no key.
+  It needs no client-sent ID list, so the server still resolves the
+  search itself (maintainer decision 6 of #7). The limit is checked first:
+  a set that grew past 5 000 is `too_many_documents`, not `409`.
 
   **Locking.** One transaction resolves the selection, locks the
   documents in id order (`LockDocuments`, `ORDER BY id FOR NO KEY
@@ -773,21 +1565,29 @@ another user's document answers `404` and an admin sees all.
   in between is left alone; `TestBulkUpdateByMatchRecheckedAfterLock`
   holds the bulk change between match and lock), removes and
   adds the tags (one `DELETE`, one `INSERT … ON CONFLICT DO NOTHING`),
-  updates the columns and touches `modified_at` of every document. Against
-  a metadata delete it can still deadlock: `DeleteTag` deletes the tag's
-  `document_tags` rows, then its statement trigger waits for the locked
-  documents, while the bulk change waits for those rows (or, setting the
-  deleted correspondent or type, for its key share). Whichever transaction
-  PostgreSQL aborts is retried as a whole (`retryDeadlock`, 3 attempts,
-  then `503` with `Retry-After: 1`); a bulk change by search resolves its
-  matches again. `TestBulkUpdateRetriesDeadlockWithDeleteTag` makes the
-  bulk change the victim (its connection's `deadlock_timeout` is 10 ms,
-  the delete's an hour) and checks the retry succeeds. A retry can
-  deadlock again: the delete's trigger updates the documents in its own
-  order while the retry locks them in id order, so a retry that wins
-  some of the locks before the delete finishes repeats the cycle (seen in
-  about 1 of 20 runs with `FOR NO KEY UPDATE`). The test therefore lets
-  the retry lock only after the delete finished (`WithBeforeLock`).
+  updates the columns and advances `modified_at` of every document. The
+  recheck runs over the locked IDs only (`only_ids` in
+  `MatchDocumentIDs`, outside the filter block), so it returns at most
+  those and the limit cannot cut any off (#99,
+  `TestBulkUpdateByMatchRecheckKeepsLockedMatches`). The selection is
+  fixed at the first match, which the limit was checked on: documents
+  that start matching between the match and the lock are neither added
+  nor a reason to refuse. The locked documents that still match are then
+  compared with the confirmed fingerprint (`confirmMatch`); a document
+  that left the match in that window makes them differ, so the change is
+  `409` instead of changing the rest (`TestBulkUpdateByMatchRecheckedAfterLock`;
+  without the recheck the locked set would still fit the fingerprint and
+  the document would be changed). Before its documents the bulk change
+  takes the write locks of their owners (Write locking, under Search
+  index): by IDs the owners of the IDs in the scope; by `match` in a
+  scope of one owner that owner, before the match, so in that case no
+  store writer can change the match before the documents are locked
+  (only SQL outside the store); in an admin's scope over all owners the
+  owners of the first match, after it (that match runs before the
+  transaction). There is no retry: a deadlock with SQL outside the store
+  answers `503` with `Retry-After: 1`; a change that waited 15 s for
+  another change of the same owners answers `503` with `Retry-After: 5`
+  and changes nothing.
 
   **Audit.** One `document.bulk_update` per change (no target; `count`,
   `fields`, `selection` `ids` or `match`, `ids` of the changed documents,
@@ -814,7 +1614,10 @@ answers `404` and an admin may change everyone's (the row keeps its owner).
   list (`List*WithCounts`, the subtree by a recursive CTE). `owner=me`
   limits an admin to their own rows; `owner=<user ID>` (admins only; a
   non-admin may name only themselves, else `403`) to one user's, for the
-  pickers of another user's document.
+  pickers of another user's document. For admins each row also has
+  `ownerName` (one `ListUsers` per list, as for documents), so the
+  metadata page can name the owner of another user's row; nothing for
+  anybody else.
 - **`POST`** creates a row owned by the caller: `name`, for tags also
   `parentId` and `color`. An admin may pass `ownerId` to create it for
   another user (inline creation on that user's document); anybody else
@@ -822,26 +1625,34 @@ answers `404` and an admin may change everyone's (the row keeps its owner).
 - **`PATCH`** changes only the fields sent: `name`, for tags also `color`
   and `parentId` (`null` makes a root tag). `matchText`, `matchMode` and
   `symbol` stay as stored; unknown fields and an empty patch answer `400`.
-  `store.Patch*` locks the row (`SELECT … FOR NO KEY UPDATE`), merges and
+  `store.Patch*` takes the owner's write lock (Write locking, under
+  Search index), locks the row (`SELECT … FOR NO KEY UPDATE`), merges and
   writes in one transaction, so a concurrent patch of another field is not
-  lost. The weaker mode lets foreign-key checks on the row (a new parent
-  tag, a document's tag) go on without waiting, so opposite tag moves
-  answer `409` `tag_cycle` instead of deadlocking.
+  lost. Opposite tag moves of one owner serialise at the owner's lock:
+  one succeeds, the other answers `409` `tag_cycle`. A `POST` or `PATCH`
+  that waited 15 s for another change of the owner answers `503` with
+  `Retry-After: 5` and changes nothing.
   Only the fields sent are checked: a name of 1 to 128 characters after
   trimming, no control characters (Unicode Cc, also NUL; checked before
   trimming, so a trailing newline is refused) (`invalid_name`), a colour `#RRGGBB` (`invalid_color`); an
   imported name that is longer does not block a colour change.
 - **`DELETE`** answers `204`; documents keep everything else, a deleted
-  tag's children become root tags. A deadlock with a concurrent change of
-  the documents (`40P01`) is retried up to 3 times (`retryDeadlock`), then
-  answers `503` with `Retry-After: 1`.
+  tag's children become root tags. The delete reads the row's owner,
+  takes the owner's write lock (Write locking, under Search index) and
+  deletes; the cascade, the `SET NULL` and the search triggers run under
+  that lock. A deadlock with SQL outside the store answers `503` with
+  `Retry-After: 1`; there is no retry. A delete that waited 15 s for
+  another change of the owner answers `503` with `Retry-After: 5`.
 - **Errors** carry `error` and `code`: `409` `name_taken` (case-insensitive
   per owner, per parent for tags), `409` `tag_cycle`, `409`
   `tag_name_conflict` (a child would clash with a root tag on delete;
   `childId` and `childName` when the lookup found it; nothing changes),
   `400` `owner_mismatch` (a parent of another owner, or no such tag).
-- **`GET /api/documents/counts`** answers `{inbox, favorites, total}` for
-  the scope, with `owner` as for the lists.
+- **`GET /api/documents/counts`** answers `{inbox, favorites, total,
+  trash}` for the scope, with `owner` as for the lists: the first three of
+  the live documents, `trash` the trashed ones not yet due for purge. The
+  `documentCount` and `subtreeCount` of the metadata lists leave trashed
+  documents out.
 - **Audit.** `tag.create`, `tag.update`, `tag.delete`, likewise
   `correspondent.*` and `document_type.*`, in the transaction of the
   change (`503` and no change without the log). The target is the row's
@@ -850,13 +1661,69 @@ answers `404` and an admin may change everyone's (the row keeps its owner).
   the acting user (an admin's change). Values other than names are never
   recorded.
 
+## Saved views API
+
+`internal/web/saved_views.go`, on `store` functions in `saved_views.go`
+(#12, part 4). `GET /api/saved-views` (`accessRead`) answers
+`{savedViews: [...]}` in the stored order, each with `id`, `name`,
+`symbol`, `sortIndex`, `filter`, `createdAt` and `modifiedAt`; `POST`,
+`PATCH /api/saved-views/{id}` and `DELETE` are `accessWrite`. Saved views
+are personal: every call uses `Scope{UserID: caller}`, also for an admin,
+so another user's view answers `404` to everybody.
+
+- **`POST`** takes `name` (as metadata names: 1 to 128 characters after
+  trimming, no control characters, `invalid_name`; names may repeat),
+  `filter` (default `{}`) and `sortIndex` (default: after the caller's last
+  view, `NextSavedViewSortIndex` in the insert's transaction, under a
+  per-owner advisory lock (`LockSavedViewOrder`, key prefix
+  `paperless-go:saved-views:`), so parallel creates get distinct indexes). `symbol`
+  stays the app's default. A `sortIndex` sent to `POST` or `PATCH` must lie
+  within ±(2^53 − 1), the integers a JavaScript number holds exactly
+  (`400`); the next index is capped at 2^53 − 1, so a larger stored one
+  cannot make it overflow.
+- **`PATCH`** changes only the fields sent (`name`, `filter`,
+  `paperlessGo`, `sortIndex`). `filter` replaces the whole object.
+  `paperlessGo` is the web's part alone (the object under `paperless-go`,
+  checked as below): it replaces only that key and keeps every other key as
+  stored at the time of the write (`SavedViewPatch.FilterKeys`), so app keys
+  another client changed after the web loaded the view are not lost. The
+  web's "Update to the current filter" sends it; `filter` and `paperlessGo`
+  together are refused (`invalid_filter`). The merged filter is not held to
+  the 16 KiB limit again (each part was). `store.PatchSavedView` locks the
+  row (`LockSavedView`, `FOR UPDATE`), merges and writes in one transaction.
+  `saved_views` is not an owner table (nothing links to it), so no owner
+  lock. Reordering is two `PATCH`es swapping `sortIndex`, or, while any two
+  of the web's views share an index (views from the app may), new indexes
+  for the web's views in their new order.
+- **Filter check** (`400` `invalid_filter`): a JSON object of at most
+  16 KiB; its `paperless-go` part, if present, must be a version-1 object
+  of the fields above, matched by their exact names and each at most once
+  (`encoding/json` alone matches names case-insensitively, so `"Q"` next
+  to `"q"` would slip past the check), the IDs UUIDs, and its parameters
+  must pass `listQuery`, the parser of `GET /api/documents`. Only what the
+  web can open exactly is accepted: at most one tag, correspondent and
+  type, and `inbox`/`favorite` `true` or `null`; the sidebar hides any
+  other view as well. `null` for `q`, `sort`, `order`, `tag`,
+  `correspondent`, `type` or `everyone` means the field is absent, on the
+  server and in the web. Several kinds together (a tag and the inbox, say)
+  are accepted: the list applies all of them and shows a chip for each. Every other key is kept unchecked. Text jsonb cannot
+  hold (bytes that are not UTF-8, a lone surrogate escape such as
+  `"\ud800"`) is `invalid_filter` too.
+- **Audit.** `saved_view.create`, `saved_view.update`, `saved_view.delete`
+  in the transaction of the change (`503` and no change without the log):
+  the view's UUID and name as target, `name`, `oldName` on a rename and
+  `fields` for an update (`name`, `filter`, `paperlessGo`, `sortIndex`). The filter is never recorded.
+
 ## Login
 
 Ported from mail-archive (`internal/auth`, the auth parts of `internal/web`
 and `internal/store`, `cmd/paperless-go/users.go`).
 
 - **Route table.** `internal/web/routes.go` lists every route with its
-  `access`: `accessPublic` (`GET /healthz`, `GET /{$}`, `GET /assets/`),
+  `access`: `accessPublic` (`GET /healthz`, `GET /{$}`, `GET /assets/`,
+  `GET /manifest.webmanifest` and the app icons `GET /favicon-32.png`,
+  `GET /apple-touch-icon.png`, `GET /icon-192.png`, `GET /icon-512.png`,
+  `GET /icon-maskable-512.png`, one route per `ui.RootPaths()` entry),
   `accessLogin` (`/api/session`: read, log in, log out, and `/api/session/2fa`),
   `accessSession`, `accessRead`, `accessUpload` or `accessWrite` (a
   session, or an API key with that scope: the document and metadata
@@ -869,7 +1736,11 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   calls every route with a key of every scope combination.
 - **Sessions.** The cookie `paperless_go_session` (`__Host-` prefixed over
   HTTPS) holds a random token; `sessions` stores its SHA-256 with the user,
-  creation, last use and absolute expiry. Sessions end after 7 days unused
+  creation, last use and absolute expiry. Only the cookie name of the
+  request's scheme logs in (`sessionTokens`: `__Host-` when
+  `secureRequest`, else the plain one), so a plain cookie planted over
+  plain HTTP cannot log in over HTTPS; logins and logout end the sessions
+  of both names (`allSessionTokens`). Sessions end after 7 days unused
   and after 30 days; `serve` deletes ended ones hourly. Every time a
   session check uses comes from the server clock, so tests move a clock
   instead of waiting.
@@ -890,9 +1761,10 @@ and `internal/store`, `cmd/paperless-go/users.go`).
   address (IPv6 per `/64`; logs and the audit log keep the full address);
   `X-Forwarded-For` counts only from `PAPERLESS_GO_TRUSTED_PROXIES`, and
   `X-Forwarded-Proto` (`secureRequest`: the `__Host-` cookie with
-  `Secure`) only from those or loopback. `Handler` logs one warning per
+  `Secure`) only from those or loopback. `protect` logs one warning per
   `Server` (one per process) for an `X-Forwarded-For` from any other peer,
-  loopback included, with the peer's address only.
+  loopback included, with the peer's address only, after the host check,
+  so a request with a wrong `Host` cannot use it up.
 - **API keys** (`internal/auth/apikey.go`, `internal/store/api_keys.go`,
   `internal/web/api_keys.go`, migrations `00009_api_keys.sql` and
   `00017_api_key_upload_scope.sql`). A key is
@@ -1040,6 +1912,52 @@ Ported from mail-archive (`internal/store/audit.go`, `internal/web/audit.go`,
   key name, and only allowlisted detail keys; a new key stays admin-only
   until it is added to the allowlist. Paging is by a `(at, id)` cursor, newest
   first. Reading the log writes no entry.
+
+## PDF viewer
+
+The document detail (`web/src/DocumentDetail.tsx`) draws PDFs with pdf.js
+(`pdfjs-dist`, maintainer decision on #7), never as a document of its own:
+the file endpoint keeps `Content-Disposition: attachment` and
+`Content-Security-Policy: sandbox`, and the PDF is fetched with the session
+cookie and drawn into canvases.
+
+- **Loading.** `pdfViewer.ts` is the interface (`loadPdf(url) → {numPages,
+  pageSize, renderPage}`); it imports `pdfjsLoader.ts` with `import()`, so
+  pdf.js (about 0.5 MB, plus its 1.3 MB worker) is a chunk of its own,
+  loaded only when a detail opens.
+- **Legacy build.** The loader uses `pdfjs-dist/legacy/build`. The modern
+  build needs the newest JavaScript (`Map.prototype.getOrInsertComputed`)
+  and draws nothing in browsers a year old, iOS Safari among them.
+- **Same origin only.** The worker is a file of the build
+  (`pdf.worker.min.mjs?url`). The cMaps, the standard fonts and the
+  JavaScript decoders for JPEG 2000 and JBIG2 are copied by a plugin in
+  `web/vite.config.ts` to `/assets/pdfjs-<version>/` (`/assets/` is cached as
+  immutable, so the version is in the path) and served by `pnpm dev` too.
+- **CSP unchanged.** Workers fall back to `script-src 'self'`. pdf.js 6 has
+  no eval (`isEvalSupported` is gone). `pnpm check:dist`
+  (`web/scripts/check-dist.mjs`, a step of CI's `web` job after the build)
+  scans every `.js`/`.mjs` of the built `dist/assets` for `eval(` (also
+  `(0, eval)(`) and `new Function(`, so a new dependency or a Vite
+  transform is caught too; a missing build, main chunk, worker or fallback
+  decoder fails it. `pdfViewer.test.ts` runs the same rules
+  (`web/scripts/noEval.mjs`) over pdf.js's package files as a fast local
+  check. The legacy build's core-js has only its `Function("return this")`
+  fallback, reached without `globalThis`, which is allowed. WebAssembly is off (`useWasm: false`), so `'wasm-unsafe-eval'`
+  is not needed: JPEG 2000, JBIG2 and CCITT images use the decoders'
+  JavaScript versions, and ICC colour profiles fall back to their alternate
+  colour space. `TestContentSecurityPolicy` (`internal/web/ui`) pins the
+  policy.
+- **What is drawn.** Pages are drawn while near the visible part (an
+  IntersectionObserver), with a text layer of text nodes (select, find).
+  No annotation layer, no XFA, no PDF scripts. Unprocessed JPEG and PNG
+  originals show as a plain `<img>` of the file endpoint (`img-src 'self'`;
+  the sandbox header does not apply to images); HEIC shows a note and the
+  download.
+- **Dependencies.** `pdfjs-dist` is pinned exactly, like every web
+  dependency, and Dependabot updates it. Its optional dependency
+  `@napi-rs/canvas` (native binaries, used only when pdf.js runs in Node)
+  is removed by an override in `web/pnpm-workspace.yaml`, which the
+  Dockerfile copies with the lockfile.
 
 ## Container
 

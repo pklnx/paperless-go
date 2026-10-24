@@ -48,9 +48,29 @@ In Docker Compose, requests do not come from loopback even when the proxy
 runs on the same computer: Docker's port publishing hands them to the
 container from its network's gateway. Until that address is a trusted
 proxy, the login works over HTTPS, but the cookie lacks `Secure` and the
-`__Host-` prefix, so set `PAPERLESS_GO_TRUSTED_PROXIES` as below. (A
-`__Host-` cookie from a time the header counted is dropped at the next
-login and does not stand in the way of the plain one.)
+`__Host-` prefix, so set `PAPERLESS_GO_TRUSTED_PROXIES` as below.
+
+Only the cookie of the request's scheme logs in: over HTTPS the `__Host-`
+one, over plain HTTP (which includes a proxy that does not count) the
+plain one. A plain cookie can be planted by anyone who reaches the browser
+over plain HTTP or from another host name of the domain; over HTTPS it
+must not log the browser into someone else's session. A `__Host-` cookie
+on a plain request is one from a time the header counted; the server does
+not set that name there, so it does not count either, and the next login
+expires it.
+
+This protection works only where requests count as HTTPS: with
+`X-Forwarded-Proto: https` from loopback (a proxy or `tailscale serve` on
+the same computer, with the server run without Docker) or from an address
+in `PAPERLESS_GO_TRUSTED_PROXIES`. In Docker Compose, `tailscale serve`
+included, that needs the variable. Without it every request is plain,
+whatever the proxy is, so a planted plain cookie can still log a browser
+in as the planter.
+
+Setting, removing or changing `PAPERLESS_GO_TRUSTED_PROXIES` later, in a
+way that changes whether requests count as HTTPS, makes the cookie each
+browser holds the wrong one, so every user logs in once more. A login and a
+logout end the sessions of both cookies the browser sends.
 
 ### Trusted proxies
 
@@ -62,9 +82,11 @@ whose `X-Forwarded-Proto` is believed. The server takes the last address in
 `X-Forwarded-For` that is not a trusted proxy; a missing or malformed header
 means the peer.
 
-When a request carries `X-Forwarded-For` from a peer that is not a
-trusted proxy (loopback included), the server logs a warning with the
-peer's address, once per start; the header's own value is never logged.
+When a request with an allowed host name carries `X-Forwarded-For` from a
+peer that is not a trusted proxy (loopback included), the server logs a
+warning with the peer's address, once per start; the header's own value is
+never logged. A request with a host name that is not allowed is refused
+before that, so it cannot use up the warning.
 
 To find the address, log in through the proxy before setting it and look at
 the client address of that login on the **Log** page: that is the proxy as
@@ -72,6 +94,10 @@ the server sees it (in Docker Compose usually the gateway of the Compose
 network, an address in `172.16.0.0/12`). List that address or its network,
 and only if all access goes through the proxy: whoever can connect from a
 listed address can claim any client address and HTTPS.
+
+Whenever that first login did not count as HTTPS (in Docker Compose, for
+example), you log in once more after setting the variable, because the
+cookie of the first login is the wrong one then.
 
 ### Tailscale
 
@@ -125,7 +151,9 @@ only over HTTPS or on `localhost`, so they do not work this way.
 ## Login
 
 - **Everything needs a login or an API key** except `/healthz`, the UI page
-  `/` and its code under `/assets/`; none of them contain data. Which route
+  `/`, its code under `/assets/`, `/manifest.webmanifest` and the app icons
+  (`/favicon-32.png`, `/apple-touch-icon.png`, `/icon-192.png`,
+  `/icon-512.png`, `/icon-maskable-512.png`); none of them contain data. Which route
   needs what is set in one table (`internal/web/routes.go`); a route not
   listed there, or a new one without an access level, needs a session.
 - **Users** are created by admins in the web UI or with `./pgo user add
@@ -148,7 +176,8 @@ only over HTTPS or on `localhost`, so they do not work this way.
 - **Sessions** end after 7 days without use and after 30 days at the latest.
   The cookie is `HttpOnly` and `SameSite=Strict`; over HTTPS (also behind a
   [trusted proxy](#https-behind-a-proxy) that sends `X-Forwarded-Proto:
-  https`) it is `__Host-` prefixed and `Secure`. The database stores only a hash of the token. A password reset
+  https`) it is `__Host-` prefixed and `Secure`, and only that cookie logs
+  in; over plain HTTP only the plain one does. The database stores only a hash of the token. A password reset
   by an admin, a lock or removing the user ends all their sessions;
   changing your own password ends all your other sessions.
 - **Generated passwords** (a new user or a reset in the web UI, `user
@@ -423,11 +452,17 @@ scripts, styles and requests, no framing), `X-Content-Type-Options: nosniff`,
 `Cross-Origin-Resource-Policy: same-origin` and `Permissions-Policy:
 camera=(), microphone=(), geolocation=()`.
 
-Over HTTPS (TLS, or `X-Forwarded-Proto: https` from loopback or a
-[trusted proxy](#trusted-proxies)) every answer carries
+When a request counts as HTTPS (`X-Forwarded-Proto: https` from loopback or a
+[trusted proxy](#trusted-proxies)), every answer carries
 `Strict-Transport-Security: max-age=31536000`, so the browser uses HTTPS
 for the host for a year. It has no `includeSubDomains` or `preload`, since
 other services may share the domain. Over plain HTTP it is not sent.
+Browsers that have seen the header switch to HTTPS for that host name, on
+all its ports (they do not refuse plain HTTP, they rewrite it to HTTPS),
+and the year counts from the last HTTPS visit, since every HTTPS answer
+carries the header. So do not serve the same name over plain HTTP later
+(for example for access in the LAN): a plain-HTTP-only service under that
+name becomes unreachable in those browsers until the year is over.
 
 Document files (`GET /api/documents/{id}/file`) are always sent as a
 download (`Content-Disposition: attachment`) with `nosniff` and

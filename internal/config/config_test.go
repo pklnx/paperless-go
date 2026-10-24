@@ -251,3 +251,24 @@ func TestLoadPublicURL(t *testing.T) {
 		t.Fatalf("without: %+v %v", cfg, err)
 	}
 }
+
+func TestLoadTrashRetention(t *testing.T) {
+	t.Setenv(EnvDatabaseURL, "postgres://x")
+	for _, tc := range []struct {
+		v    string
+		want time.Duration
+	}{{"", 720 * time.Hour}, {" 48h ", 48 * time.Hour}, {"0", 0}, {"0s", 0}, {"90m", 90 * time.Minute}} {
+		t.Setenv(EnvTrashRetention, tc.v)
+		cfg, err := Load()
+		if err != nil || cfg.TrashRetention != tc.want {
+			t.Errorf("%q: %v, %v; want %v", tc.v, cfg, err, tc.want)
+		}
+	}
+	// A negative or unparsable value refuses to start.
+	for _, v := range []string{"-1h", "-1ns", "30", "30d", "soon"} {
+		t.Setenv(EnvTrashRetention, v)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), EnvTrashRetention) {
+			t.Errorf("%q: %v, want an error naming %s", v, err, EnvTrashRetention)
+		}
+	}
+}

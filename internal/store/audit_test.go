@@ -423,7 +423,7 @@ func TestAuditCleansInput(t *testing.T) {
 // stores with separate caches.
 func TestAuditUserAgentRace(t *testing.T) {
 	st, url := storetest.NewWithURL(t)
-	other, err := store.Open(context.Background(), url)
+	other, err := store.Open(context.Background(), url, storetest.AnyBlob)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +461,7 @@ func TestAuditUserAgentFewConnections(t *testing.T) {
 	st, url := storetest.NewWithURL(t)
 	storetest.User(t, st, "admin", true)
 	u := storetest.User(t, st, "alice", true)
-	small, err := store.Open(context.Background(), url+"&pool_max_conns=2")
+	small, err := store.Open(context.Background(), url+"&pool_max_conns=2", storetest.AnyBlob)
 	if err != nil {
 		t.Fatal(err)
 	}

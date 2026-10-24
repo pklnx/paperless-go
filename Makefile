@@ -4,9 +4,21 @@ VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo de
 # sqlc version for code generation. Dependabot cannot update `go run pkg@version`,
 # so bump it here by hand.
 SQLC      := GOTOOLCHAIN=$$($(GO) env GOVERSION) $(GO) run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
+# gitleaks version for secret scanning. Dependabot cannot update
+# `go install pkg@version` either, so bump it here by hand and rescan the full
+# history (`make secrets`) after a bump.
+GITLEAKS_VERSION := v8.30.1
+GITLEAKS  := bin/gitleaks-$(GITLEAKS_VERSION)/gitleaks
+# Git history to scan; `make secrets` scans all refs unless SECRETS_LOG_OPTS
+# (git log options, e.g. a commit range) is set.
+SECRETS_SOURCE ?= .
 TEST_DATABASE_URL ?= postgres://paperless:paperless@localhost:5432/paperless?sslmode=disable
+# The Carbon and IBM Plex packages of the web UI report usage to IBM after
+# install. web/pnpm-workspace.yaml blocks their install scripts; this is a
+# second guard for every recipe here (web, web-test, web-e2e).
+export IBM_TELEMETRY_DISABLED := true
 
-.PHONY: web web-test docs build test test-unit lint vuln generate sqlc-check tidy docker docker-multiarch clean
+.PHONY: web web-test docs build test test-unit lint vuln secrets secrets-test generate sqlc-check tidy docker docker-multiarch clean
 
 ## web: build the web UI (embedded by `build`)
 web:
@@ -16,6 +28,12 @@ web:
 web-test:
 	cd web && pnpm install --frozen-lockfile && pnpm typecheck && pnpm test
 
+.PHONY: web-e2e
+## web-e2e: end-to-end tests of the web UI against the demo server (needs DEMO_DATABASE_URL)
+web-e2e:
+	@: "$${DEMO_DATABASE_URL:?set DEMO_DATABASE_URL to a PostgreSQL URL of a user with CREATEDB}"
+	cd web && corepack enable && pnpm install --frozen-lockfile && pnpm e2e
+
 ## docs: build the documentation site into docs/.vitepress/dist
 docs:
 	cd docs && corepack enable && pnpm install --frozen-lockfile && pnpm build
@@ -24,12 +42,13 @@ build:
 	$(GO) build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN) ./cmd/paperless-go
 
 ## test: all tests, including PostgreSQL integration tests
+# keep in step with ci.yml's test job (-timeout)
 test:
-	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" $(GO) test -race -count=1 ./...
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" $(GO) test -race -shuffle=on -count=1 -timeout 15m ./...
 
 ## test-unit: tests that need no database
 test-unit:
-	$(GO) test -race ./...
+	$(GO) test -race -shuffle=on ./...
 
 lint:
 	golangci-lint run
@@ -38,6 +57,22 @@ lint:
 # packages that require it.
 vuln:
 	GOTOOLCHAIN=$$($(GO) env GOVERSION) $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+# gitleaks is built with the project's toolchain and verified through the Go
+# checksum database, like govulncheck.
+$(GITLEAKS):
+	GOTOOLCHAIN=$$($(GO) env GOVERSION) GOBIN=$(CURDIR)/$(dir $(GITLEAKS)) $(GO) install \
+		-ldflags=-X=github.com/zricethezav/gitleaks/v8/version.Version=$(GITLEAKS_VERSION) \
+		github.com/zricethezav/gitleaks/v8@$(GITLEAKS_VERSION)
+
+## secrets: scan the git history (all refs by default) for committed credentials
+secrets: $(GITLEAKS)
+	$(GITLEAKS) git --redact --verbose --no-banner --exit-code 1 --config .gitleaks.toml \
+		--log-opts="$$SECRETS_LOG_OPTS" $(SECRETS_SOURCE)
+
+## secrets-test: self-test of the secret scan (temporary git repos, no network)
+secrets-test: $(GITLEAKS)
+	GITLEAKS=$(CURDIR)/$(GITLEAKS) sh scripts/secret-scan-test.sh
 
 ## generate: regenerate database code from internal/store/queries
 generate:

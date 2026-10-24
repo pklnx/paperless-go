@@ -6,6 +6,8 @@ export class ApiError extends Error {
     message: string,
     /** The parsed JSON error body, for errors that carry more than a message. */
     readonly body: Record<string, unknown> = {},
+    /** The seconds of a Retry-After header (a 503 or 429), if the answer had one. */
+    readonly retryAfter?: number,
   ) {
     super(message);
   }
@@ -28,7 +30,13 @@ async function errorFrom(res: Response): Promise<ApiError> {
   } catch {
     // not JSON
   }
-  return new ApiError(res.status, typeof body.error === "string" ? body.error : res.statusText, body);
+  return new ApiError(res.status, typeof body.error === "string" ? body.error : res.statusText, body, retryAfterHeader(res.headers.get("Retry-After")));
+}
+
+/** The seconds of a Retry-After header; a date or anything else unreadable counts as none. */
+export function retryAfterHeader(v: string | null): number | undefined {
+  if (v === null || !/^\d+$/.test(v.trim())) return undefined;
+  return Number(v.trim());
 }
 
 async function errorFor(path: string, res: Response): Promise<ApiError> {
@@ -62,6 +70,8 @@ async function send<T>(method: string, path: string, body?: unknown): Promise<T 
 }
 
 export interface User {
+  /** The user's ID, as documents' ownerId. */
+  id: number;
   name: string;
   admin: boolean;
   /** Logged in with a generated password: must choose their own first. */
@@ -314,10 +324,23 @@ export interface DocumentSummary {
   originalMime: string;
   originalSize: number;
   hasArchive: boolean;
+  isFavorite?: boolean;
+  isInbox?: boolean;
+  correspondentId?: string | null;
+  documentTypeId?: string | null;
+  tagIds?: string[];
+  /** The owner's user ID (part 2 of #7). */
+  ownerId?: number;
+  /** The owner's name, for admins only (part 2 of #7). */
+  ownerName?: string;
   /** The processing status; missing only when the server could not read it after an upload. */
   processing?: Processing;
   /** The thumbnail's URL (with its version), or null until processing made one. */
   thumbnailUrl?: string | null;
+  /** When the document went to the trash; null (or missing) for a live document. */
+  deletedAt?: string | null;
+  /** When the trash removes it for good; null (or missing) for a live document. */
+  purgeAt?: string | null;
   /**
    * Only in a search with words: up to two fragments of the text, each
    * match between SNIPPET_START and SNIPPET_STOP. Plain text, never HTML.
@@ -341,6 +364,50 @@ export interface Processing {
 /** Whether processing of d has not finished yet (queued or running). */
 export const processingPending = (d: DocumentSummary) => d.processing?.state === "queued" || d.processing?.state === "running";
 
+/** A document as GET /api/documents/{id} and the PATCH answer it: the list's fields and the rest. */
+export interface DocumentDetail extends DocumentSummary {
+  ownerId: number;
+  /**
+   * The server's string as it came, passed back verbatim as a PATCH's
+   * expectedModifiedAt: never through a Date (milliseconds only), or the
+   * microseconds are lost and every save is refused as changed meanwhile.
+   */
+  modifiedAt: string;
+  notes: string;
+  isFavorite: boolean;
+  isInbox: boolean;
+  archiveSerialNumber: number | null;
+  pageCount: number;
+  archiveSize: number | null;
+  /** What processing noted (fixed texts of the server), or "". */
+  processingNote: string;
+  correspondentId: string | null;
+  documentTypeId: string | null;
+  tagIds: string[];
+}
+
+/**
+ * The fields PATCH /api/documents/{id} changes: only those sent. null
+ * clears the ASN, the correspondent and the type; tagIds replaces the tags.
+ */
+export interface DocumentPatch {
+  title?: string;
+  documentDate?: string;
+  notes?: string;
+  isFavorite?: boolean;
+  isInbox?: boolean;
+  archiveSerialNumber?: number | null;
+  correspondentId?: string | null;
+  documentTypeId?: string | null;
+  tagIds?: string[];
+  /**
+   * A precondition, no field to change: the document's modifiedAt exactly
+   * as GET or the last PATCH answered it. When it changed meanwhile the
+   * answer is 409 document_changed with the current modifiedAt.
+   */
+  expectedModifiedAt?: string;
+}
+
 /** A page of GET /api/documents; nextCursor is missing on the last page. */
 export interface DocumentPage {
   documents: DocumentSummary[];
@@ -348,9 +415,67 @@ export interface DocumentPage {
   maxUploadSize: number;
 }
 
-/** The query string of a search: the query, the page size, the browser's time zone (for date: and added:) and the cursor. */
-export function searchQuery(q: string, limit: number, cursor = "", timeZone = browserTimeZone()): string {
-  const p = new URLSearchParams({ q, limit: String(limit) });
+/**
+ * The list's order: "" is the server's default (relevance with free text,
+ * else newest added; in the trash newest deleted). deleted is for the
+ * trash only, newest first.
+ */
+export type DocumentSort = "" | "relevance" | "added" | "date" | "deleted";
+
+/**
+ * What the document list shows. q is only what the user typed into the
+ * search field; the sidebar's filters are parameters of their own, so the
+ * server can tell browsing from searching (only a typed query writes a
+ * document.search entry).
+ */
+export interface DocumentQuery {
+  q: string;
+  inbox: boolean;
+  favorite: boolean;
+  tag: string;
+  correspondent: string;
+  type: string;
+  sort: DocumentSort;
+  ascending: boolean;
+  /** Only the caller's own documents: an admin without "Everyone's documents". */
+  ownOnly: boolean;
+  /** The trash instead of the live documents. */
+  trashed: boolean;
+}
+
+export const emptyDocumentQuery: DocumentQuery = {
+  q: "",
+  inbox: false,
+  favorite: false,
+  tag: "",
+  correspondent: "",
+  type: "",
+  sort: "",
+  ascending: false,
+  ownOnly: false,
+  trashed: false,
+};
+
+/**
+ * The query string of GET /api/documents for a list, a page size, the
+ * browser's time zone (for date: and added: in q) and the cursor.
+ */
+export function documentListQuery(dq: DocumentQuery, limit: number, cursor = "", timeZone = browserTimeZone()): string {
+  const p = new URLSearchParams();
+  if (dq.q) p.set("q", dq.q);
+  p.set("limit", String(limit));
+  if (dq.inbox) p.set("inbox", "true");
+  if (dq.tag) p.set("tag", dq.tag);
+  if (dq.correspondent) p.set("correspondent", dq.correspondent);
+  if (dq.type) p.set("type", dq.type);
+  // favorite and owner come with part 2 of #7 (the document editing API);
+  // the server must know them before this UI is deployed.
+  if (dq.favorite) p.set("favorite", "true");
+  if (dq.ownOnly) p.set("owner", "me");
+  if (dq.trashed) p.set("trashed", "true");
+  if (dq.sort) p.set("sort", dq.sort);
+  // Relevance and deleted have one direction only.
+  if (dq.ascending && dq.sort !== "relevance" && dq.sort !== "deleted") p.set("order", "asc");
   if (timeZone) p.set("tz", timeZone);
   if (cursor) p.set("cursor", cursor);
   return p.toString();
@@ -365,14 +490,235 @@ export function browserTimeZone(): string {
   }
 }
 
+/** The sidebar's counts. */
+export interface DocumentCounts {
+  inbox: number;
+  favorites: number;
+  total: number;
+  /** The documents in the trash (the others count live documents only). */
+  trash?: number;
+}
+
+/** owner=me for an admin's own rows; nothing for everything in the caller's scope. */
+const ownerQuery = (ownOnly: boolean) => (ownOnly ? "?owner=me" : "");
+
 export const documentsApi = {
-  /** The caller's newest documents (an admin's: everyone's), at most limit (the server caps it at 100), and the upload limit in bytes. */
-  list: (limit: number, signal?: AbortSignal) => getJSON<DocumentPage>(`/api/documents?limit=${limit}`, signal),
-  /** One page of a search (docs/guide/search.md), best match first; cursor continues after the previous page. */
-  search: (q: string, limit: number, cursor = "", signal?: AbortSignal) => getJSON<DocumentPage>(`/api/documents?${searchQuery(q, limit, cursor)}`, signal),
+  /** One page of the list (docs/guide/search.md for q); cursor continues after the previous page. */
+  list: (dq: DocumentQuery, limit: number, cursor = "", signal?: AbortSignal) =>
+    getJSON<DocumentPage>(`/api/documents?${documentListQuery(dq, limit, cursor)}`, signal),
+  /** The counts of the sidebar: all, inbox and favourites. */
+  counts: (ownOnly: boolean, signal?: AbortSignal) => getJSON<DocumentCounts>(`/api/documents/counts${ownerQuery(ownOnly)}`, signal),
+  /** One document with every field. */
+  get: (id: string, signal?: AbortSignal) => getJSON<DocumentDetail>(`/api/documents/${encodeURIComponent(id)}`, signal),
+  /** Changes the fields of patch; answers the document as it is now. */
+  patch: async (id: string, patch: DocumentPatch): Promise<DocumentDetail> =>
+    (await send<DocumentDetail>("PATCH", `/api/documents/${encodeURIComponent(id)}`, patch))!,
   /** The download URL of a document's original file or archive PDF. */
   fileURL: (id: string, kind: "original" | "archive" = "original") => `/api/documents/${encodeURIComponent(id)}/file?kind=${kind}`,
+  /** Moves a document to the trash. */
+  trash: (id: string) => send("DELETE", `/api/documents/${encodeURIComponent(id)}`),
+  /** Brings a document back from the trash; answers it as it is now. */
+  restore: async (id: string): Promise<DocumentDetail> => (await send<DocumentDetail>("POST", `/api/documents/${encodeURIComponent(id)}/restore`, {}))!,
+  /** Deletes a trashed document permanently (its files go with it). */
+  purge: (id: string) => send("POST", `/api/documents/${encodeURIComponent(id)}/purge`, {}),
   /** Queues a document for processing again (Retry); answers the document with its new status. */
   reprocess: async (id: string): Promise<DocumentSummary> =>
     (await send<DocumentSummary>("POST", `/api/documents/${encodeURIComponent(id)}/reprocess`, {}))!,
+};
+
+/** A tag as GET /api/tags lists it. color is "#RRGGBB" or "". */
+export interface Tag {
+  id: string;
+  name: string;
+  ownerId: number;
+  parentId: string | null;
+  color: string;
+  documentCount?: number;
+  /** The distinct documents of the tag and its sub-tags: what the list shows for the tag. */
+  subtreeCount?: number;
+  /** The owner's name, in an admin's lists only. */
+  ownerName?: string;
+}
+
+/** A correspondent or document type. */
+export interface NamedRow {
+  id: string;
+  name: string;
+  ownerId: number;
+  documentCount?: number;
+  /** The owner's name, in an admin's lists only. */
+  ownerName?: string;
+}
+
+/** The sidebar's metadata. */
+export interface Metadata {
+  tags: Tag[];
+  correspondents: NamedRow[];
+  documentTypes: NamedRow[];
+}
+
+/** The kinds of metadata rows, as their API paths name them. */
+export type MetadataKind = "tags" | "correspondents" | "document-types";
+
+async function loadMetadata(o: string, signal?: AbortSignal): Promise<Metadata> {
+  const [tags, correspondents, types] = await Promise.all([
+    getJSON<{ tags: Tag[] }>(`/api/tags${o}`, signal),
+    getJSON<{ correspondents: NamedRow[] }>(`/api/correspondents${o}`, signal),
+    getJSON<{ documentTypes: NamedRow[] }>(`/api/document-types${o}`, signal),
+  ]);
+  return { tags: tags.tags, correspondents: correspondents.correspondents, documentTypes: types.documentTypes };
+}
+
+export const metadataApi = {
+  /** Tags, correspondents and document types with their counts, in one go. */
+  load: (ownOnly: boolean, signal?: AbortSignal): Promise<Metadata> => loadMetadata(ownerQuery(ownOnly), signal),
+  /** The rows of one user, for an admin: a document's own metadata (owner=<id>). */
+  loadFor: (ownerId: number, signal?: AbortSignal): Promise<Metadata> => loadMetadata(`?owner=${encodeURIComponent(String(ownerId))}`, signal),
+  /**
+   * Creates a row named name. ownerId makes it another user's row (admins
+   * only): an admin's new tag for a user's document must be that user's.
+   */
+  create: async <K extends MetadataKind>(kind: K, name: string, ownerId?: number): Promise<K extends "tags" ? Tag : NamedRow> =>
+    (await send<K extends "tags" ? Tag : NamedRow>("POST", `/api/${kind}`, ownerId === undefined ? { name } : { name, ownerId }))!,
+};
+
+/**
+ * A bulk change by search: the list's parameters (GET /api/documents),
+ * resolved by the server across all pages. inbox and favorite are only
+ * sent as filters (true), as the list sends them.
+ */
+export interface BulkMatch {
+  q?: string;
+  tag?: string[];
+  correspondent?: string[];
+  type?: string[];
+  inbox?: boolean;
+  favorite?: boolean;
+  owner?: string;
+  tz?: string;
+  /** The trash instead of the live documents: needed for restore and purge, refused otherwise. */
+  trashed?: boolean;
+}
+
+/** The match of a list: the same documents the list shows, on every page. owner=me while an admin's "Everyone's documents" is off. */
+export function bulkMatch(dq: DocumentQuery, timeZone = browserTimeZone()): BulkMatch {
+  const m: BulkMatch = {};
+  if (dq.q) m.q = dq.q;
+  if (dq.tag) m.tag = [dq.tag];
+  if (dq.correspondent) m.correspondent = [dq.correspondent];
+  if (dq.type) m.type = [dq.type];
+  if (dq.inbox) m.inbox = true;
+  if (dq.favorite) m.favorite = true;
+  if (dq.ownOnly) m.owner = "me";
+  if (timeZone) m.tz = timeZone;
+  if (dq.trashed) m.trashed = true;
+  return m;
+}
+
+/**
+ * Which documents a bulk change covers: these IDs (at most 500), or every
+ * match of a search. A change by search sends the fingerprint of the dry
+ * run whose count the user confirmed (opaque, passed back unchanged); the
+ * server changes nothing and answers 409 match_changed when the matches
+ * are no longer exactly that set.
+ */
+export type BulkSelection = { ids: string[] } | { match: BulkMatch; fingerprint: string };
+
+/** What a bulk change does; null clears the correspondent or type. */
+export interface BulkChange {
+  addTags?: string[];
+  removeTags?: string[];
+  correspondent?: string | null;
+  documentType?: string | null;
+  inbox?: boolean;
+  favorite?: boolean;
+}
+
+/**
+ * The dry run of a match: how many documents and owners it covers, the
+ * server's limit, and the fingerprint of the matched set for the change.
+ * owners is 0 and fingerprint missing above the limit.
+ */
+export interface BulkCount {
+  matched: number;
+  owners: number;
+  limit: number;
+  fingerprint?: string;
+}
+
+/**
+ * What a bulk request does besides a field change: move to the trash,
+ * restore from it, or delete permanently (match.trashed must be true for
+ * the last two).
+ */
+export type BulkAction = "trash" | "restore" | "purge";
+
+const bulkPath = "/api/documents/bulk";
+
+export const bulkApi = {
+  /** Counts a match without changing anything; the fingerprint is for action (a field change without one). */
+  count: async (match: BulkMatch, action?: BulkAction): Promise<BulkCount> =>
+    (await send<BulkCount>("POST", bulkPath, action ? { match, dryRun: true, action } : { match, dryRun: true }))!,
+  /** Changes the documents, all or nothing; answers how many were changed. */
+  apply: async (sel: BulkSelection, change: BulkChange): Promise<number> => (await send<{ updated: number }>("POST", bulkPath, { ...sel, ...change }))!.updated,
+  /** Moves the documents to the trash, restores or purges them, all or nothing; answers how many. */
+  act: async (sel: BulkSelection, action: BulkAction): Promise<number> => (await send<{ updated: number }>("POST", bulkPath, { ...sel, action }))!.updated,
+};
+
+/** A change of a tag: only the fields sent change; parentId null makes it a top-level tag. */
+export interface TagPatch {
+  name?: string;
+  color?: string;
+  parentId?: string | null;
+}
+
+const metadataPath = (kind: MetadataKind, id: string) => `/api/${kind}/${encodeURIComponent(id)}`;
+
+export const metadataEditApi = {
+  /** Renames a row, and for tags changes colour or parent. */
+  patch: (kind: MetadataKind, id: string, patch: TagPatch) => send("PATCH", metadataPath(kind, id), patch),
+  /** Deletes a row; the documents stay, a tag's sub-tags become top-level tags. */
+  remove: (kind: MetadataKind, id: string) => send("DELETE", metadataPath(kind, id)),
+};
+
+/**
+ * A saved view (#12, part 4): a name and the app's filter object. The
+ * web's own list parameters are under the "paperless-go" key
+ * (savedViews.ts); the other keys are the app's and are sent back as they
+ * came.
+ */
+export interface SavedView {
+  id: string;
+  name: string;
+  /** The app's SF Symbol name, kept as stored. */
+  symbol: string;
+  sortIndex: number;
+  filter: Record<string, unknown>;
+  createdAt: string;
+  modifiedAt: string;
+}
+
+/**
+ * A change of a saved view: only the fields sent change. filter replaces
+ * the whole object; paperlessGo replaces only the web's part of it (the
+ * paperless-go key) on the server, under the row lock, so keys another
+ * client changed meanwhile are kept (#143). Not both at once.
+ */
+export interface SavedViewPatch {
+  name?: string;
+  filter?: Record<string, unknown>;
+  paperlessGo?: Record<string, unknown>;
+  sortIndex?: number;
+}
+
+const savedViewsPath = "/api/saved-views";
+const savedViewPath = (id: string) => `${savedViewsPath}/${encodeURIComponent(id)}`;
+
+export const savedViewsApi = {
+  /** The caller's own views, in their manual order. */
+  list: async (signal?: AbortSignal): Promise<SavedView[]> => (await getJSON<{ savedViews: SavedView[] }>(savedViewsPath, signal)).savedViews,
+  /** A new view, after the others. */
+  create: async (name: string, filter: Record<string, unknown>): Promise<SavedView> => (await send<SavedView>("POST", savedViewsPath, { name, filter }))!,
+  patch: async (id: string, patch: SavedViewPatch): Promise<SavedView> => (await send<SavedView>("PATCH", savedViewPath(id), patch))!,
+  remove: (id: string) => send("DELETE", savedViewPath(id)),
 };

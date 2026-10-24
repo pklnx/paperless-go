@@ -62,8 +62,8 @@ export function LogPage({ admin }: { admin: boolean }) {
   const set = (patch: Partial<AuditFilter>) => setFilter((f) => ({ ...f, ...patch }));
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-8">
-      <h2 className="text-lg font-semibold">{t.logTitle}</h2>
+    <div className="legacy mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-8">
+      <h2 tabIndex={-1} className="text-lg font-semibold outline-none">{t.logTitle}</h2>
       <p className="text-sm text-ink-muted">{admin ? t.logAdminNote : t.logOwnNote}</p>
 
       <div className="flex flex-wrap items-end gap-3 text-sm">

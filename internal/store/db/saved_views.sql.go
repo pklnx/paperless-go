@@ -50,9 +50,10 @@ func (q *Queries) CreateSavedView(ctx context.Context, arg CreateSavedViewParams
 	return i, err
 }
 
-const deleteSavedView = `-- name: DeleteSavedView :execrows
+const deleteSavedView = `-- name: DeleteSavedView :one
 DELETE FROM saved_views
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+RETURNING id, owner_id, name, symbol, sort_index, filter, created_at, modified_at
 `
 
 type DeleteSavedViewParams struct {
@@ -60,12 +61,20 @@ type DeleteSavedViewParams struct {
 	Owner *int64
 }
 
-func (q *Queries) DeleteSavedView(ctx context.Context, arg DeleteSavedViewParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteSavedView, arg.ID, arg.Owner)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+func (q *Queries) DeleteSavedView(ctx context.Context, arg DeleteSavedViewParams) (SavedView, error) {
+	row := q.db.QueryRow(ctx, deleteSavedView, arg.ID, arg.Owner)
+	var i SavedView
+	err := row.Scan(
+		&i.ID,
+		&i.OwnerID,
+		&i.Name,
+		&i.Symbol,
+		&i.SortIndex,
+		&i.Filter,
+		&i.CreatedAt,
+		&i.ModifiedAt,
+	)
+	return i, err
 }
 
 const getSavedView = `-- name: GetSavedView :one
@@ -127,6 +136,68 @@ func (q *Queries) ListSavedViews(ctx context.Context, owner *int64) ([]SavedView
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockSavedView = `-- name: LockSavedView :one
+SELECT id, owner_id, name, symbol, sort_index, filter, created_at, modified_at FROM saved_views
+WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+FOR UPDATE
+`
+
+type LockSavedViewParams struct {
+	ID    pgtype.UUID
+	Owner *int64
+}
+
+// LockSavedView reads a view for a patch and holds its row until the
+// commit, so two patches of one view merge one after the other.
+func (q *Queries) LockSavedView(ctx context.Context, arg LockSavedViewParams) (SavedView, error) {
+	row := q.db.QueryRow(ctx, lockSavedView, arg.ID, arg.Owner)
+	var i SavedView
+	err := row.Scan(
+		&i.ID,
+		&i.OwnerID,
+		&i.Name,
+		&i.Symbol,
+		&i.SortIndex,
+		&i.Filter,
+		&i.CreatedAt,
+		&i.ModifiedAt,
+	)
+	return i, err
+}
+
+const lockSavedViewOrder = `-- name: LockSavedViewOrder :exec
+SELECT pg_advisory_xact_lock(hashtextextended('paperless-go:saved-views:' || $1::bigint::text, 0))
+`
+
+// LockSavedViewOrder serialises the creates of one owner that append a
+// view (SortLast), so each reads the maximum the one before it wrote and
+// two parallel ones never get the same sort index. It is a
+// transaction-level advisory lock with its own key prefix, released at
+// the commit; the transaction holding it writes only saved_views and the
+// audit log and waits for no other lock.
+func (q *Queries) LockSavedViewOrder(ctx context.Context, ownerID int64) error {
+	_, err := q.db.Exec(ctx, lockSavedViewOrder, ownerID)
+	return err
+}
+
+const nextSavedViewSortIndex = `-- name: NextSavedViewSortIndex :one
+SELECT (CASE WHEN max(sort_index) IS NULL THEN 0
+             ELSE LEAST(max(sort_index), 9007199254740990) + 1 END)::bigint
+FROM saved_views WHERE owner_id = $1
+`
+
+// NextSavedViewSortIndex is the sort index after an owner's last view: 0
+// for the first. It stays within ±(2^53 − 1), the API's range (a value
+// JavaScript holds exactly): a larger stored index (written before the API
+// checked it, or by SQL) gives the largest one, never an overflow.
+// (LEAST ignores NULL, so the empty case is spelled out.)
+func (q *Queries) NextSavedViewSortIndex(ctx context.Context, ownerID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, nextSavedViewSortIndex, ownerID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const updateSavedView = `-- name: UpdateSavedView :one

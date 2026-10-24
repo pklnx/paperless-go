@@ -6,7 +6,12 @@
 // modification time stayed the same across two scans at least Settle
 // apart. An imported file, or one the user already has (a duplicate), is
 // deleted, but only after the document row is committed and only while
-// the file is still the one that was read. A file the importer refuses
+// the file is still the one that was read. A file whose document is in
+// the user's trash restores that document (audited as document.restore
+// by the system, via consume) and is then deleted like a duplicate: the
+// user put the file in to keep it, and nobody here sees a Restore button.
+// A file whose document is due for purge stays for a later scan, which
+// imports it as new once the sweeper deleted the old row. A file the importer refuses
 // (unsupported, too large, unreadable as its type) moves to the user's
 // failed/ folder with a <name>.error.txt sidecar. Anything else, such as a
 // database or blob store error, leaves the file in place for the next
@@ -14,8 +19,8 @@
 //
 // Each scan that changed something in a user's folder writes one
 // document.consume audit entry about that user, by the server (actor
-// system): how many files were imported, how many duplicates deleted and
-// how many files moved to failed/. It has no file names; the server log
+// system): how many files were imported, how many duplicates deleted, how
+// many trashed documents restored and how many files moved to failed/. It has no file names; the server log
 // has them.
 //
 // Everything below the consume folder is reached through an os.Root, so
@@ -96,6 +101,11 @@ type Importer interface {
 	Import(ctx context.Context, req ingest.Request) (ingest.Result, error)
 }
 
+// Restorer brings a trashed document back; *store.Store implements it.
+type Restorer interface {
+	RestoreDocument(ctx context.Context, sc store.Scope, id string) (*store.Document, error)
+}
+
 // Options configure a Consumer. The zero value uses the defaults.
 type Options struct {
 	Log *slog.Logger
@@ -106,19 +116,23 @@ type Options struct {
 	// Audit writes an audit entry (serve passes the store's Audit); nil
 	// writes none.
 	Audit func(context.Context, store.AuditEntry) error
+	// Restorer restores the trashed document of a consumed file (serve
+	// passes the store). Without it such a file is left in place.
+	Restorer Restorer
 }
 
 // Consumer scans one consume folder. Scan and Run must not be called
 // concurrently.
 type Consumer struct {
-	dir    string
-	users  Users
-	im     Importer
-	log    *slog.Logger
-	now    func() time.Time
-	settle time.Duration
-	audit  func(context.Context, store.AuditEntry) error
-	open   func(r *os.Root, name string) (file, error)
+	dir      string
+	users    Users
+	im       Importer
+	log      *slog.Logger
+	now      func() time.Time
+	settle   time.Duration
+	audit    func(context.Context, store.AuditEntry) error
+	restorer Restorer
+	open     func(r *os.Root, name string) (file, error)
 	// openRoot opens a user's folder; tests replace it.
 	openRoot func(r *os.Root, name string) (*os.Root, error)
 	// removeFile deletes a file in a user's folder; tests replace it.
@@ -171,6 +185,7 @@ type file interface {
 func New(dir string, users Users, im Importer, opts Options) *Consumer {
 	c := &Consumer{
 		dir: dir, users: users, im: im, log: opts.Log, now: opts.Now, settle: opts.Settle, audit: opts.Audit,
+		restorer:   opts.Restorer,
 		open:       openInput,
 		openRoot:   func(r *os.Root, name string) (*os.Root, error) { return r.OpenRoot(name) },
 		removeFile: func(r *os.Root, name string) error { return r.Remove(name) },
@@ -218,11 +233,12 @@ func (c *Consumer) Run(ctx context.Context, tick <-chan time.Time) {
 }
 
 // Stats counts what one scan did: the files imported (a document was
-// created, also if the file could not be deleted), the duplicates deleted
+// created, also if the file could not be deleted), the duplicates deleted,
+// the trashed documents restored (also if the file could not be deleted)
 // and the files moved to failed/. A file that could not be deleted or
 // moved is not counted again when it is tried after HoldTime.
 type Stats struct {
-	Imported, Duplicates, Failed int
+	Imported, Duplicates, Restored, Failed int
 	// Waiting are the files seen that are not yet unchanged for Settle.
 	Waiting int
 }
@@ -230,12 +246,13 @@ type Stats struct {
 func (s *Stats) add(o Stats) {
 	s.Imported += o.Imported
 	s.Duplicates += o.Duplicates
+	s.Restored += o.Restored
 	s.Failed += o.Failed
 	s.Waiting += o.Waiting
 }
 
 // changed reports whether the scan changed something in the folder.
-func (s Stats) changed() bool { return s.Imported+s.Duplicates+s.Failed > 0 }
+func (s Stats) changed() bool { return s.Imported+s.Duplicates+s.Restored+s.Failed > 0 }
 
 // Scan scans the consume folder once: it creates the missing user
 // folders and imports, deletes or moves the files that are ready. An
@@ -551,6 +568,17 @@ func (c *Consumer) consume(ctx context.Context, ur *os.Root, u *store.User, key 
 	res, err := c.im.Import(ctx, ingest.Request{OwnerID: u.ID, FileName: name, Body: body})
 	_ = f.Close()
 	if err != nil {
+		if errors.Is(err, store.ErrPurgePending) {
+			c.purgePending(u, name)
+			return nil
+		}
+		if errors.Is(err, store.ErrBlobRemoved) {
+			// The sweeper removed the stored copy of this file (its last
+			// document was purged); the next scan stores it again.
+			c.log.Info("consume folder: the stored copy of this file was being cleaned up; left for the next scan",
+				"user", u.Name, "file", name)
+			return nil
+		}
 		if body.err != nil {
 			// The file could not be read; the others may well be.
 			c.readError(u, key, fi, body.err)
@@ -571,6 +599,26 @@ func (c *Consumer) consume(ctx context.Context, ur *os.Root, u *store.User, key 
 				"user", u.Name, "file", name)
 			return nil
 		}
+		if res.Existing.Trashed {
+			if c.restorer == nil {
+				c.warnOnce(c.fileWarnKey("trash", key), "consume folder: the user's document of this file is in the trash; left in place",
+					"user", u.Name, "file", name, "document", res.Existing.ID)
+				return nil
+			}
+			err := c.restore(ctx, u, res.Existing)
+			if errors.Is(err, store.ErrNotFound) {
+				c.purgePending(u, name)
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			st.Restored++
+			c.log.Info("consume folder: restored the user's trashed document of this file", "user", u.Name, "file", name,
+				"document", res.Existing.ID)
+			c.remove(ur, u, key, fi)
+			return nil
+		}
 		c.log.Info("consume folder: duplicate, the user already has this file", "user", u.Name, "file", name,
 			"document", res.Existing.ID)
 		// Counted only once deleted: one that cannot be deleted comes
@@ -586,6 +634,25 @@ func (c *Consumer) consume(ctx context.Context, ur *os.Root, u *store.User, key 
 		return fmt.Errorf("unexpected import outcome %v", res.Outcome)
 	}
 	return nil
+}
+
+// restore brings back u's trashed document of a consumed file, with a
+// document.restore entry by the system (via consume) in the same
+// transaction. ErrNotFound means it became due for purge meanwhile.
+func (c *Consumer) restore(ctx context.Context, u *store.User, doc store.DocumentRef) error {
+	e := &store.AuditEntry{Actor: store.ActorSystem, Action: "document.restore"}
+	e.SetTarget(store.TargetDocument, doc.ID, doc.Title)
+	e.Detail("via", "consume")
+	e.Detail("ownerId", u.ID)
+	_, err := c.restorer.RestoreDocument(store.WithAudit(ctx, e), store.Scope{UserID: u.ID}, doc.ID)
+	return err
+}
+
+// purgePending leaves a file whose document is due for purge for a later
+// scan: once the sweeper deleted the row, the file is imported as new.
+func (c *Consumer) purgePending(u *store.User, name string) {
+	c.log.Info("consume folder: the user's document of this file is being removed permanently; left for the next scan",
+		"user", u.Name, "file", name)
 }
 
 // readError holds a file that could not be read: it is read again after
@@ -670,9 +737,9 @@ func (c *Consumer) remove(ur *os.Root, u *store.User, key fileKey, read fs.FileI
 // summary is what the scans not yet written to the audit log did in one
 // user's folder.
 type summary struct {
-	name                         string // the user's name at the last scan
-	imported, duplicates, failed int
-	interrupted                  bool
+	name                                   string // the user's name at the last scan
+	imported, duplicates, restored, failed int
+	interrupted                            bool
 }
 
 // record keeps what a scan did in u's folder for its audit entry, if it
@@ -689,6 +756,7 @@ func (c *Consumer) record(u *store.User, st Stats, interrupted bool) {
 	s.name = u.Name
 	s.imported += st.Imported
 	s.duplicates += st.Duplicates
+	s.restored += st.Restored
 	s.failed += st.Failed
 	s.interrupted = s.interrupted || interrupted
 }
@@ -712,6 +780,7 @@ func (c *Consumer) writeSummaries(ctx context.Context) {
 		e := systemEntry(ActionConsume, id, s.name)
 		e.Detail("imported", s.imported)
 		e.Detail("duplicates", s.duplicates)
+		e.Detail("restored", s.restored)
 		e.Detail("failed", s.failed)
 		if s.interrupted {
 			e.Detail("interrupted", true)

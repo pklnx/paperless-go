@@ -25,17 +25,62 @@ var migrationsFS embed.FS
 // from internal/store/queries (see sqlc.yaml).
 type Store struct {
 	pool *pgxpool.Pool
-	q    *db.Queries
+	// g is the pool behind the guard (locking.go): outside a transaction
+	// it refuses every writer of the owner tables. q runs on it.
+	g guardedDB
+	q *db.Queries
 	// sq runs the search queries as unnamed statements (search.go);
-	// searchDB wraps a transaction the same way.
+	// searchDB wraps a guarded transaction the same way.
 	sq       *db.Queries
-	searchDB func(db.DBTX) db.DBTX
+	searchDB func(guardedDB) db.DBTX
 	// userAgents caches the IDs of audit log user agents.
 	userAgents userAgentCache
+	// gate keeps writers of one owner that wait for each other off the
+	// pool (ownergate.go). The worker and the handlers share it.
+	gate *ownerGate
+
+	// Now is the clock of every trash decision (documents_trash.go): the
+	// time a document is trashed or its purge is asked for, and whether
+	// a trashed document is due for purge. nil is time.Now. Tests set it
+	// before the store is used.
+	Now func() time.Time
+	// TrashRetention is how long a trashed document stays before it is
+	// due for purge (PAPERLESS_GO_TRASH_RETENTION); Open sets
+	// DefaultTrashRetention. It is read at every decision, so a shorter
+	// one applies to documents already in the trash. Set it before the
+	// store is used.
+	TrashRetention time.Duration
+	// SearchTimeout bounds each search query (SearchDocuments, through
+	// statement_timeout in its read-only transaction); Open sets
+	// DefaultSearchTimeout. A search that runs longer fails with
+	// ErrSearchTooBroad. Set it before the store is used.
+	SearchTimeout time.Duration
+
+	// blobs answers whether a file is still in the blob store: the last
+	// step of holdBlobs (blob_removals.go) before a writer names a hash.
+	// Open requires it, so no command can skip the check.
+	blobs Blobs
 }
 
-// Open connects to the database.
-func Open(ctx context.Context, url string) (*Store, error) {
+// Blobs is what the store needs of the blob store: whether the file of a
+// hash is on disk (blobstore.Files.Present or blobstore.Store.Present).
+// An error is a failed lookup (permissions, I/O), not a missing file.
+type Blobs interface {
+	Present(hash string) (bool, error)
+}
+
+// errNoBlobs refuses a store without its blob store: writers of a hash
+// could not check that the file is still there (#12, part 2).
+var errNoBlobs = errors.New("store: open needs the blob store")
+
+// Open connects to the database. blobs is the blob store of the same
+// installation (its data directory); it must not be nil: every writer of
+// a hash checks with it that the file is still there before it names it
+// (holdBlobs). Tests that store no files pass storetest.AnyBlob.
+func Open(ctx context.Context, url string, blobs Blobs) (*Store, error) {
+	if blobs == nil {
+		return nil, errNoBlobs
+	}
 	pool, err := pgxpool.New(ctx, url)
 	if err != nil {
 		return nil, err
@@ -44,8 +89,12 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("connect to database: %w", err)
 	}
-	s := &Store{pool: pool, q: db.New(pool), searchDB: func(d db.DBTX) db.DBTX { return unnamedStatements{d} }}
-	s.sq = db.New(s.searchDB(pool))
+	g := guardedDB{d: pool}
+	s := &Store{
+		pool: pool, g: g, q: db.New(g), gate: newOwnerGate(), searchDB: func(d guardedDB) db.DBTX { return unnamedStatements{d} },
+		TrashRetention: DefaultTrashRetention, SearchTimeout: DefaultSearchTimeout, blobs: blobs,
+	}
+	s.sq = db.New(s.searchDB(g))
 	return s, nil
 }
 

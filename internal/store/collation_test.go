@@ -94,7 +94,8 @@ func TestMigrateRebuildsIndexesAfterLocaleChange(t *testing.T) {
 		t.Fatalf("CollationNeedsRebuild after a locale change = %v, %v; want true", rebuild, err)
 	}
 
-	textIdx := []string{"users_name_key", "tags_owner_parent_name_key", "correspondents_owner_name_key", "documents_owner_original_sha256_key"}
+	textIdx := []string{"users_name_key", "tags_owner_parent_name_key", "correspondents_owner_name_key", "documents_owner_original_sha256_key",
+		"search_vocabulary_pkey", "search_vocabulary_trgm_idx"}
 	otherIdx := []string{"users_pkey", "documents_search_idx", "documents_owner_date_idx"}
 	beforeText := relfilenodes(t, conn, textIdx...)
 	beforeOther := relfilenodes(t, conn, otherIdx...)
@@ -309,7 +310,7 @@ func TestMigrateRefreshNotOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	u.User = neturl.UserPassword(role, "app")
-	app, err := store.Open(ctx, u.String())
+	app, err := store.Open(ctx, u.String(), storetest.AnyBlob)
 	if err != nil {
 		t.Fatal(err)
 	}

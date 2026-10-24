@@ -7,9 +7,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -69,6 +71,8 @@ type Server struct {
 	// it; without blobs the document routes answer 503.
 	blobs    *blobstore.Store
 	importer *ingest.Importer
+	// sweepWake wakes the sweeper after a purge request (nil: none).
+	sweepWake func()
 }
 
 // Options configure a Server.
@@ -104,6 +108,10 @@ type Options struct {
 	// MaxUploadSize is the largest upload in bytes
 	// (PAPERLESS_GO_MAX_UPLOAD_SIZE); 0 means config.DefaultMaxUploadSize.
 	MaxUploadSize int64
+	// SweepWake wakes the sweeper of this process after a purge was
+	// asked for, so "delete permanently" takes effect within seconds; nil
+	// leaves it to the sweeper's next round. It must not block.
+	SweepWake func()
 }
 
 // New creates a Server.
@@ -154,7 +162,7 @@ func New(st *store.Store, log *slog.Logger, opts Options) *Server {
 		store: st, db: pinger, log: log, allowedHosts: hosts, hasher: hasher, now: now, limiter: limiter,
 		trustedProxies: opts.TrustedProxies, sealer: opts.Sealer, secretKey: opts.SecretKey, require2FA: opts.Require2FA,
 		webauthn: wa, publicOrigin: origin, passkeyBegins: passkeyBegins, apiKeyRate: apiKeyRate, badKeyRate: badKeyRate,
-		unknownKeyAudit: unknownKeyAudit, openLoginLog: openLoginLog,
+		unknownKeyAudit: unknownKeyAudit, openLoginLog: openLoginLog, sweepWake: opts.SweepWake,
 	}
 	if opts.Blobs != nil && st != nil {
 		maxSize := opts.MaxUploadSize
@@ -184,16 +192,35 @@ func (s *Server) Handler() http.Handler {
 	}
 	h := s.protect(s.authenticate(mux, accessOf), routeBody)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.warnIgnoredForwardedFor(r)
-		h.ServeHTTP(w, r)
+		// Every request's writes wait at most ownerWaitBound for other
+		// changes of the same owner (store.ErrBusy, 503).
+		h.ServeHTTP(w, r.WithContext(store.WithOwnerWait(r.Context(), ownerWaitBound)))
 	})
 }
+
+// ownerWait is how long a request's write waits for other changes of the
+// same owner before it answers 503 with Retry-After (busyRetryAfter):
+// about five bulk changes of MaxBulkMatches queued ahead, well below a
+// reverse proxy's usual timeout. It is no setting.
+const ownerWait = 15 * time.Second
+
+// purgeRetryAfter is the Retry-After, in seconds, of an upload whose
+// duplicate is due for purge: the sweeper deletes it within a minute.
+const purgeRetryAfter = "60"
+
+// busyRetryAfter is the Retry-After of that 503, in seconds.
+const busyRetryAfter = "5"
+
+// ownerWaitBound is ownerWait; tests shorten it.
+var ownerWaitBound = ownerWait
 
 // warnIgnoredForwardedFor logs once when a request carries X-Forwarded-For
 // from a peer that is not a trusted proxy, also from loopback: behind a
 // reverse proxy without PAPERLESS_GO_TRUSTED_PROXIES every client gets the
 // proxy's address and all share one login limit. Only the peer is logged;
-// the header comes from the client and could be anything.
+// the header comes from the client and could be anything. protect calls it
+// after the host check, so a request with a wrong Host cannot use up the
+// one warning.
 func (s *Server) warnIgnoredForwardedFor(r *http.Request) {
 	if s.forwardedWarned.Load() || len(r.Header.Values("X-Forwarded-For")) == 0 {
 		return
@@ -349,6 +376,8 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 
 type apiError struct {
 	Error string `json:"error"`
+	// Code names an error the UI explains in its own words.
+	Code string `json:"code,omitempty"`
 }
 
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, status int, msg string, err error) {
@@ -374,6 +403,12 @@ func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
 		s.fail(w, r, http.StatusBadRequest, "invalid sort", err)
 	case errors.Is(err, search.ErrTooLong):
 		s.fail(w, r, http.StatusBadRequest, "query too long", err)
+	case errors.Is(err, store.ErrSearchTooBroad):
+		// The search ran into store.Store.SearchTimeout: the query asks
+		// too much (many short words, a broad word ranked), not a fault.
+		s.log.Warn("search too broad: stopped at the time limit", "method", r.Method, "path", r.URL.Path)
+		s.writeJSON(w, http.StatusUnprocessableEntity, apiError{
+			Error: "search too broad; use fewer or longer words, or a filter", Code: "search_too_broad"})
 	case errors.Is(err, search.ErrInvalid), errors.As(err, &ve) && ve.Field == "q":
 		s.fail(w, r, http.StatusBadRequest, "invalid query", err)
 	case errors.Is(err, store.ErrInvalid):
@@ -382,6 +417,31 @@ func (s *Server) failStore(w http.ResponseWriter, r *http.Request, err error) {
 		// A deadlock with a concurrent change: nothing was written.
 		w.Header().Set("Retry-After", "1")
 		s.fail(w, r, http.StatusServiceUnavailable, "a concurrent change got in the way; try again", err)
+	case errors.Is(err, store.ErrBusy):
+		// Another change of the owner ran longer than ownerWait: nothing
+		// was written.
+		// It is load, not a fault: a warning, not "request failed".
+		s.log.Warn("request busy: another change of the owner is still running", "method", r.Method, "path", r.URL.Path, "err", err)
+		w.Header().Set("Retry-After", busyRetryAfter)
+		s.writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "another change of these documents is still running; try again"})
+	case errors.Is(err, store.ErrPurgePending):
+		// The owner's document with this file is being removed for good:
+		// not a duplicate any more, not importable yet.
+		w.Header().Set("Retry-After", purgeRetryAfter)
+		s.writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "the document with this file is being removed permanently; try again in a minute"})
+	case errors.Is(err, store.ErrBlobRemoved):
+		// The sweeper is removing a file of this change (an upload of a
+		// file whose last document was just purged): nothing was
+		// written, and the retry stores the file again.
+		// Retry-After: a second when the file is gone (the retry stores
+		// it again), longer while the sweeper's mark is on it.
+		retry := 1
+		var br *store.BlobRemovedError
+		if errors.As(err, &br) {
+			retry = max(1, int(math.Ceil(br.RetryAfter.Seconds())))
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		s.writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "the file is being cleaned up; try again"})
 	case errors.Is(err, store.ErrUnknownUser):
 		// The user was removed while the request ran; the session is gone
 		// with it.

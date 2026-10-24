@@ -88,21 +88,25 @@ func notifyIf(ctx context.Context, q *db.Queries, n int64) error {
 }
 
 // EnqueueDocument queues the document for processing unless it is queued
-// or running already; queued reports whether it was queued now.
+// or running already; queued reports whether it was queued now. A
+// document in the trash gives ErrInTrash.
 func (s *Store) EnqueueDocument(ctx context.Context, id string) (queued bool, err error) {
 	u, ok := parseID(id)
 	if !ok {
 		return false, ErrNotFound
 	}
 	err = s.inTx(ctx, func(q *db.Queries) error {
-		ids, err := q.ExistingDocumentIDs(ctx, []pgtype.UUID{u})
+		found, err := q.ExistingDocumentIDs(ctx, []pgtype.UUID{u})
 		if err != nil {
 			return err
 		}
-		if len(ids) == 0 {
+		if len(found) == 0 {
 			return ErrNotFound
 		}
-		n, err := enqueue(ctx, q, ids)
+		if found[0].Trashed {
+			return ErrInTrash
+		}
+		n, err := enqueue(ctx, q, []pgtype.UUID{u})
 		queued = n > 0
 		return err
 	})
@@ -119,9 +123,10 @@ type ReprocessSelection struct {
 
 // Reprocess queues the selected documents for processing again, in one
 // transaction (with the audit entry from WithAudit, which gets the detail
-// "queued"). Documents that are queued or running already are left alone.
-// An ID of no document gives an error wrapping ErrNotFound that names it,
-// and nothing is queued.
+// "queued"). Documents that are queued or running already are left alone,
+// and All and Failed leave trashed documents out. An ID of no document
+// gives an error wrapping ErrNotFound that names it, an ID of a trashed
+// one an error wrapping ErrInTrash, and nothing is queued.
 func (s *Store) Reprocess(ctx context.Context, sel ReprocessSelection) (queued int64, err error) {
 	var ids []pgtype.UUID
 	if !sel.All && !sel.Failed {
@@ -153,12 +158,23 @@ func (s *Store) Reprocess(ctx context.Context, sel ReprocessSelection) (queued i
 		case sel.Failed:
 			queued, err = q.EnqueueFailedDocuments(ctx)
 		default:
-			var found []pgtype.UUID
-			if found, err = q.ExistingDocumentIDs(ctx, ids); err != nil {
+			var rows []db.ExistingDocumentIDsRow
+			if rows, err = q.ExistingDocumentIDs(ctx, ids); err != nil {
 				return err
+			}
+			found := make([]pgtype.UUID, len(rows))
+			var trashed []string
+			for i, r := range rows {
+				found[i] = r.ID
+				if r.Trashed {
+					trashed = append(trashed, idString(r.ID))
+				}
 			}
 			if missing := missingIDs(ids, found); len(missing) > 0 {
 				return fmt.Errorf("%w: no document %s", ErrNotFound, strings.Join(missing, ", "))
+			}
+			if len(trashed) > 0 {
+				return fmt.Errorf("%w: %s", ErrInTrash, strings.Join(trashed, ", "))
 			}
 			queued, err = q.EnqueueJobs(ctx, ids)
 		}
@@ -307,16 +323,37 @@ type ProcessResult struct {
 // its source are replaced only when the stored text is empty or came from
 // processing ("PDF-Text", "Tesseract"); text from an import or an edit
 // stays. A document deleted meanwhile gives ErrNotFound (its job went with
-// it), a lease that is no longer j's ErrLeaseLost; either way nothing is
-// stored. Older finished jobs of the document are deleted.
+// it), a lease that is no longer j's ErrLeaseLost, an archive or
+// thumbnail that the sweeper is removing or that is missing ErrBlobRemoved
+// (the next attempt stores them again); in each case nothing is stored. Older finished jobs of the document are deleted. It takes the
+// document owner's gate and write lock first (ownerTx), without a bound:
+// its wait is limited by the worker's context.
 func (s *Store) CompleteJob(ctx context.Context, j *Job, now time.Time, r ProcessResult) error {
 	doc, ok := parseID(j.DocumentID)
 	if !ok {
 		return ErrNotFound
 	}
-	return s.inTx(ctx, func(q *db.Queries) error {
-		if _, err := q.LockDocument(ctx, db.LockDocumentParams{ID: doc}); err != nil {
+	// The document's owner, then the owner's gate and write lock
+	// (ownerTx): an OCR result waits for a bulk change of the same owner,
+	// without a connection while another writer of the owner holds it.
+	owner, err := s.q.DocumentOwner(ctx, db.DocumentOwnerParams{ID: doc})
+	if err != nil {
+		return mapErr(err)
+	}
+	return s.ownerTx(ctx, []int64{owner}, func(ctx context.Context, t *writeTx) error {
+		q := t.q
+		// The archive and thumbnail must still be there, and the sweeper
+		// must not take them until this transaction ends
+		// (blob_removals.go).
+		if err := s.holdBlobs(ctx, t, r.ArchiveSHA256, r.ThumbnailSHA256); err != nil {
+			return err
+		}
+		locked, err := q.LockDocument(ctx, db.LockDocumentParams{ID: doc})
+		if err != nil {
 			return mapErr(err)
+		}
+		if err := t.holds(locked.OwnerID); err != nil {
+			return err
 		}
 		if _, err := q.LockJobLease(ctx, db.LockJobLeaseParams{ID: j.ID, LeaseToken: j.lease}); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {

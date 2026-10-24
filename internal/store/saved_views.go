@@ -7,6 +7,9 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/pklnx/paperless-go/internal/store/db"
 )
@@ -15,8 +18,14 @@ import (
 // saved view.
 const DefaultSavedViewSymbol = "line.3.horizontal.decrease.circle"
 
-// ErrInvalidFilter means a saved view's filter is not a JSON object.
+// ErrInvalidFilter means a saved view's filter is not a JSON object that
+// PostgreSQL's jsonb accepts.
 var ErrInvalidFilter = errors.New("store: saved view filter is not a JSON object")
+
+// MaxSavedViewSortIndex is the largest sort index the API takes, and the
+// negative of the smallest: 2^53 − 1, the largest integer a JavaScript
+// number holds exactly, so the web never rounds one.
+const MaxSavedViewSortIndex = 1<<53 - 1
 
 // SavedView is a named document filter shown in the sidebar, per owner.
 // Names need not be unique, as in the app.
@@ -40,7 +49,10 @@ type SavedViewInput struct {
 	Name      string
 	Symbol    string
 	SortIndex int64
-	Filter    json.RawMessage
+	// SortLast, on create, puts the view after the owner's others instead
+	// of at SortIndex.
+	SortLast bool
+	Filter   json.RawMessage
 }
 
 func savedViewFromDB(r db.SavedView) *SavedView {
@@ -57,7 +69,7 @@ func filterJSON(f json.RawMessage) ([]byte, error) {
 	if len(t) == 0 {
 		return []byte("{}"), nil
 	}
-	if t[0] != '{' || !json.Valid(t) {
+	if t[0] != '{' || !utf8.Valid(t) || !json.Valid(t) {
 		return nil, ErrInvalidFilter
 	}
 	// jsonb refuses U+0000 in strings and keys (SQLSTATE 22P05).
@@ -89,8 +101,12 @@ func hasNUL(v any) bool {
 	return false
 }
 
-// CreateSavedView adds a saved view owned by the scope's user. A filter
-// that is not a JSON object gives ErrInvalidFilter.
+// CreateSavedView adds a saved view owned by the scope's user, with the
+// audit entry of ctx (target saved_view, with the view's name). A filter
+// that is not a JSON object gives ErrInvalidFilter. With SortLast the view
+// goes after the owner's others (the highest sort index + 1) and SortIndex
+// is ignored; appending creates of one owner take a per-owner lock, so
+// parallel ones get distinct indexes.
 func (s *Store) CreateSavedView(ctx context.Context, sc Scope, in SavedViewInput) (*SavedView, error) {
 	owner, err := sc.creator()
 	if err != nil {
@@ -100,14 +116,33 @@ func (s *Store) CreateSavedView(ctx context.Context, sc Scope, in SavedViewInput
 	if err != nil {
 		return nil, err
 	}
-	r, err := s.q.CreateSavedView(ctx, db.CreateSavedViewParams{
-		OwnerID: owner, Name: in.Name, Symbol: orDefault(in.Symbol, DefaultSavedViewSymbol),
-		SortIndex: in.SortIndex, Filter: filter,
+	var out *SavedView
+	err = s.inTx(ctx, func(q *db.Queries) error {
+		sortIndex := in.SortIndex
+		if in.SortLast {
+			if err := q.LockSavedViewOrder(ctx, owner); err != nil {
+				return err
+			}
+			afterLock(ctx)
+			if sortIndex, err = q.NextSavedViewSortIndex(ctx, owner); err != nil {
+				return err
+			}
+		}
+		r, err := q.CreateSavedView(ctx, db.CreateSavedViewParams{
+			OwnerID: owner, Name: in.Name, Symbol: orDefault(in.Symbol, DefaultSavedViewSymbol),
+			SortIndex: sortIndex, Filter: filter,
+		})
+		if err != nil {
+			return err
+		}
+		out = savedViewFromDB(r)
+		auditRow(ctx, sc, TargetSavedView, out.ID, out.Name, out.OwnerID)
+		return nil
 	})
 	if err != nil {
-		return nil, mapErr(err)
+		return nil, mapFilterErr(err)
 	}
-	return savedViewFromDB(r), nil
+	return out, nil
 }
 
 // GetSavedView returns one saved view in the scope.
@@ -137,33 +172,147 @@ func (s *Store) ListSavedViews(ctx context.Context, sc Scope) ([]*SavedView, err
 	return out, nil
 }
 
-// UpdateSavedView replaces a saved view's fields. A filter that is not a
-// JSON object gives ErrInvalidFilter.
+// UpdateSavedView replaces a saved view's fields, with the audit entry of
+// ctx (as PatchSavedView). A filter that is not a JSON object gives
+// ErrInvalidFilter.
 func (s *Store) UpdateSavedView(ctx context.Context, sc Scope, id string, in SavedViewInput) (*SavedView, error) {
+	sortIndex := in.SortIndex
+	return s.PatchSavedView(ctx, sc, id, SavedViewPatch{
+		Name: &in.Name, Symbol: &in.Symbol, SortIndex: &sortIndex, Filter: orEmptyFilter(in.Filter),
+	})
+}
+
+// orEmptyFilter is f, or {} for an empty filter, so a replace always sets one.
+func orEmptyFilter(f json.RawMessage) json.RawMessage {
+	if len(bytes.TrimSpace(f)) == 0 {
+		return json.RawMessage("{}")
+	}
+	return f
+}
+
+// SavedViewPatch holds the fields of a saved view to change; nil keeps the
+// stored value. An empty Symbol means DefaultSavedViewSymbol.
+type SavedViewPatch struct {
+	Name      *string
+	Symbol    *string
+	SortIndex *int64
+	// Filter replaces the whole filter object; nil keeps it.
+	Filter json.RawMessage
+	// FilterKeys replaces only these top-level keys of the filter (after
+	// Filter, if both are given) and keeps every other key as stored at
+	// the time of the write: the web's "Update to the current filter"
+	// sends its own key this way, so app keys another client changed in
+	// the meantime are not lost. Each value must be valid JSON.
+	FilterKeys map[string]json.RawMessage
+}
+
+// PatchSavedView changes the given fields of a saved view, with the audit
+// entry of ctx: target saved_view with the view's name, and oldName on a
+// rename. It locks the row, merges and writes in one transaction, so
+// concurrent patches of one view do not undo each other. A filter that is
+// not a JSON object gives ErrInvalidFilter.
+func (s *Store) PatchSavedView(ctx context.Context, sc Scope, id string, p SavedViewPatch) (*SavedView, error) {
 	u, ok := parseID(id)
 	if !ok {
 		return nil, ErrNotFound
 	}
-	filter, err := filterJSON(in.Filter)
-	if err != nil {
-		return nil, err
+	var filter []byte
+	if p.Filter != nil {
+		var err error
+		if filter, err = filterJSON(p.Filter); err != nil {
+			return nil, err
+		}
 	}
-	r, err := s.q.UpdateSavedView(ctx, db.UpdateSavedViewParams{
-		ID: u, Owner: sc.owner(), Name: in.Name, Symbol: orDefault(in.Symbol, DefaultSavedViewSymbol),
-		SortIndex: in.SortIndex, Filter: filter,
+	var out *SavedView
+	err := s.inTx(ctx, func(q *db.Queries) error {
+		old, err := q.LockSavedView(ctx, db.LockSavedViewParams{ID: u, Owner: sc.owner()})
+		if err != nil {
+			return err
+		}
+		afterLock(ctx)
+		in := db.UpdateSavedViewParams{
+			ID: u, Owner: sc.owner(), Name: old.Name, Symbol: old.Symbol, SortIndex: old.SortIndex, Filter: old.Filter,
+		}
+		if p.Name != nil {
+			in.Name = *p.Name
+		}
+		if p.Symbol != nil {
+			in.Symbol = orDefault(*p.Symbol, DefaultSavedViewSymbol)
+		}
+		if p.SortIndex != nil {
+			in.SortIndex = *p.SortIndex
+		}
+		if filter != nil {
+			in.Filter = filter
+		}
+		if len(p.FilterKeys) > 0 {
+			if in.Filter, err = mergeFilterKeys(in.Filter, p.FilterKeys); err != nil {
+				return err
+			}
+		}
+		r, err := q.UpdateSavedView(ctx, in)
+		if err != nil {
+			return err
+		}
+		out = savedViewFromDB(r)
+		auditPatch(ctx, sc, TargetSavedView, out.ID, old.Name, out.Name, out.OwnerID)
+		return nil
 	})
 	if err != nil {
-		return nil, mapErr(err)
+		return nil, mapFilterErr(err)
 	}
-	return savedViewFromDB(r), nil
+	return out, nil
 }
 
-// DeleteSavedView removes a saved view.
+// mergeFilterKeys is the filter object f with the given top-level keys
+// set to their values; ErrInvalidFilter if a value is not valid JSON or
+// the result is no filter jsonb accepts (filterJSON).
+func mergeFilterKeys(f []byte, keys map[string]json.RawMessage) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(f, &m); err != nil || m == nil {
+		return nil, ErrInvalidFilter
+	}
+	for k, v := range keys {
+		if !json.Valid(v) {
+			return nil, ErrInvalidFilter
+		}
+		m[k] = v
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return nil, ErrInvalidFilter
+	}
+	return filterJSON(out)
+}
+
+// DeleteSavedView removes a saved view, with the audit entry of ctx
+// (target saved_view, with the view's name).
 func (s *Store) DeleteSavedView(ctx context.Context, sc Scope, id string) error {
 	u, ok := parseID(id)
 	if !ok {
 		return ErrNotFound
 	}
-	n, err := s.q.DeleteSavedView(ctx, db.DeleteSavedViewParams{ID: u, Owner: sc.owner()})
-	return deleted(n, err)
+	err := s.inTx(ctx, func(q *db.Queries) error {
+		r, err := q.DeleteSavedView(ctx, db.DeleteSavedViewParams{ID: u, Owner: sc.owner()})
+		if err != nil {
+			return err
+		}
+		auditRow(ctx, sc, TargetSavedView, idString(r.ID), r.Name, r.OwnerID)
+		return nil
+	})
+	return mapErr(err)
+}
+
+// mapFilterErr is mapErr for a write of a filter: jsonb's refusal of text
+// it cannot hold (a lone surrogate escape such as "\ud800", SQLSTATE
+// 22P02; bytes that are not UTF-8, 22021) is ErrInvalidFilter, not an
+// internal error. The names are checked before (no control characters,
+// valid UTF-8 from the JSON decoder), so the filter is the only text these
+// writes can fail on.
+func mapFilterErr(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && (pgErr.Code == "22P02" || pgErr.Code == "22021") {
+		return ErrInvalidFilter
+	}
+	return mapErr(err)
 }

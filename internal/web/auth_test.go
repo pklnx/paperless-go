@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,6 +59,19 @@ type authFixture struct {
 	handler   http.Handler
 	// secrets are the TOTP secrets by user name, for login.
 	secrets map[string]string
+	// storeNow, when set, is the store's clock (setStoreNow); the wall
+	// clock otherwise.
+	storeNow *atomic.Pointer[func() time.Time]
+}
+
+// setStoreNow makes now the store's clock for the trash decisions (nil:
+// the wall clock again). It may be called while the server runs.
+func (f *authFixture) setStoreNow(now func() time.Time) {
+	if now == nil {
+		f.storeNow.Store(nil)
+		return
+	}
+	f.storeNow.Store(&now)
 }
 
 func newAuthFixture(t *testing.T) *authFixture {
@@ -66,17 +80,43 @@ func newAuthFixture(t *testing.T) *authFixture {
 }
 
 // newAuthFixtureOpts is newAuthFixture with TrustedProxies, Require2FA,
-// PublicURL and MaxUploadSize from opts. The blob store is a temporary
+// PublicURL, MaxUploadSize and SweepWake from opts. The blob store is a temporary
 // directory.
 func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 	t.Helper()
-	st, dbURL := storetest.NewWithURL(t)
-	key := bytes.Repeat([]byte{7}, crypto.KeySize)
-	sealer, err := crypto.NewSealer(key)
+	return newAuthFixtureDB(t, opts, nil)
+}
+
+// newAuthFixtureDB is newAuthFixtureOpts with extra connection parameters
+// for the store (storetest.NewWithParams), such as pool_max_conns.
+func newAuthFixtureDB(t *testing.T, opts Options, params map[string]string) *authFixture {
+	t.Helper()
+	return newAuthFixtureBlobs(t, opts, params, false)
+}
+
+// newAuthFixtureBlobs is newAuthFixtureDB whose store, with checkBlobs,
+// checks the files of the server's blob store (store.Blobs) instead of
+// taking every hash as stored: for the tests of the file removal.
+func newAuthFixtureBlobs(t *testing.T, opts Options, params map[string]string, checkBlobs bool) *authFixture {
+	t.Helper()
+	blobs, err := blobstore.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	blobs, err := blobstore.New(t.TempDir())
+	so := storetest.Options{Params: params}
+	if checkBlobs {
+		so.Blobs = blobs
+	}
+	st, dbURL := storetest.NewWithOptions(t, so)
+	storeNow := &atomic.Pointer[func() time.Time]{}
+	st.Now = func() time.Time {
+		if f := storeNow.Load(); f != nil {
+			return (*f)()
+		}
+		return time.Now()
+	}
+	key := bytes.Repeat([]byte{7}, crypto.KeySize)
+	sealer, err := crypto.NewSealer(key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +124,7 @@ func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 	s := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{
 		AllowedHosts: []string{"127.0.0.1"}, Hasher: storetest.Hasher, Now: clock.Now, TrustedProxies: opts.TrustedProxies,
 		Sealer: sealer, SecretKey: key, Require2FA: opts.Require2FA, PublicURL: opts.PublicURL,
-		Blobs: blobs, MaxUploadSize: opts.MaxUploadSize,
+		Blobs: blobs, MaxUploadSize: opts.MaxUploadSize, SweepWake: opts.SweepWake,
 	})
 	h := s.Handler()
 	srv := httptest.NewServer(h)
@@ -92,7 +132,7 @@ func newAuthFixtureOpts(t *testing.T, opts Options) *authFixture {
 	jar, _ := cookiejar.New(nil)
 	return &authFixture{
 		t: t, st: st, srv: srv, client: &http.Client{Jar: jar}, clock: clock, dbURL: dbURL,
-		sealer: sealer, secretKey: key, blobs: blobs, handler: h, secrets: map[string]string{},
+		sealer: sealer, secretKey: key, blobs: blobs, handler: h, secrets: map[string]string{}, storeNow: storeNow,
 	}
 }
 
@@ -316,14 +356,17 @@ func TestRouteTable(t *testing.T) {
 			}
 		}
 	}
-	// The public routes are exactly these three.
+	// The public routes are exactly these: the health check, the UI code
+	// and the web app manifest with its icons.
 	var public []string
 	for _, rt := range s.routes() {
 		if rt.access == accessPublic {
 			public = append(public, rt.pattern)
 		}
 	}
-	if got := strings.Join(public, ","); got != "GET /healthz,GET /{$},GET /assets/" {
+	if got := strings.Join(public, ","); got != "GET /healthz,GET /{$},GET /assets/,"+
+		"GET /apple-touch-icon.png,GET /favicon-32.png,GET /icon-192.png,GET /icon-512.png,"+
+		"GET /icon-maskable-512.png,GET /manifest.webmanifest" {
 		t.Errorf("public routes: %s", got)
 	}
 	if seen[accessSession] == 0 || seen[accessLogin] != 6 {
@@ -374,13 +417,16 @@ func TestLoginLogout(t *testing.T) {
 	if c == nil || !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Secure || c.MaxAge != int(auth.MaxSessionAge.Seconds()) {
 		t.Fatalf("cookie: %+v", c)
 	}
+	u, _ := f.st.GetUserByName(context.Background(), "alice")
 	out := f.expect("GET", "/api/session", nil, 200)
-	if user, _ := out["user"].(map[string]any); user["name"] != "alice" || user["admin"] != true || user["mustChangePassword"] != false {
+	// id is the user's ID, as documents' ownerId (the UI compares owners by
+	// ID, not by name).
+	if user, _ := out["user"].(map[string]any); user["name"] != "alice" || user["admin"] != true || user["mustChangePassword"] != false ||
+		user["id"] != float64(u.ID) {
 		t.Fatalf("session: %v", out)
 	}
 	f.expect("GET", "/api/users", nil, 200)
 
-	u, _ := f.st.GetUserByName(context.Background(), "alice")
 	if u.LastLoginAt == nil || !u.LastLoginAt.Equal(f.clock.Now().Truncate(time.Microsecond)) {
 		t.Errorf("last login: %v", u.LastLoginAt)
 	}
@@ -563,8 +609,14 @@ func TestSecureCookie(t *testing.T) {
 		{"loopback proxy", "127.0.0.1:4000", "https", false, true},
 		{"IPv6 loopback proxy", "[::1]:4000", "https", false, true},
 		{"direct tls", "192.0.2.1:1234", "", true, true},
+		// IPv4-mapped peers count as their IPv4 address (peerAddr unmaps).
+		// The loopback case passes without the unmapping too:
+		// netip.Addr.IsLoopback unmaps by itself.
+		{"IPv4-mapped trusted proxy", "[::ffff:10.1.2.3]:4000", "https", false, true},
+		{"IPv4-mapped loopback proxy", "[::ffff:127.0.0.1]:4000", "https", false, true},
 		// Anybody else could set the header: it does not count.
 		{"untrusted peer", "192.0.2.1:1234", "https", false, false},
+		{"IPv4-mapped untrusted peer", "[::ffff:192.0.2.1]:1234", "https", false, false},
 		{"plain http", "10.1.2.3:4000", "", false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -830,21 +882,5 @@ func TestLoginRateLimitIPv6Prefix(t *testing.T) {
 	}
 	if code := post("2001:db8:0:2::1"); code != 401 {
 		t.Fatalf("other /64: %d", code)
-	}
-}
-
-// However many session cookies a request carries, only a few distinct
-// tokens per name are looked up.
-func TestSessionTokensAreCapped(t *testing.T) {
-	r := httptest.NewRequest("GET", "/api/session", nil)
-	for i := range 100 {
-		r.AddCookie(&http.Cookie{Name: cookieName, Value: fmt.Sprintf("junk%d", i)})
-	}
-	r.AddCookie(&http.Cookie{Name: secureCookieName, Value: "same"})
-	r.AddCookie(&http.Cookie{Name: secureCookieName, Value: "same"})
-	got := sessionTokens(r)
-	want := []string{"same", "junk0", "junk1"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("tokens %v, want %v", got, want)
 	}
 }

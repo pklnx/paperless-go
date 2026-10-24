@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { documentsApi, type DocumentSummary } from "./api";
-import { DocumentsHome, WindowDrop, pollDelay, pollTimer, searchPageSize } from "./Documents";
-import { SNIPPET_START, SNIPPET_STOP } from "./snippet";
+import type { DocumentSummary } from "./api";
+import { DocumentsUpload, WindowDrop } from "./Documents";
 import { FakeXHR, stubXHR } from "./fakeXHR";
 import { t } from "./i18n";
 import { UploadQueue } from "./uploads";
@@ -18,34 +17,8 @@ const doc = (id: string, title: string): DocumentSummary => ({
   hasArchive: false,
 });
 
-let docs: DocumentSummary[];
-let listCalls: number;
-/** The search parameters of each search request. */
-let searches: URLSearchParams[];
-/** The answer to a search, by its cursor ("" for the first page). */
-let searchPages: Record<string, { status?: number; body: unknown }>;
-
-const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-
 beforeEach(() => {
-  docs = [];
-  listCalls = 0;
-  searches = [];
-  searchPages = {};
   stubXHR();
-  vi.stubGlobal("fetch", async (url: string) => {
-    if (url === "/api/documents?limit=10") {
-      listCalls++;
-      return json(200, { documents: docs, maxUploadSize: 1000 });
-    }
-    if (url.startsWith("/api/documents?q=")) {
-      const p = new URLSearchParams(url.slice(url.indexOf("?") + 1));
-      searches.push(p);
-      const page = searchPages[p.get("cursor") ?? ""];
-      return page ? json(page.status ?? 200, page.body) : new Response(null, { status: 404 });
-    }
-    return new Response(null, { status: 404 });
-  });
 });
 
 afterEach(() => {
@@ -61,22 +34,19 @@ function dragEvent(type: string, files: File[]) {
   return e;
 }
 
-async function renderHome() {
+function renderHome() {
   const queue = new UploadQueue();
-  render(<DocumentsHome queue={queue} />);
-  // The list (and with it the size limit) has loaded.
-  await vi.waitFor(() => expect(queue.maxSize).toBe(1000));
+  // The document list tells the queue the server's limit.
+  queue.maxSize = 1000;
+  render(<DocumentsUpload queue={queue} maxSize={1000} />);
   return queue;
 }
 
 const rows = () => within(screen.getByRole("list", { name: t.uploadsLabel })).getAllByRole("listitem");
 
-describe("DocumentsHome", () => {
+describe("DocumentsUpload", () => {
   it("uploads picked files two at a time, with progress and results", async () => {
-    docs = [doc("0", "Old‮ letter")];
-    await renderHome();
-    // The recent list strips bidi controls.
-    expect(await screen.findByText("Old letter")).toBeTruthy();
+    renderHome();
 
     fireEvent.change(screen.getByTestId("file-picker"), { target: { files: [file("a.pdf"), file("b.pdf"), file("c.pdf")] } });
     expect(rows()).toHaveLength(3);
@@ -85,15 +55,12 @@ describe("DocumentsHome", () => {
 
     act(() => FakeXHR.all[0]!.progress(3, 10));
     expect(within(rows()[0]!).getByRole("status").textContent).toBe("30 %");
-    expect((within(rows()[0]!).getByRole("progressbar") as HTMLProgressElement).value).toBe(30);
+    expect(within(rows()[0]!).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("30");
 
-    docs = [doc("1", "a"), ...docs];
     await act(async () => FakeXHR.all[0]!.respond(201, doc("1", "a")));
     expect(within(rows()[0]!).getByRole("status").textContent).toBe(t.uploadImported);
-    // The third file starts once a slot is free; the list reloads.
+    // The third file starts once a slot is free.
     expect(FakeXHR.all).toHaveLength(3);
-    await vi.waitFor(() => expect(listCalls).toBe(2));
-    expect(await screen.findByText("a")).toBeTruthy();
 
     await act(async () => FakeXHR.all[1]!.respond(200, { duplicate: true, existing: { id: "0", title: "Old letter" } }));
     expect(within(rows()[1]!).getByRole("status").textContent).toBe(t.uploadDuplicateOf("Old letter"));
@@ -105,14 +72,14 @@ describe("DocumentsHome", () => {
   });
 
   it("refuses a file over the limit before sending it", async () => {
-    await renderHome();
+    renderHome();
     fireEvent.change(screen.getByTestId("file-picker"), { target: { files: [file("big.pdf", 1001)] } });
     expect(FakeXHR.all).toHaveLength(0);
     expect(within(rows()[0]!).getByRole("status").textContent).toBe(t.uploadTooLarge("1,000 B"));
   });
 
   it("cancels an upload", async () => {
-    await renderHome();
+    renderHome();
     fireEvent.change(screen.getByTestId("file-picker"), { target: { files: [file("a.pdf")] } });
     fireEvent.click(screen.getByRole("button", { name: t.cancelUpload("a.pdf") }));
     await vi.waitFor(() => expect(within(rows()[0]!).getByRole("status").textContent).toBe(t.uploadCancelled));
@@ -121,89 +88,55 @@ describe("DocumentsHome", () => {
   });
 });
 
-const field = () => screen.getByRole("searchbox", { name: t.searchLabel });
+describe("a duplicate in the trash and a later retry (#12)", () => {
+  it("offers Restore for a duplicate whose document is in the trash", async () => {
+    const calls: { url: string; method: string }[] = [];
+    let status = 200;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method ?? "GET" });
+      return new Response(JSON.stringify(status === 200 ? doc("9", "Old") : { error: "not found" }), { status, headers: { "Content-Type": "application/json" } });
+    });
+    const queue = new UploadQueue();
+    const onRestored = vi.fn();
+    render(<DocumentsUpload queue={queue} maxSize={1000} onRestored={onRestored} />);
+    fireEvent.change(screen.getByTestId("file-picker"), { target: { files: [file("a.pdf"), file("b.pdf")] } });
+    await act(async () => FakeXHR.all[0]!.respond(200, { duplicate: true, existing: { id: "9", title: "Old" }, trashed: true }));
+    await act(async () => FakeXHR.all[1]!.respond(200, { duplicate: true, existing: { id: "8", title: "Other" }, trashed: true }));
+    expect(within(rows()[0]!).getByRole("status").textContent).toBe(t.uploadInTrashOf("Old"));
 
-function searchFor(q: string) {
-  fireEvent.change(field(), { target: { value: q } });
-  fireEvent.submit(screen.getByRole("search"));
-}
+    fireEvent.click(screen.getByRole("button", { name: t.uploadRestoreLabel("a.pdf") }));
+    await vi.waitFor(() => expect(within(rows()[0]!).getByRole("status").textContent).toBe(t.uploadRestored));
+    expect(calls).toEqual([{ url: "/api/documents/9/restore", method: "POST" }]);
+    expect(onRestored).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: t.uploadRestoreLabel("a.pdf") })).toBeNull();
 
-const results = () => within(screen.getByRole("list", { name: t.searchResults })).getAllByRole("listitem");
-
-describe("DocumentsHome search", () => {
-  it("searches on Enter and shows snippets as text with marks", async () => {
-    docs = [doc("0", "Recent")];
-    searchPages[""] = {
-      body: {
-        documents: [{ ...doc("1", "Telekom"), snippet: `<script>alert(1)</script> Ihre ${SNIPPET_START}Rechnung${SNIPPET_STOP} <b>fett</b>` }],
-        maxUploadSize: 1000,
-      },
-    };
-    await renderHome();
-    fireEvent.change(field(), { target: { value: "Rechnung" } });
-    // Typing does not search.
-    expect(searches).toHaveLength(0);
-    fireEvent.submit(screen.getByRole("search"));
-    expect(await screen.findByText("Telekom")).toBeTruthy();
-    expect(searches).toHaveLength(1);
-    expect(searches[0]!.get("q")).toBe("Rechnung");
-    expect(searches[0]!.get("limit")).toBe(String(searchPageSize));
-    expect(searches[0]!.get("tz")).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
-    expect(searches[0]!.has("cursor")).toBe(false);
-    // The results replace the recent list.
-    expect(screen.queryByRole("list", { name: t.recentTitle })).toBeNull();
-
-    const row = results()[0]!;
-    const marks = row.querySelectorAll("mark");
-    expect(marks).toHaveLength(1);
-    expect(marks[0]!.textContent).toBe("Rechnung");
-    // Markup in the text stays text.
-    expect(row.querySelector("script")).toBeNull();
-    expect(row.querySelector("b")).toBeNull();
-    expect(row.textContent).toContain("<script>alert(1)</script> Ihre Rechnung <b>fett</b>");
-    expect(row.textContent).not.toContain(SNIPPET_START);
+    // Gone from the trash meanwhile: the row says so and stays as it was.
+    status = 404;
+    fireEvent.click(screen.getByRole("button", { name: t.uploadRestoreLabel("b.pdf") }));
+    expect((await within(rows()[1]!).findByRole("alert")).textContent).toBe(t.notInTrashAnyMore);
+    expect(within(rows()[1]!).getByRole("status").textContent).toBe(t.uploadInTrashOf("Other"));
+    expect(onRestored).toHaveBeenCalledOnce();
   });
 
-  it("loads more with the cursor, then returns to the recent list when the field is cleared", async () => {
-    docs = [doc("0", "Recent")];
-    searchPages[""] = { body: { documents: [doc("1", "First")], nextCursor: "c1", maxUploadSize: 1000 } };
-    searchPages["c1"] = { body: { documents: [doc("2", "Second")], maxUploadSize: 1000 } };
-    await renderHome();
-    searchFor("tag:Steuer");
-    expect(await screen.findByText("First")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: t.searchMore }));
-    expect(await screen.findByText("Second")).toBeTruthy();
-    expect(searches.map((p) => [p.get("q"), p.get("cursor")])).toEqual([
-      ["tag:Steuer", null],
-      ["tag:Steuer", "c1"],
-    ]);
-    expect(results()).toHaveLength(2);
-    // The last page has no cursor: no button.
-    expect(screen.queryByRole("button", { name: t.searchMore })).toBeNull();
-
-    fireEvent.change(field(), { target: { value: "" } });
-    expect(screen.queryByRole("list", { name: t.searchResults })).toBeNull();
-    expect(within(screen.getByRole("list", { name: t.recentTitle })).getByText("Recent")).toBeTruthy();
-    expect(searches).toHaveLength(2);
+  it("offers no Restore for a plain duplicate", async () => {
+    renderHome();
+    fireEvent.change(screen.getByTestId("file-picker"), { target: { files: [file("a.pdf")] } });
+    await act(async () => FakeXHR.all[0]!.respond(200, { duplicate: true, existing: { id: "9", title: "Old" } }));
+    expect(screen.queryByRole("button", { name: t.uploadRestoreLabel("a.pdf") })).toBeNull();
   });
 
-  it("shows an empty state and the error of a refused search", async () => {
-    searchPages[""] = { body: { documents: [], maxUploadSize: 1000 } };
-    await renderHome();
-    searchFor("nichts");
-    expect(await screen.findByText(t.searchEmpty)).toBeTruthy();
-
-    searchPages[""] = { status: 400, body: { error: "query too long" } };
-    searchFor("a ".repeat(40));
-    expect((await screen.findByRole("alert")).textContent).toBe(t.searchTooLong);
-    expect(screen.queryByText(t.searchEmpty)).toBeNull();
-  });
-
-  it("does not search for blanks", async () => {
-    await renderHome();
-    searchFor("   ");
-    expect(searches).toHaveLength(0);
-    expect(screen.getByRole("heading", { name: t.recentTitle })).toBeTruthy();
+  it("says when to try again after a 503 with Retry-After, and sends the file again on request", async () => {
+    renderHome();
+    const f = file("a.pdf");
+    fireEvent.change(screen.getByTestId("file-picker"), { target: { files: [f] } });
+    await act(async () => FakeXHR.all[0]!.respond(503, { error: "being removed" }, { "Retry-After": "60" }));
+    expect(within(rows()[0]!).getByRole("status").textContent).toBe(t.uploadRetryAfter(60));
+    fireEvent.click(screen.getByRole("button", { name: t.retryUpload("a.pdf") }));
+    expect(FakeXHR.all).toHaveLength(2);
+    expect(FakeXHR.all[1]!.body).toBe(f);
+    await act(async () => FakeXHR.all[1]!.respond(201, doc("1", "a")));
+    expect(within(rows()[0]!).getByRole("status").textContent).toBe(t.uploadImported);
+    expect(screen.queryByRole("button", { name: t.retryUpload("a.pdf") })).toBeNull();
   });
 });
 
@@ -234,169 +167,5 @@ describe("WindowDrop", () => {
       window.dispatchEvent(e);
     });
     expect(screen.queryByText(t.dropHere)).toBeNull();
-  });
-});
-
-describe("processing status", () => {
-  const withStatus = (id: string, title: string, processing: DocumentSummary["processing"], thumbnailUrl: string | null = null): DocumentSummary => ({
-    ...doc(id, title),
-    processing,
-    thumbnailUrl,
-  });
-  const row = (title: string) => screen.getByText(title).closest("li")!;
-
-  /** The timers the start page set for polling, to fire them by hand. */
-  let timers: { fn: () => void; ms: number; cleared: boolean }[];
-  beforeEach(() => {
-    timers = [];
-    vi.spyOn(pollTimer, "set").mockImplementation((fn, ms) => timers.push({ fn, ms, cleared: false }));
-    vi.spyOn(pollTimer, "clear").mockImplementation((id) => {
-      timers[id - 1]!.cleared = true;
-    });
-  });
-  afterEach(() => vi.restoreAllMocks());
-  const live = () => timers.filter((x) => !x.cleared);
-
-  it("shows a badge per state, the error of a failed document and the thumbnail", async () => {
-    docs = [
-      withStatus("1", "Queued doc", { state: "queued", attempts: 0, maxAttempts: 3 }),
-      withStatus("2", "Retried doc", { state: "queued", attempts: 1, maxAttempts: 3, error: "pdfinfo failed with exit status 99.", retryAt: "2026-10-21T10:01:00Z" }),
-      withStatus("3", "Running doc", { state: "running", attempts: 1, maxAttempts: 3 }),
-      withStatus("4", "Failed doc", { state: "failed", attempts: 1, maxAttempts: 3, error: "The PDF cannot be read." }),
-      withStatus("5", "Done doc", { state: "done", attempts: 1, maxAttempts: 3 }, "/api/documents/5/thumbnail?v=0123456789abcdef"),
-    ];
-    await renderHome();
-    await screen.findByText("Done doc");
-    expect(within(row("Queued doc")).getByRole("status").textContent).toBe(t.processingQueued);
-    expect(within(row("Retried doc")).getByRole("status").textContent).toBe(t.processingRetrying);
-    expect(within(row("Running doc")).getByRole("status").textContent).toBe(t.processingRunning);
-    const failed = within(row("Failed doc"));
-    expect(failed.getByText(t.processingFailed)).toBeTruthy();
-    expect(failed.getByText("The PDF cannot be read.")).toBeTruthy();
-    expect(failed.getByRole("button", { name: t.retryDocument("Failed doc") })).toBeTruthy();
-    const done = within(row("Done doc"));
-    expect(done.queryByRole("status")).toBeNull();
-    expect(done.queryByRole("button")).toBeNull();
-    expect(row("Done doc").querySelector("img")?.getAttribute("src")).toBe("/api/documents/5/thumbnail?v=0123456789abcdef");
-    // Without a thumbnail the row has an empty frame, no image.
-    expect(row("Queued doc").querySelector("img")).toBeNull();
-    expect(within(row("Queued doc")).getByTestId("no-thumbnail")).toBeTruthy();
-  });
-
-  it("retries a failed document and shows it queued", async () => {
-    docs = [withStatus("4", "Failed doc", { state: "failed", attempts: 3, maxAttempts: 3, error: "Broken." })];
-    const posts: { url: string; init?: RequestInit }[] = [];
-    const list = globalThis.fetch;
-    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
-      if (init?.method === "POST") {
-        posts.push({ url, init });
-        return json(202, withStatus("4", "Failed doc", { state: "queued", attempts: 0, maxAttempts: 3 }));
-      }
-      return list(url);
-    });
-    await renderHome();
-    fireEvent.click(await screen.findByRole("button", { name: t.retryDocument("Failed doc") }));
-    await vi.waitFor(() => expect(within(row("Failed doc")).getByRole("status").textContent).toBe(t.processingQueued));
-    expect(posts.map((p) => p.url)).toEqual(["/api/documents/4/reprocess"]);
-    expect(new Headers(posts[0]!.init?.headers).get("Content-Type")).toBe("application/json");
-    expect(screen.queryByText("Broken.")).toBeNull();
-    // Now the list polls.
-    expect(live().map((x) => x.ms)).toEqual([pollDelay]);
-  });
-
-  it("shows why a retry failed", async () => {
-    docs = [withStatus("4", "Failed doc", { state: "failed", attempts: 3, maxAttempts: 3, error: "Broken." })];
-    const list = globalThis.fetch;
-    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) =>
-      init?.method === "POST" ? json(503, { error: "the audit log is unavailable" }) : list(url),
-    );
-    await renderHome();
-    fireEvent.click(await screen.findByRole("button", { name: t.retryDocument("Failed doc") }));
-    expect((await screen.findByRole("alert")).textContent).toBe(t.failed("the audit log is unavailable"));
-    expect(screen.getByText("Broken.")).toBeTruthy();
-  });
-
-  it("loads the list again while documents are processed, and stops when they are done", async () => {
-    docs = [withStatus("1", "Scan", { state: "queued", attempts: 0, maxAttempts: 3 }), withStatus("2", "Old", { state: "done", attempts: 1, maxAttempts: 3 })];
-    await renderHome();
-    await screen.findByText("Scan");
-    expect(listCalls).toBe(1);
-    expect(live().map((x) => x.ms)).toEqual([pollDelay]);
-
-    docs = [withStatus("1", "Scan", { state: "running", attempts: 1, maxAttempts: 3 }), docs[1]!];
-    act(() => live()[0]!.fn());
-    await vi.waitFor(() => expect(within(row("Scan")).getByRole("status").textContent).toBe(t.processingRunning));
-    expect(listCalls).toBe(2);
-    expect(live()).toHaveLength(1);
-
-    docs = [withStatus("1", "Scan", { state: "done", attempts: 1, maxAttempts: 3 }, "/api/documents/1/thumbnail?v=00"), docs[1]!];
-    act(() => live()[0]!.fn());
-    await vi.waitFor(() => expect(row("Scan").querySelector("img")).toBeTruthy());
-    expect(listCalls).toBe(3);
-    expect(within(row("Scan")).queryByRole("status")).toBeNull();
-    expect(live()).toHaveLength(0);
-  });
-
-  it("keeps polling after a failed load, but not after an aborted one", async () => {
-    docs = [withStatus("1", "Scan", { state: "queued", attempts: 0, maxAttempts: 3 })];
-    await renderHome();
-    await screen.findByText("Scan");
-    expect(timers).toHaveLength(1);
-
-    // From now on the list loads wait until the test settles them.
-    const loads: { reject: (e: unknown) => void }[] = [];
-    let aborts = 0;
-    const list = globalThis.fetch;
-    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
-      if (url !== "/api/documents?limit=10") return list(url);
-      return new Promise((_, reject) => {
-        loads.push({ reject });
-        init?.signal?.addEventListener("abort", () => {
-          aborts++;
-          reject(new DOMException("aborted", "AbortError"));
-        });
-      });
-    });
-    // The page's loads, to wait until the page has handled their end.
-    const pageLoads: Promise<unknown>[] = [];
-    const load = documentsApi.list;
-    vi.spyOn(documentsApi, "list").mockImplementation((...args) => {
-      const p = load(...args);
-      pageLoads.push(p);
-      return p;
-    });
-    const handled = (p: Promise<unknown>) => act(async () => void (await p.catch(() => undefined)));
-
-    act(() => timers[0]!.fn());
-    await vi.waitFor(() => expect(loads).toHaveLength(1));
-    // The next poll comes before the load ended: that load is aborted, and
-    // arms no timer.
-    act(() => timers[0]!.fn());
-    await vi.waitFor(() => expect(loads).toHaveLength(2));
-    expect(aborts).toBe(1);
-    await handled(pageLoads[0]!);
-    expect(timers).toHaveLength(1);
-
-    // The next load fails: the error shows, and a new timer is armed.
-    loads[1]!.reject(new TypeError("Failed to fetch"));
-    await handled(pageLoads[1]!);
-    expect(screen.getByRole("alert").textContent).toBe(t.failed("Failed to fetch"));
-    expect(timers).toHaveLength(2);
-    expect(timers[0]!.cleared).toBe(true);
-    expect(live().map((x) => x.ms)).toEqual([pollDelay]);
-
-    vi.stubGlobal("fetch", list);
-    docs = [withStatus("1", "Scan", { state: "done", attempts: 1, maxAttempts: 3 })];
-    act(() => live()[0]!.fn());
-    await vi.waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
-    expect(within(row("Scan")).queryByRole("status")).toBeNull();
-    expect(live()).toHaveLength(0);
-  });
-
-  it("does not poll when every document is done", async () => {
-    docs = [withStatus("2", "Old", { state: "done", attempts: 1, maxAttempts: 3 }), doc("3", "Without status")];
-    await renderHome();
-    await screen.findByText("Old");
-    expect(timers).toHaveLength(0);
   });
 });

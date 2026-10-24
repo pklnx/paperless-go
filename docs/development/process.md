@@ -36,7 +36,7 @@ issue, and the plan is updated in place. When the plan is good, the
 reviewer or the maintainer replaces `review` with **`ready`**. Only `ready` issues are implemented.
 
 A plan with several parts gets one sub-issue per part, titled
-`<what> (#N, part K)`, created by the session planner when the plan is
+`<what> (#N, part K)`, created by the planner or the coordinator when the plan is
 posted. The `ready` on the main issue covers all parts, and the main issue
 closes with the last part.
 
@@ -50,17 +50,30 @@ Each issue (or part of a plan) gets its own branch and pull request. The
 description says `Closes #N` (and "Part K of #N" for a part), so merging closes
 the issue. Labels follow the [label table](./#pull-requests-and-labels). After
 an approving review and green required checks, the coordinator merges with
-squash; there is no auto-merge.
+squash; there is no auto-merge. The `audit` and `docs-audit` checks
+(`pnpm audit`) are not required: a red audit does not block a merge. The
+coordinator reads its log; a registry error needs nothing, a real advisory gets
+a Dependabot pull request or a follow-up issue.
 
 All reviews run in Claude sessions, local or cloud. Every pull request
 with app code gets a session review. Risky pull requests (deletes, schema
-changes, rewriting user data, sending documents to external services) also
+changes, rewriting user data, sending documents to external services,
+changes to the serving layer: static file serving, response headers, CSP,
+routing) also
 get a second, independent session review: a separate reviewer agent that does
 not see the first review beforehand. The coordinator adds the label
 **`second-review`** to each of them, including every pull request that
 changes `internal/store/migrations`; the label is a marker and triggers
 nothing. Pull requests without app code (docs, CI, test-only) need one
 session review and green required checks.
+
+Pull requests that can weaken the secret scan are merged only after the
+maintainer's explicit OK, noted on the pull request. This covers
+`.gitleaksignore`, `.gitleaks.toml` and files it extends, a new
+`gitleaks:allow` comment, `.github/workflows/secrets.yml`,
+`scripts/secret-scan-*` and the gitleaks variables and targets in the
+`Makefile`. The reviewer flags any such change as blocking until the OK is
+there. The OK names the changed entries, never secret values.
 
 Pull requests from forks get the same reviews. GitHub asks the maintainer to
 approve workflow runs of outside contributors.
@@ -78,9 +91,10 @@ only one of them.
 | `review` | planner | The plan is posted and waits for review. |
 | `ready` | plan reviewer or maintainer | The plan is approved; the issue may be implemented. |
 | `second-review` | coordinator or maintainer | Risky pull request: needs a second, independent session review (a marker; it triggers nothing). |
-| `db-migration` | automatically | Schema change (see Releases). |
-| `breaking` | by hand | Manual upgrade steps (see Releases). |
-| `feature`, `bug`, `docs`, `chore` | template or by hand | Kind of change. |
+| `db-migration` | automatically | Schema change; makes at least a minor release (see Releases). |
+| `breaking` | by hand | Manual upgrade steps; makes a major release (see Releases). |
+| `feature`, `bug`, `docs`, `chore` | template or by hand | Kind of change; `feature` makes at least a minor release. |
+| `security` | by hand | Security hardening (never an undisclosed vulnerability). Kind label; does not change the version (a patch release unless other labels raise it). |
 
 Label changes do not notify anyone by themselves: after setting `plan` or
 `ready`, say so in the chat with the implementer (for example "plan #18" or
@@ -92,15 +106,111 @@ Releases are published from `main` by hand: **Actions → Release → Run
 workflow** (`.github/workflows/release.yml`), after CI on `main` is green. A
 dry run builds everything without pushing an image or creating a release.
 
-The version is `YY.MM-N`: year and month (UTC) and a build number that starts
-at 1 each month (`scripts/next-version.sh`). The workflow builds the image for
-`linux/amd64` and `linux/arm64`, pushes it to `ghcr.io/pklnx/paperless-go`
-with the tags `YY.MM-N`, `YY.MM` and `latest`, creates the tag `vYY.MM-N` and
-a GitHub release with the Docker Compose bundle (`scripts/release-bundle.sh`)
-and notes grouped by label (breaking changes, database migrations, features,
-fixes, documentation, dependencies, maintenance; see `.github/release.yml`).
-Add upgrade notes for `breaking` and `db-migration` entries to the release
-afterwards.
+The version is semantic, `X.Y.Z` (`scripts/next-version.sh`). The labels of
+the pull requests merged into `main` since the last release decide it, not
+the labels of their issues:
 
-`./pgo --version` and `paperless-go --version` show the version, taken from
-`git describe` when the image or binary is built from a clone.
+| Pull requests in the release | Release | Example after `1.4.2` |
+|---|---|---|
+| Any `breaking` | Major | `2.0.0` |
+| Else any `feature` or `db-migration` | Minor | `1.5.0` |
+| Else (bug fixes, security hardening, docs, maintenance, dependencies, no label) | Patch | `1.4.3` |
+
+The first semver release is `1.0.0`, whatever the labels; its range starts at
+the last `vYY.MM-N` tag (`v26.10-1`). The old `vYY.MM-N` tags and images stay
+and are never renamed. The workflow lists the first-parent commits since the
+last release and asks the GitHub API for each commit's pull request. A dry
+run shows the proposed version, a table of the pull requests with their
+labels and their effect, and the head of the release notes in the run
+summary; a pull request without a kind label (`breaking`, `feature`, `bug`,
+`chore`, `docs`, `dependencies`, `security`) is marked "no kind label", which
+is a warning, not a block. The run fails when:
+
+- nothing was merged since the last release, also with the `version` input;
+- a commit has no merged pull request (a direct push): check it, then set the
+  `version` input;
+- the `version` input is not `X.Y.Z` (no `v`, no leading zeros, no suffix) or
+  not greater than the last version (for the first release: at least
+  `1.0.0`). It may be lower than the proposal (the run then shows a
+  warning);
+- the tag `vX.Y.Z` or its release exists already;
+- it runs on another branch than `main`.
+
+The optional `version` input overrides the proposal. Use it to correct the
+bump, for example when a `feature` or `breaking` pull request was reverted
+within the range: the reverted pull request still counts.
+
+The workflow builds the image for `linux/amd64` and `linux/arm64`, pushes it
+to `ghcr.io/pklnx/paperless-go` with the tags `X.Y.Z`, `X.Y`, `X` and `latest`,
+creates the tag `vX.Y.Z` and a GitHub release with `paperless-go.tar.gz` (the
+Docker Compose bundle, `scripts/release-bundle.sh`) and `SHA256SUMS`. The notes
+start at the same tag as the range and are grouped by label (breaking changes,
+database migrations, security, features, fixes, documentation, dependencies,
+maintenance; see `.github/release.yml`). A pull request without a kind label
+lands under "Maintenance", so a risky pull request needs a kind label in
+addition to `second-review`.
+
+If the run fails in or after "Build and push" (in "Create the release"), the
+image tags `X.Y.Z`, `X.Y`, `X` and `latest` may already point to the new
+build (a push that failed partway may have moved only some of them), but
+there is no release. To finish the release:
+
+1. Fix the cause.
+2. Delete the draft release `vX.Y.Z` if the Releases page shows one (the
+   check "Tag and release do not exist yet" stops at it).
+3. If the tag `vX.Y.Z` exists without a release, delete the tag too (it
+   points to this run's commit). Do not follow the run's advice to set the
+   `version` input: that ships the next version and leaves the stray tag.
+4. Use **Re-run failed jobs** on the same run. It uses the same commit and
+   inputs, overwrites the four image tags with a build of the same commit and
+   creates the release. It computes the same version only while the labels
+   of the pull requests in the range are unchanged (they are read from the
+   API again): compare the version in the re-run's summary with the first
+   attempt.
+
+To abandon the release instead, point the tags `X.Y`, `X` and `latest` back
+to the previous release by hand and delete the new package version (package
+settings on GitHub, "Manage versions"). Moving a tag needs a
+`docker login ghcr.io` with a token that has `write:packages`:
+
+```sh
+docker buildx imagetools create -t ghcr.io/pklnx/paperless-go:latest ghcr.io/pklnx/paperless-go:26.10-1
+```
+
+For 1.0.0, move `latest` back to `26.10-1`, then delete the package version
+that carries `1.0.0`; that removes `1.0.0`, `1.0` and `1`, which did not exist
+before. For a later release, also move `X` and `X.Y` back to the previous
+release if it has them (abandoning `1.3.0` after `1.2.4`: `latest` and `1` to
+`1.2.4`; `1.3` goes with the package version).
+
+The workflow writes an upgrade paragraph into every release's notes
+(`scripts/release-notes.sh`). It links the
+[Upgrades guide](../guide/operations#upgrades), and the generated notes list
+the `breaking` and `db-migration` pull requests first. Add manual upgrade notes
+only when a change needs more than these generic steps. The first semver
+release (no `vX.Y.Z` tag before it) also got a paragraph for automatic image
+updaters (the tag `26.10` stays on `26.10-1`); it was published with 1.0.0,
+and once a `vX.Y.Z` tag exists no release prints it again. The current advice
+for updaters is in [Versions](../guide/operations#versions): an exact version
+or `X.Y`, moved to the newest `X.Y` tag after reading that release's notes.
+
+`./pgo --version` and `paperless-go --version` show the version. The release
+image shows `X.Y.Z` (for example `1.0.0`). A build from a clone shows
+`git describe`: the tag `v1.0.0`, or `v1.0.0-3-gabc1234` for commits after
+it.
+
+To run a release, follow [Upgrades](../guide/operations#upgrades), which uses
+the release bundle. From a clone instead of the latest `main`:
+
+```sh
+git fetch --tags
+git checkout v1.0.0
+./pgo migrate
+docker compose up -d web
+```
+
+In a clone `./pgo migrate` builds the image `paperless-go:local` from the
+checked-out sources before it migrates, and `docker compose up -d web` then
+starts that image. This holds while `PAPERLESS_GO_IMAGE` is unset: with it
+set, the build is tagged with that name and replaces a pulled image of the
+same name on that machine.

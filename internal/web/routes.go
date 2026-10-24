@@ -13,7 +13,7 @@ type access int
 const (
 	accessSession access = iota // a session only; the zero value, so a forgotten field is the strictest
 	accessLogin                 // the login endpoints: no session needed, refused with a key
-	accessPublic                // no login: the health check and the UI code
+	accessPublic                // no login: the health check, the UI code and the web app manifest with its icons
 	accessRead                  // a session or an API key with "read"
 	accessUpload                // a session or an API key with "upload" or "write" (the upload only)
 	accessWrite                 // a session or an API key with "write"
@@ -42,7 +42,7 @@ func (s *Server) routes() []route {
 		return route{pattern: pattern, handler: f, access: a}
 	}
 	app := ui.Handler()
-	return []route{
+	routes := []route{
 		h("GET /healthz", s.handleHealth, accessPublic),
 
 		h("GET /api/session", s.handleGetSession, accessLogin),
@@ -78,6 +78,9 @@ func (s *Server) routes() []route {
 		h("GET /api/documents/{id}/file", s.handleDocumentFile, accessRead),
 		h("GET /api/documents/{id}/thumbnail", s.handleThumbnail, accessRead),
 		h("POST /api/documents/{id}/reprocess", s.handleReprocess, accessWrite),
+		h("DELETE /api/documents/{id}", s.handleTrashDocument, accessWrite),
+		h("POST /api/documents/{id}/restore", s.handleRestoreDocument, accessWrite),
+		h("POST /api/documents/{id}/purge", s.handlePurgeDocument, accessWrite),
 		h("GET /api/documents/counts", s.handleDocumentCounts, accessRead),
 
 		h("GET /api/tags", s.handleListTags, accessRead),
@@ -92,6 +95,12 @@ func (s *Server) routes() []route {
 		h("POST /api/document-types", s.handleCreateDocumentType, accessWrite),
 		h("PATCH /api/document-types/{id}", s.handlePatchDocumentType, accessWrite),
 		h("DELETE /api/document-types/{id}", s.handleDeleteDocumentType, accessWrite),
+
+		// Saved views are the caller's own, also for an admin.
+		h("GET /api/saved-views", s.handleListSavedViews, accessRead),
+		h("POST /api/saved-views", s.handleCreateSavedView, accessWrite),
+		h("PATCH /api/saved-views/{id}", s.handlePatchSavedView, accessWrite),
+		h("DELETE /api/saved-views/{id}", s.handleDeleteSavedView, accessWrite),
 
 		h("GET /api/users", s.handleListUsers, accessSession),
 		h("POST /api/users", s.handleCreateUser, accessSession),
@@ -109,4 +118,9 @@ func (s *Server) routes() []route {
 		{pattern: "GET /{$}", handler: app, access: accessPublic},
 		{pattern: "GET /assets/", handler: app, access: accessPublic},
 	}
+	// The web app manifest and its icons, at their fixed root paths.
+	for _, path := range ui.RootPaths() {
+		routes = append(routes, route{pattern: "GET " + path, handler: app, access: accessPublic})
+	}
+	return routes
 }

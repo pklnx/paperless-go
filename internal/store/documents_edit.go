@@ -1,7 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"slices"
@@ -10,7 +13,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/pklnx/paperless-go/internal/search"
@@ -41,7 +43,75 @@ var (
 	// ErrTooMany means a bulk change covers more documents than allowed.
 	// The error is a *TooManyError.
 	ErrTooMany = errors.New("store: too many documents")
+
+	// ErrDocumentChanged means a document's modified_at is no longer the
+	// one a change expected: it was changed meanwhile. The error is a
+	// *DocumentChangedError.
+	ErrDocumentChanged = errors.New("store: the document was changed meanwhile")
+
+	// ErrMatchChanged means the matches of a bulk change by search are
+	// no longer the set its dry run counted. The error is a
+	// *MatchChangedError.
+	ErrMatchChanged = errors.New("store: the matches changed since they were counted")
 )
+
+// DocumentChangedError is returned by PatchDocument when the document's
+// modified_at differs from DocumentPatch.ExpectedModifiedAt.
+// errors.Is(err, ErrDocumentChanged) holds.
+type DocumentChangedError struct {
+	// ModifiedAt is the document's current modified_at.
+	ModifiedAt time.Time
+}
+
+func (e *DocumentChangedError) Error() string {
+	return "store: the document was changed meanwhile (modified " + e.ModifiedAt.Format(time.RFC3339Nano) + ")"
+}
+
+// Is makes errors.Is(err, ErrDocumentChanged) true.
+func (e *DocumentChangedError) Is(target error) bool { return target == ErrDocumentChanged }
+
+// MatchChangedError is a bulk change by search whose matches differ from
+// the set its fingerprint names; nothing was changed. Count is the number
+// of documents the change would cover now (after the recheck under the
+// lock), for information: a new dry run gives the count to confirm.
+// errors.Is(err, ErrMatchChanged) holds.
+type MatchChangedError struct {
+	Count int
+}
+
+func (e *MatchChangedError) Error() string {
+	return fmt.Sprintf("store: the matches changed since they were counted, now %d", e.Count)
+}
+
+// Is makes errors.Is(err, ErrMatchChanged) true.
+func (e *MatchChangedError) Is(target error) bool { return target == ErrMatchChanged }
+
+// matchFingerprintPrefix is the version of matchFingerprint's format. A
+// fingerprint of an older version (v1., without the action) never equals
+// a new one, so it is refused as a changed match.
+const matchFingerprintPrefix = "v2."
+
+// matchFingerprint names a set of documents for an action: "v2." and the
+// unpadded base64url SHA-256 of the action's name, a zero byte and the
+// IDs, sorted by their bytes and concatenated (16 bytes each). It does not
+// depend on the order of ids, and a dry run confirmed for one action
+// cannot be replayed as another (a restore of the trash as its purge).
+// Clients pass it back unchanged and never compute it; it grants nothing,
+// it only narrows a change the caller may make anyway, so it needs no key.
+func matchFingerprint(a BulkAction, ids []pgtype.UUID) string {
+	sorted := make([][16]byte, len(ids))
+	for i, id := range ids {
+		sorted[i] = id.Bytes
+	}
+	slices.SortFunc(sorted, func(a, b [16]byte) int { return bytes.Compare(a[:], b[:]) })
+	h := sha256.New()
+	h.Write([]byte(a))
+	h.Write([]byte{0})
+	for _, id := range sorted {
+		h.Write(id[:])
+	}
+	return matchFingerprintPrefix + base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+}
 
 // TooManyError is a bulk change over more documents than Limit.
 // errors.Is(err, ErrTooMany) holds.
@@ -62,6 +132,8 @@ type ASNTakenError struct {
 	// DocumentID is the document that has it; empty when it could not be
 	// read (it was changed or deleted right after the collision).
 	DocumentID string
+	// Trashed: that document is in the trash, where it keeps its number.
+	Trashed bool
 }
 
 func (e *ASNTakenError) Error() string {
@@ -93,6 +165,14 @@ type DocumentPatch struct {
 
 	SetTags bool
 	TagIDs  []string
+
+	// ExpectedModifiedAt, when set, is a precondition and no field to
+	// change: the document's modified_at must still be this instant (the
+	// value a read returned), or nothing changes and PatchDocument
+	// returns a *DocumentChangedError. modified_at advances strictly on
+	// every write of these fields and of the tags, so an equal value
+	// means the document is unchanged since that read.
+	ExpectedModifiedAt *time.Time
 }
 
 // Fields names the fields p changes, in the API's spelling, for the audit
@@ -149,7 +229,7 @@ func (p DocumentPatch) validate() error {
 
 // PatchDocument changes only the fields set in p, in one transaction: it
 // locks the document, updates the given columns (the search index follows
-// through its triggers), replaces the tags with SetTags and touches
+// through its triggers), replaces the tags with SetTags and advances
 // modified_at. The columns processing writes (text, archive, thumbnail)
 // are never touched, and processing never writes these. The audit entry
 // of ctx gets the document as its target and, for an admin's change of
@@ -158,9 +238,14 @@ func (p DocumentPatch) validate() error {
 // Errors: ErrNotFound outside the scope; ErrOwnerMismatch for a link to a
 // row that is not the document owner's (also in an admin's scope); an
 // *ASNTakenError (ErrASNTaken) for an archive serial number another
-// document of the owner has; a *ValidationError (ErrInvalid) for refused
-// text or nothing to change. A deadlock with a concurrent change is
-// retried (see retryDeadlock), then ErrRetry.
+// document of the owner has; a *DocumentChangedError (ErrDocumentChanged)
+// when p.ExpectedModifiedAt is set and the document's modified_at is
+// another (checked after the lock, after ErrNotFound, before any write);
+// a *ValidationError (ErrInvalid) for refused text or nothing to change;
+// ErrInTrash for a document in the trash and ErrNotFound for one due for
+// purge (checked after the lock, before any write).
+// It reads the document's owner in the scope, takes the owner's gate and
+// write lock (ownerTx), then locks the row.
 func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p DocumentPatch) (*Document, error) {
 	u, ok := parseID(id)
 	if !ok {
@@ -181,50 +266,64 @@ func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p Docume
 	if err != nil {
 		return nil, err
 	}
+	o, err := s.q.DocumentOwner(ctx, db.DocumentOwnerParams{ID: u, Owner: sc.owner()})
+	if err != nil {
+		return nil, mapErr(err)
+	}
 	var owner int64
-	err = s.retryDeadlock(func() error {
-		return s.inTx(ctx, func(q *db.Queries) error {
-			var err error
-			if owner, err = q.LockDocument(ctx, db.LockDocumentParams{ID: u, Owner: sc.owner()}); err != nil {
+	now, ret := s.trashClock()
+	err = s.ownerTx(ctx, []int64{o}, func(ctx context.Context, t *writeTx) error {
+		q := t.q
+		locked, err := q.LockDocument(ctx, db.LockDocumentParams{ID: u, Owner: sc.owner()})
+		if err != nil {
+			return err
+		}
+		if err := t.holds(locked.OwnerID); err != nil {
+			return err
+		}
+		owner = locked.OwnerID
+		afterLock(ctx)
+		if err := BulkUpdate.checkState(trashStateOf(locked.DeletedAt, locked.PurgeAt, now, ret)); err != nil {
+			return err
+		}
+		if p.ExpectedModifiedAt != nil && !locked.ModifiedAt.Equal(*p.ExpectedModifiedAt) {
+			return &DocumentChangedError{ModifiedAt: locked.ModifiedAt}
+		}
+		n, err := q.PatchDocument(ctx, db.PatchDocumentParams{
+			ID: u, Title: p.Title, DocumentDate: p.DocumentDate, Notes: p.Notes,
+			IsFavorite: p.IsFavorite, IsInbox: p.IsInbox,
+			SetAsn: p.SetASN, ArchiveSerialNumber: p.ArchiveSerialNumber,
+			SetCorrespondent: p.SetCorrespondent, CorrespondentID: corr,
+			SetDocumentType: p.SetDocumentType, DocumentTypeID: typ,
+		})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		if p.SetTags {
+			if err := q.ClearDocumentTags(ctx, u); err != nil {
 				return err
 			}
-			afterLock(ctx)
-			n, err := q.PatchDocument(ctx, db.PatchDocumentParams{
-				ID: u, Title: p.Title, DocumentDate: p.DocumentDate, Notes: p.Notes,
-				IsFavorite: p.IsFavorite, IsInbox: p.IsInbox,
-				SetAsn: p.SetASN, ArchiveSerialNumber: p.ArchiveSerialNumber,
-				SetCorrespondent: p.SetCorrespondent, CorrespondentID: corr,
-				SetDocumentType: p.SetDocumentType, DocumentTypeID: typ,
-			})
-			if err != nil {
-				return err
-			}
-			if n == 0 {
-				return ErrNotFound
-			}
-			if p.SetTags {
-				if err := q.ClearDocumentTags(ctx, u); err != nil {
+			if len(tags) > 0 {
+				if err := q.AddDocumentTags(ctx, db.AddDocumentTagsParams{OwnerID: owner, DocumentID: u, TagIds: tags}); err != nil {
 					return err
 				}
-				if len(tags) > 0 {
-					if err := q.AddDocumentTags(ctx, db.AddDocumentTagsParams{OwnerID: owner, DocumentID: u, TagIds: tags}); err != nil {
-						return err
-					}
-				}
 			}
-			if e := auditFrom(ctx); e != nil && e.TargetType == TargetDocument {
-				e.TargetID = idString(u)
-				if owner != sc.UserID {
-					e.Detail("ownerId", owner)
-				}
+		}
+		if e := auditFrom(ctx); e != nil && e.TargetType == TargetDocument {
+			e.TargetID = idString(u)
+			if owner != sc.UserID {
+				e.Detail("ownerId", owner)
 			}
-			return nil
-		})
+		}
+		return nil
 	})
 	if isUniqueViolation(err, "documents_owner_asn_key") {
 		taken := &ASNTakenError{}
 		if r, lerr := s.q.DocumentByASN(ctx, db.DocumentByASNParams{OwnerID: owner, ArchiveSerialNumber: p.ArchiveSerialNumber}); lerr == nil {
-			taken.DocumentID = idString(r.ID)
+			taken.DocumentID, taken.Trashed = idString(r.ID), r.DeletedAt != nil
 		}
 		return nil, taken
 	}
@@ -245,10 +344,37 @@ func (s *Store) PatchDocument(ctx context.Context, sc Scope, id string, p Docume
 // so the audit records an admin's change of another user's documents
 // with their ownerId either way; outside the scope (a non-admin naming
 // another user) nothing matches.
+//
+// Fingerprint is required with Match in BulkUpdateDocuments and refused
+// otherwise: the BulkMatch.Fingerprint of the dry run whose count the
+// user confirmed. The change is applied only when its matches are exactly
+// that set (else a *MatchChangedError), so a document that started or
+// stopped matching since the count is never changed unseen.
+//
+// Action is what the change does (BulkUpdate when empty); the
+// fingerprint is bound to it, so CountBulkMatches needs the same one. A
+// Match for BulkRestore and BulkPurge must have Trashed set (it selects
+// the trash), one for BulkUpdate and BulkTrash must not; a purge by Match
+// needs Owner, so "empty trash" is always one user's trash.
 type BulkSelection struct {
-	IDs   []string
-	Match *search.Query
-	Owner *int64
+	IDs         []string
+	Match       *search.Query
+	Owner       *int64
+	Fingerprint string
+	Action      BulkAction
+}
+
+// check validates the action and its match: the normalised action, or a
+// *ValidationError (ErrInvalid) for "selection".
+func (sel BulkSelection) check() (BulkAction, error) {
+	a, ok := sel.Action.normal()
+	if !ok {
+		return "", invalid("selection")
+	}
+	if sel.Match != nil && (sel.Match.Trashed != a.onTrash() || a == BulkPurge && sel.Owner == nil) {
+		return "", invalid("selection")
+	}
+	return a, nil
 }
 
 // matchScope is the scope a match of sel is resolved and locked in: sc,
@@ -311,6 +437,10 @@ type BulkMatch struct {
 	// Owners is the number of owners among them; 0 when Count is above
 	// MaxBulkMatches (not counted).
 	Owners int
+	// Fingerprint names the matched set (matchFingerprint) for
+	// BulkSelection.Fingerprint; empty when Count is above
+	// MaxBulkMatches, since such a change is refused anyway.
+	Fingerprint string
 }
 
 // resolvedMatch holds a search's arguments, resolved once before the
@@ -324,7 +454,8 @@ func (s *Store) resolveMatch(ctx context.Context, sc Scope, q search.Query) (res
 	if err := q.CheckLimits(); err != nil {
 		return resolvedMatch{}, err
 	}
-	m := resolvedMatch{args: searchArgs{Owner: sc.owner()}}
+	now, ret := s.trashClock()
+	m := resolvedMatch{args: searchArgs{Owner: sc.owner(), Trashed: q.Trashed, Now: now, RetentionUs: ret.Microseconds()}}
 	if q.HasText() {
 		tsq, err := s.searchTsquery(ctx, sc, q.Text)
 		if err != nil {
@@ -340,19 +471,20 @@ func (s *Store) resolveMatch(ctx context.Context, sc Scope, q search.Query) (res
 }
 
 // match runs the search of m on d: the matches in id order, at most
-// MaxBulkMatches+1, and the number of all of them.
-func (s *Store) match(ctx context.Context, d db.DBTX, m resolvedMatch) ([]db.MatchDocumentIDsRow, int, error) {
+// MaxBulkMatches+1, and the number of all of them. With only, a non-nil
+// list, it returns only matches among those IDs.
+func (s *Store) match(ctx context.Context, d guardedDB, m resolvedMatch, only []pgtype.UUID) ([]db.MatchDocumentIDsRow, int, error) {
 	if m.none {
 		return nil, 0, nil
 	}
 	a := m.args
 	rows, err := db.New(s.searchDB(d)).MatchDocumentIDs(ctx, db.MatchDocumentIDsParams{
-		Owner: a.Owner, Query: a.Query, TagGroupCount: a.TagGroupCount, TagGroups: a.TagGroups, TagIds: a.TagIds,
+		Owner: a.Owner, Trashed: a.Trashed, RetentionUs: a.RetentionUs, Now: a.Now, Query: a.Query, TagGroupCount: a.TagGroupCount, TagGroups: a.TagGroups, TagIds: a.TagIds,
 		NotTagIds: a.NotTagIds, Correspondents: a.Correspondents, NotCorrespondents: a.NotCorrespondents,
 		Types: a.Types, NotTypes: a.NotTypes, Asns: a.Asns, NotAsns: a.NotAsns, DateFrom: a.DateFrom,
 		DateTo: a.DateTo, NotDateFrom: a.NotDateFrom, NotDateTo: a.NotDateTo, AddedFrom: a.AddedFrom,
 		AddedTo: a.AddedTo, NotAddedFrom: a.NotAddedFrom, NotAddedTo: a.NotAddedTo, Inbox: a.Inbox,
-		Favorite: a.Favorite, Lim: MaxBulkMatches + 1,
+		Favorite: a.Favorite, OnlyIds: only, Lim: MaxBulkMatches + 1,
 	})
 	if err != nil || len(rows) == 0 {
 		return nil, 0, err
@@ -363,43 +495,54 @@ func (s *Store) match(ctx context.Context, d db.DBTX, m resolvedMatch) ([]db.Mat
 // CountBulkMatches tells what a bulk change by sel.Match (and sel.Owner)
 // in the scope would cover, without changing anything: the dry run the UI
 // shows before it asks for confirmation. It uses the same resolution as
-// BulkUpdateDocuments.
+// BulkUpdateDocuments, and its fingerprint is for sel.Action.
 func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelection) (BulkMatch, error) {
-	if sel.Match == nil || sel.IDs != nil {
+	if sel.Match == nil || sel.IDs != nil || sel.Fingerprint != "" {
 		return BulkMatch{}, invalid("selection")
+	}
+	action, err := sel.check()
+	if err != nil {
+		return BulkMatch{}, err
 	}
 	msc, ok := sel.matchScope(sc)
 	if !ok {
-		return BulkMatch{}, nil
+		return BulkMatch{Fingerprint: matchFingerprint(action, nil)}, nil
 	}
 	m, err := s.resolveMatch(ctx, msc, *sel.Match)
 	if err != nil {
 		return BulkMatch{}, err
 	}
-	rows, total, err := s.match(ctx, s.pool, m)
+	rows, total, err := s.match(ctx, s.g, m, nil)
 	if err != nil {
 		return BulkMatch{}, err
 	}
 	out := BulkMatch{Count: total}
 	if total <= MaxBulkMatches {
 		owners := map[int64]bool{}
-		for _, r := range rows {
+		ids := make([]pgtype.UUID, len(rows))
+		for i, r := range rows {
 			owners[r.OwnerID] = true
+			ids[i] = r.ID
 		}
 		out.Owners = len(owners)
+		out.Fingerprint = matchFingerprint(action, ids)
 	}
 	return out, nil
 }
 
-// BulkUpdateDocuments applies c to the documents of sel, all or nothing,
+// BulkUpdateDocuments applies c (or sel.Action: trash, restore, purge,
+// which take no fields) to the documents of sel, all or nothing,
 // in one transaction, and returns the IDs of the changed documents in id
 // order. It locks the documents in id order (so two bulk changes over
 // overlapping sets wait for each other); by search it then runs the
-// search again and keeps only the locked documents that still match, so a
-// document changed between the match and the lock so that it no longer
-// matches is left alone. It checks them, removes and adds the
+// search again over the locked documents and keeps those that still
+// match, so a document changed between the match and the lock so that it
+// no longer matches is left alone (one that matches only now is not
+// added). By search, the documents left must then be exactly the set of
+// sel.Fingerprint, the dry run the user confirmed; otherwise nothing
+// changes (*MatchChangedError). It checks them, removes and adds the
 // tags (adding a tag a document has, or removing one it lacks, is no
-// error), sets the fields and touches modified_at of every one.
+// error), sets the fields and advances modified_at of every one.
 //
 // The audit entry of ctx is the summary: the store adds count and ids; the caller
 // sets the rest. With it, each document gets an entry of its own
@@ -408,21 +551,39 @@ func (s *Store) CountBulkMatches(ctx context.Context, sc Scope, sel BulkSelectio
 // sc.UserID, also with sel.Owner).
 //
 // Errors: a *ValidationError (ErrInvalid) for an empty selection, both or
-// neither of IDs and Match, nothing to change, or a tag both added and
-// removed; a *TooManyError (ErrTooMany) above MaxBulkIDs or
+// neither of IDs and Match, nothing to change (or fields with a trash
+// action), a match whose Trashed does not fit the action, a purge by
+// match without Owner, or a tag both added and removed; ErrInTrash when
+// update or trash meets a trashed document, ErrNotInTrash when restore
+// or purge meets a live one, ErrNotFound for one due for purge (by IDs,
+// checked under the lock); a *TooManyError (ErrTooMany) above MaxBulkIDs or
 // MaxBulkMatches; ErrNotFound when an ID is not in the scope;
 // ErrSeveralOwners when tags, a correspondent or a type are set on
-// documents of several owners; ErrOwnerMismatch for a tag to add, a
+// documents of several owners; a *MatchChangedError (ErrMatchChanged)
+// when the matches are not the set of sel.Fingerprint (checked after the
+// limit, so a set that grew past it is a *TooManyError);
+// ErrOwnerMismatch for a tag to add, a
 // correspondent or a type that is not the owner's (a tag to remove that
-// the documents do not have is no error). A deadlock, for example
-// with a concurrent delete of one of the tags, is retried (see
-// retryDeadlock), then ErrRetry. A search that matches nothing changes
-// nothing and writes no audit entry.
+// the documents do not have is no error). A search that matches nothing
+// changes nothing and writes no audit entry when its dry run matched
+// nothing too.
+//
+// Write lock (ownerTx): the owners' gates and write locks come first, in
+// ascending id. By IDs they are the owners of the IDs in the scope (read
+// before the transaction; none means ErrNotFound); by search in a scope
+// of one owner that owner, before the match; by search in an admin's
+// scope over all owners the owners of the first match, which runs before
+// the transaction (with the limit and an empty match answered there).
+// Every locked document's owner must be one of them.
 func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelection, c BulkChange, perDocument string) ([]string, error) {
-	if (sel.IDs == nil) == (sel.Match == nil) {
+	if (sel.IDs == nil) == (sel.Match == nil) || (sel.Match != nil) == (sel.Fingerprint == "") {
 		return nil, invalid("selection")
 	}
-	if len(c.Fields()) == 0 {
+	action, err := sel.check()
+	if err != nil {
+		return nil, err
+	}
+	if (len(c.Fields()) == 0) == (action == BulkUpdate) {
 		return nil, invalid("fields")
 	}
 	add, err := parseLinks(c.AddTags)
@@ -449,6 +610,7 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 
 	var ids []pgtype.UUID
 	var m resolvedMatch
+	now, ret := s.trashClock()
 	lsc := sc // the scope the documents are locked in
 	if sel.Match != nil {
 		var ok bool
@@ -458,6 +620,7 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 		if m, err = s.resolveMatch(ctx, lsc, *sel.Match); err != nil {
 			return nil, err
 		}
+		m.args.Now, m.args.RetentionUs = now, ret.Microseconds()
 	} else {
 		if sel.Owner != nil {
 			return nil, invalid("selection")
@@ -481,91 +644,119 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 		}
 	}
 
-	var changed []string
-	err = s.retryDeadlock(func() error {
-		changed = nil
-		return s.inTxWith(ctx, func(tx pgx.Tx, q *db.Queries) error {
-			want := ids
-			if sel.Match != nil {
-				rows, total, err := s.match(ctx, tx, m)
-				if err != nil {
-					return err
-				}
-				if total > MaxBulkMatches {
-					return &TooManyError{Count: total, Limit: MaxBulkMatches}
-				}
-				if total == 0 {
-					return errNothingMatched
-				}
-				want = make([]pgtype.UUID, len(rows))
-				for i, r := range rows {
-					want[i] = r.ID
-				}
+	// The owners to gate and lock (ownerTx). By IDs they are read first;
+	// in an admin's scope over all owners the first match runs first, on
+	// the pool, and gives them; in a scope of one owner it is that owner,
+	// and the match runs under the lock.
+	var owners []int64
+	switch {
+	case sel.Match != nil && lsc.owner() != nil:
+		owners = []int64{*lsc.owner()}
+	case sel.Match != nil:
+		rows, total, err := s.match(ctx, s.g, m, nil)
+		if err != nil {
+			return nil, mapErr(err)
+		}
+		if total > MaxBulkMatches {
+			return nil, &TooManyError{Count: total, Limit: MaxBulkMatches}
+		}
+		if total == 0 {
+			if err := confirmMatch(action, sel.Fingerprint, nil); !errors.Is(err, errNothingMatched) {
+				return nil, err
 			}
-			beforeLock(ctx)
-			locked, err := q.LockDocuments(ctx, db.LockDocumentsParams{Ids: want, Owner: lsc.owner()})
+			return []string{}, nil
+		}
+		ids = make([]pgtype.UUID, len(rows))
+		owners = make([]int64, len(rows))
+		for i, r := range rows {
+			ids[i], owners[i] = r.ID, r.OwnerID
+		}
+		beforeLock(ctx)
+	default:
+		if owners, err = s.q.DocumentOwners(ctx, db.DocumentOwnersParams{Ids: ids, Owner: lsc.owner()}); err != nil {
+			return nil, mapErr(err)
+		}
+		if len(owners) == 0 {
+			return nil, ErrNotFound
+		}
+		beforeLock(ctx)
+	}
+
+	var changed []string
+	err = s.ownerTx(ctx, owners, func(ctx context.Context, t *writeTx) error {
+		q := t.q
+		want := ids
+		if sel.Match != nil && lsc.owner() != nil {
+			// In a scope of one owner the lock comes first, so the
+			// match already sees that owner's documents as they will
+			// be changed.
+			rows, total, err := s.match(ctx, t.g, m, nil)
 			if err != nil {
 				return err
 			}
-			afterLock(ctx)
-			if sel.Match != nil {
-				// The match ran before the lock under READ COMMITTED: a
-				// concurrent change committed in between may have taken a
-				// document out of it. Run it again now that the documents
-				// are locked (the statement sees every change committed
-				// before the lock, and the lock keeps them as they are)
-				// and keep the locked ones that still match; a match
-				// deleted before the lock is left out too. Documents that
-				// match only now were not part of the selection.
-				locked, err = s.stillMatching(ctx, tx, m, locked)
-				if err != nil {
-					return err
-				}
-			} else if len(locked) != len(want) {
-				// By IDs, every one must exist.
-				return ErrNotFound
+			if total > MaxBulkMatches {
+				return &TooManyError{Count: total, Limit: MaxBulkMatches}
 			}
-			if len(locked) == 0 {
-				return errNothingMatched
+			if total == 0 {
+				return confirmMatch(action, sel.Fingerprint, nil)
 			}
-			got := make([]pgtype.UUID, len(locked))
-			owners := map[int64]bool{}
-			for i, l := range locked {
-				got[i] = l.ID
-				owners[l.OwnerID] = true
+			want = make([]pgtype.UUID, len(rows))
+			for i, r := range rows {
+				want[i] = r.ID
 			}
-			if c.needsOneOwner() && len(owners) > 1 {
-				return ErrSeveralOwners
+			beforeLock(ctx)
+		}
+		locked, err := q.LockDocuments(ctx, db.LockDocumentsParams{Ids: want, Owner: lsc.owner()})
+		if err != nil {
+			return err
+		}
+		afterLock(ctx)
+		if sel.Match != nil {
+			// The match ran before the documents were locked under READ
+			// COMMITTED. In an admin's scope over all owners it also ran
+			// before the gate and the owner locks, on the pool, and SQL
+			// outside the store does not take them at all: a change
+			// committed in between may have taken a document out of it.
+			// Run it again now that the documents are locked (the
+			// statement sees every change committed before the lock, and
+			// the lock keeps them as they are) and keep the locked ones
+			// that still match; a match deleted before the lock is left
+			// out too. Documents that match only now were not part of the
+			// selection.
+			locked, err = s.stillMatching(ctx, t.g, m, locked)
+			if err != nil {
+				return err
 			}
-			// Tags to add must be the owner's (the foreign key would also
-			// refuse them). Tags to remove need no check: a document
-			// links only its owner's tags, so another owner's tag, or one
-			// deleted meanwhile (a retry after a deadlock with its
-			// delete), is simply not there.
-			if len(add) > 0 {
-				n, err := q.CountOwnedTags(ctx, db.CountOwnedTagsParams{OwnerID: locked[0].OwnerID, Ids: add})
-				if err != nil {
-					return err
-				}
-				if n != int64(len(add)) {
-					return ErrOwnerMismatch
-				}
+			// Only exactly the set the user confirmed is changed.
+			if err := confirmMatch(action, sel.Fingerprint, locked); err != nil {
+				return err
 			}
-			if len(remove) > 0 {
-				if err := q.BulkRemoveDocumentTags(ctx, db.BulkRemoveDocumentTagsParams{Ids: got, TagIds: remove}); err != nil {
-					return err
-				}
+		} else if len(locked) != len(want) {
+			// By IDs, every one must exist.
+			return ErrNotFound
+		}
+		if len(locked) == 0 {
+			return errNothingMatched
+		}
+		got := make([]pgtype.UUID, len(locked))
+		owners := map[int64]bool{}
+		for i, l := range locked {
+			got[i] = l.ID
+			owners[l.OwnerID] = true
+			if err := t.holds(l.OwnerID); err != nil {
+				return err
 			}
-			if len(add) > 0 {
-				if err := q.BulkAddDocumentTags(ctx, db.BulkAddDocumentTagsParams{Ids: got, TagIds: add}); err != nil {
-					return err
-				}
+		}
+		// Every document must be in the state the action works on: one
+		// in the wrong state fails the whole change. By search the match
+		// already selected the live documents or the trash.
+		for _, l := range locked {
+			if err := action.checkState(trashStateOf(l.DeletedAt, l.PurgeAt, now, ret)); err != nil {
+				return err
 			}
-			if err := q.BulkUpdateDocuments(ctx, db.BulkUpdateDocumentsParams{
-				Ids: got, IsFavorite: c.IsFavorite, IsInbox: c.IsInbox,
-				SetCorrespondent: c.SetCorrespondent, CorrespondentID: corr,
-				SetDocumentType: c.SetDocumentType, DocumentTypeID: typ,
-			}); err != nil {
+		}
+		if action != BulkUpdate {
+			if err := applyTrash(ctx, q, action, got, now); err != nil {
 				return err
 			}
 			for _, l := range locked {
@@ -573,7 +764,45 @@ func (s *Store) BulkUpdateDocuments(ctx context.Context, sc Scope, sel BulkSelec
 			}
 			auditBulk(ctx, sc.UserID, locked, perDocument)
 			return nil
-		})
+		}
+		if c.needsOneOwner() && len(owners) > 1 {
+			return ErrSeveralOwners
+		}
+		// Tags to add must be the owner's (the foreign key would also
+		// refuse them). Tags to remove need no check: a document
+		// links only its owner's tags, so another owner's tag, or one
+		// deleted before the owner lock, is simply not there.
+		if len(add) > 0 {
+			n, err := q.CountOwnedTags(ctx, db.CountOwnedTagsParams{OwnerID: locked[0].OwnerID, Ids: add})
+			if err != nil {
+				return err
+			}
+			if n != int64(len(add)) {
+				return ErrOwnerMismatch
+			}
+		}
+		if len(remove) > 0 {
+			if err := q.BulkRemoveDocumentTags(ctx, db.BulkRemoveDocumentTagsParams{Ids: got, TagIds: remove}); err != nil {
+				return err
+			}
+		}
+		if len(add) > 0 {
+			if err := q.BulkAddDocumentTags(ctx, db.BulkAddDocumentTagsParams{Ids: got, TagIds: add}); err != nil {
+				return err
+			}
+		}
+		if err := q.BulkUpdateDocuments(ctx, db.BulkUpdateDocumentsParams{
+			Ids: got, IsFavorite: c.IsFavorite, IsInbox: c.IsInbox,
+			SetCorrespondent: c.SetCorrespondent, CorrespondentID: corr,
+			SetDocumentType: c.SetDocumentType, DocumentTypeID: typ,
+		}); err != nil {
+			return err
+		}
+		for _, l := range locked {
+			changed = append(changed, idString(l.ID))
+		}
+		auditBulk(ctx, sc.UserID, locked, perDocument)
+		return nil
 	})
 	if errors.Is(err, errNothingMatched) {
 		return []string{}, nil
@@ -599,10 +828,41 @@ func beforeLock(ctx context.Context) {
 // so no audit entry is written.
 var errNothingMatched = errors.New("store: nothing matched")
 
+// confirmMatch compares the documents a change by search would cover now
+// with the confirmed set's fingerprint: a *MatchChangedError when they
+// differ, errNothingMatched when both are empty, else nil. It runs inside
+// the transaction, so an error rolls everything back and no audit entry is
+// written.
+func confirmMatch(a BulkAction, fingerprint string, now []db.LockDocumentsRow) error {
+	ids := make([]pgtype.UUID, len(now))
+	for i, l := range now {
+		ids[i] = l.ID
+	}
+	if matchFingerprint(a, ids) != fingerprint {
+		return &MatchChangedError{Count: len(now)}
+	}
+	if len(now) == 0 {
+		return errNothingMatched
+	}
+	return nil
+}
+
 // stillMatching returns the rows of locked that the search of m matches
-// now, in their order.
-func (s *Store) stillMatching(ctx context.Context, tx pgx.Tx, m resolvedMatch, locked []db.LockDocumentsRow) ([]db.LockDocumentsRow, error) {
-	rows, _, err := s.match(ctx, tx, m)
+// now, in their order. The search runs over the locked IDs only: over the
+// whole scope, documents that started matching after the first match
+// would count against the limit and could push locked ones past it, which
+// would then be left out without an error. Those new matches were not
+// part of the selection the caller confirmed, so they neither join it nor
+// make it fail (architecture.md, bulk "Locking").
+func (s *Store) stillMatching(ctx context.Context, g guardedDB, m resolvedMatch, locked []db.LockDocumentsRow) ([]db.LockDocumentsRow, error) {
+	if len(locked) == 0 {
+		return locked, nil
+	}
+	only := make([]pgtype.UUID, len(locked))
+	for i, l := range locked {
+		only[i] = l.ID
+	}
+	rows, _, err := s.match(ctx, g, m, only)
 	if err != nil {
 		return nil, err
 	}

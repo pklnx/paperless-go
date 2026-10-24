@@ -7,8 +7,11 @@ package ui
 
 import (
 	"embed"
+	"io"
 	"io/fs"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -16,25 +19,64 @@ import (
 var dist embed.FS
 
 // contentSecurityPolicy for the UI: only same-origin scripts, styles and
-// requests.
+// requests. The PDF viewer (pdf.js) works under it unchanged: its worker is
+// a file of the build (workers fall back to script-src), its data files are
+// under /assets/, it needs no eval, and it runs without WebAssembly (which
+// would need 'wasm-unsafe-eval'). TestContentSecurityPolicy pins this.
 const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
 	"connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 // permissionsPolicy turns off browser features the UI never uses.
 const permissionsPolicy = "camera=(), microphone=(), geolocation=()"
 
-// Handler serves index.html at "/" and the hashed build assets at
-// "/assets/".
+// rootFiles are served from the build root (web/public): the web app manifest
+// and its icons, which browsers fetch by fixed names. Each is served only at
+// its exact path; nothing else of the build root is served by name.
+var rootFiles = map[string]string{
+	"/manifest.webmanifest":  "application/manifest+json",
+	"/favicon-32.png":        "image/png",
+	"/apple-touch-icon.png":  "image/png",
+	"/icon-192.png":          "image/png",
+	"/icon-512.png":          "image/png",
+	"/icon-maskable-512.png": "image/png",
+}
+
+// RootPaths are the request paths of the rootFiles, sorted, for the server's
+// routes.
+func RootPaths() []string {
+	return slices.Sorted(maps.Keys(rootFiles))
+}
+
+// Handler serves index.html at "/", the hashed build assets at "/assets/" and
+// the rootFiles, all from the embedded build.
 func Handler() http.Handler {
 	files, err := fs.Sub(dist, "dist")
 	if err != nil {
 		panic(err)
 	}
+	return handler(files)
+}
+
+// handler serves the UI from files, the root of a build (dist).
+func handler(files fs.FS) http.Handler {
 	index, err := fs.ReadFile(files, "index.html")
 	if err != nil {
 		index = nil // UI not built
 	}
-	assets := http.FileServerFS(files)
+	// /assets/ is served from the build's assets folder only, so no path
+	// under it reaches a file outside that folder.
+	assetFiles, err := fs.Sub(files, "assets")
+	if err != nil {
+		panic(err)
+	}
+	// The rootFiles are read once here, so a request only picks one of them
+	// by its exact path and never names a file.
+	root := map[string][]byte{}
+	for _, path := range RootPaths() {
+		if data, err := fs.ReadFile(files, strings.TrimPrefix(path, "/")); err == nil {
+			root[path] = data
+		}
+	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -42,13 +84,23 @@ func Handler() http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Permissions-Policy", permissionsPolicy)
 		h.Set("Cross-Origin-Resource-Policy", "same-origin")
-		if strings.HasPrefix(r.URL.Path, "/assets/") {
-			// File names contain a content hash, so they never change.
-			h.Set("Cache-Control", "public, max-age=31536000, immutable")
-			assets.ServeHTTP(w, r)
+		// Every answer is revalidated, except a file under /assets/ (serveAsset).
+		h.Set("Cache-Control", "no-cache")
+		if name, ok := strings.CutPrefix(r.URL.Path, "/assets/"); ok {
+			serveAsset(w, r, assetFiles, name)
 			return
 		}
-		h.Set("Cache-Control", "no-cache")
+		if typ, ok := rootFiles[r.URL.Path]; ok {
+			data, ok := root[r.URL.Path]
+			if !ok {
+				// Not in this build: an icon URL answering HTML helps nobody.
+				http.NotFound(w, r)
+				return
+			}
+			h.Set("Content-Type", typ)
+			_, _ = w.Write(data)
+			return
+		}
 		if index == nil {
 			h.Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -58,4 +110,36 @@ func Handler() http.Handler {
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(index)
 	})
+}
+
+// serveAsset serves name, a path below the build's assets folder, when it is
+// a regular file there. Anything else (a directory, a missing file, a path
+// with dot segments) answers 404 with the no-cache header the caller set: no
+// listing, no redirect. Only the file itself is cached for a year.
+//
+// So a non-200 answer under /assets/ carries no-cache, with three exceptions
+// that come from http.ServeContent after the file was found: a 416 (range not
+// satisfiable) has no Cache-Control, and a 304 or 412 (conditional request)
+// keeps immutable. A 206 is a part of the same file and keeps it too.
+func serveAsset(w http.ResponseWriter, r *http.Request, assets fs.FS, name string) {
+	if !fs.ValidPath(name) {
+		http.NotFound(w, r)
+		return
+	}
+	f, err := assets.Open(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	// embed.FS and fstest.MapFS files are seekers.
+	content, seekable := f.(io.ReadSeeker)
+	if err != nil || !st.Mode().IsRegular() || !seekable {
+		http.NotFound(w, r)
+		return
+	}
+	// File names contain a content hash, so they never change.
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	http.ServeContent(w, r, name, st.ModTime(), content)
 }

@@ -8,8 +8,14 @@
     <meta name="color-scheme" content="light dark" />
     <!-- Browser and status bar color; theme.ts sets both to the chosen theme. -->
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
-    <link rel="icon" type="image/svg+xml" href="/src/logo.svg" />
+    <meta name="theme-color" content="#161616" media="(prefers-color-scheme: dark)" />
+    <!-- Browsers take the last suitable icon: the SVG tile where supported,
+         the PNG as the fallback (Safari). -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/svg+xml" href="/src/brand/paperless-go-tile.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="paperless-go" />
     <title>paperless-go</title>
   </head>
   <body>

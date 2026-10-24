@@ -73,8 +73,8 @@ export function PasswordForm({ done }: { done: () => void }) {
 export function ProfilePage({ user }: { user: User }) {
   const [changed, setChanged] = useState(false);
   return (
-    <div className="mx-auto flex w-full max-w-md flex-col gap-4 px-4 py-8">
-      <h2 className="text-lg font-semibold">{t.profile}</h2>
+    <div className="legacy mx-auto flex w-full max-w-md flex-col gap-4 px-4 py-8">
+      <h2 tabIndex={-1} className="text-lg font-semibold outline-none">{t.profile}</h2>
       <p className="text-sm text-ink-muted">{t.loggedInAs(user.name)}</p>
       <section className="flex flex-col gap-3 rounded-lg border border-line p-4">
         <h3 className="font-semibold">{t.changePassword}</h3>

@@ -35,17 +35,33 @@ const (
 	codeTooMany         = "too_many_documents"
 	codeSeveralOwners   = "several_owners"
 	codeTagAddRemove    = "tag_add_and_remove"
+	codeMatchChanged    = "match_changed"
+	codeDocChanged      = "document_changed"
+	codeInvalidAction   = "invalid_action"
 )
 
 // documentError is a refused document change: a fixed message and a code,
-// with the document holding a taken ASN, or the count and limit of a
-// selection that is too large.
+// with the document holding a taken ASN, the count and limit of a
+// selection that is too large, or the current modifiedAt of a document
+// changed meanwhile.
 type documentError struct {
 	Error      string `json:"error"`
 	Code       string `json:"code"`
 	DocumentID string `json:"documentId,omitempty"`
-	Matched    int    `json:"matched,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
+	// Trashed: the document of DocumentID (asn_taken) is in the trash.
+	Trashed    bool       `json:"trashed,omitempty"`
+	Matched    int        `json:"matched,omitempty"`
+	Limit      int        `json:"limit,omitempty"`
+	ModifiedAt *time.Time `json:"modifiedAt,omitempty"`
+}
+
+// matchChangedJSON is the 409 of a change by search whose matches are no
+// longer the confirmed set. Matched (the number the change would cover
+// now, informational) is sent also when it is 0.
+type matchChangedJSON struct {
+	Error   string `json:"error"`
+	Code    string `json:"code"`
+	Matched int    `json:"matched"`
 }
 
 // refuseDocument answers 400 with code and msg.
@@ -57,12 +73,29 @@ func (s *Server) refuseDocument(w http.ResponseWriter, code, msg string) {
 func (s *Server) failDocument(w http.ResponseWriter, r *http.Request, err error) {
 	var taken *store.ASNTakenError
 	var tooMany *store.TooManyError
+	var matchChanged *store.MatchChangedError
 	var ve *store.ValidationError
+	var docChanged *store.DocumentChangedError
 	switch {
+	case errors.As(err, &matchChanged):
+		s.writeJSON(w, http.StatusConflict, matchChangedJSON{
+			Error: "the matches of the search changed since they were counted", Code: codeMatchChanged, Matched: matchChanged.Count,
+		})
+	case errors.As(err, &docChanged):
+		s.writeJSON(w, http.StatusConflict, documentError{
+			Error: "the document was changed meanwhile", Code: codeDocChanged, ModifiedAt: &docChanged.ModifiedAt,
+		})
 	case errors.As(err, &taken):
 		s.writeJSON(w, http.StatusConflict, documentError{
 			Error: "another document has this archive serial number", Code: codeASNTaken, DocumentID: taken.DocumentID,
+			Trashed: taken.Trashed,
 		})
+	case errors.Is(err, store.ErrInTrash):
+		s.writeJSON(w, http.StatusConflict, documentError{Error: "the document is in the trash", Code: codeInTrash})
+	case errors.Is(err, store.ErrNotInTrash):
+		s.writeJSON(w, http.StatusConflict, documentError{Error: "the document is not in the trash", Code: codeNotInTrash})
+	case errors.As(err, &ve) && ve.Field == "selection":
+		s.refuseDocument(w, codeInvalidSelect, "the selection does not fit the action")
 	case errors.Is(err, store.ErrOwnerMismatch):
 		s.refuseDocument(w, codeOwnerMismatch, "a tag, correspondent or document type is not one of the document owner's")
 	case errors.As(err, &tooMany):
@@ -91,7 +124,10 @@ func (s *Server) failDocument(w http.ResponseWriter, r *http.Request, err error)
 // documentPatchJSON is the body of PATCH /api/documents/{id}: every field
 // is optional, and only the fields sent change. null clears
 // archiveSerialNumber, correspondentId and documentTypeId; tagIds replaces
-// the tags. null for any other field is refused.
+// the tags. null for any other field is refused. expectedModifiedAt is no
+// field to change but a precondition: the modifiedAt exactly as GET or the
+// last PATCH answered it (RFC 3339); when the document's modifiedAt is
+// another, nothing changes and the answer is 409 document_changed.
 type documentPatchJSON struct {
 	Title               optional[string]    `json:"title"`
 	DocumentDate        optional[time.Time] `json:"documentDate"`
@@ -102,6 +138,7 @@ type documentPatchJSON struct {
 	CorrespondentID     optional[string]    `json:"correspondentId"`
 	DocumentTypeID      optional[string]    `json:"documentTypeId"`
 	TagIDs              optional[[]string]  `json:"tagIds"`
+	ExpectedModifiedAt  optional[time.Time] `json:"expectedModifiedAt"`
 }
 
 // patch turns the body into a store patch; the name of a refused field is
@@ -115,6 +152,7 @@ func (in documentPatchJSON) patch() (store.DocumentPatch, string) {
 		{"title", in.Title.Set, in.Title.Null}, {"documentDate", in.DocumentDate.Set, in.DocumentDate.Null},
 		{"notes", in.Notes.Set, in.Notes.Null}, {"isFavorite", in.IsFavorite.Set, in.IsFavorite.Null},
 		{"isInbox", in.IsInbox.Set, in.IsInbox.Null}, {"tagIds", in.TagIDs.Set, in.TagIDs.Null},
+		{"expectedModifiedAt", in.ExpectedModifiedAt.Set, in.ExpectedModifiedAt.Null},
 	} {
 		if f.set && f.null {
 			return p, f.name
@@ -159,6 +197,9 @@ func (in documentPatchJSON) patch() (store.DocumentPatch, string) {
 			p.TagIDs = []string{}
 		}
 	}
+	if in.ExpectedModifiedAt.Set {
+		p.ExpectedModifiedAt = &in.ExpectedModifiedAt.Value
+	}
 	return p, ""
 }
 
@@ -170,8 +211,11 @@ func (in documentPatchJSON) patch() (store.DocumentPatch, string) {
 // input (owner_mismatch for a link to a row that is not the document
 // owner's, invalid_title, invalid_notes, invalid_asn, invalid_field,
 // nothing_to_change), 404 outside the scope, 409 asn_taken naming the
-// document that has the number, 503 without the audit log or after
-// repeated deadlocks (Retry-After).
+// document that has the number, 409 document_changed with the current
+// modifiedAt when expectedModifiedAt no longer holds, 409 in_trash for a
+// document in the trash, 503 without the audit log,
+// after a deadlock with SQL outside the store (Retry-After: 1) or when
+// another change of the owner ran longer than ownerWait (Retry-After: 5).
 func (s *Server) handlePatchDocument(w http.ResponseWriter, r *http.Request) {
 	if !s.documentsAvailable(w, r) {
 		return
@@ -227,6 +271,9 @@ type bulkMatchJSON struct {
 	Favorite      *bool    `json:"favorite"`
 	Owner         string   `json:"owner"`
 	TZ            string   `json:"tz"`
+	// Trashed selects the trash (the list's trashed=true): required for
+	// the actions restore and purge, refused for the others.
+	Trashed bool `json:"trashed"`
 }
 
 // values is m as the list's query parameters.
@@ -254,6 +301,9 @@ func (m *bulkMatchJSON) values() url.Values {
 	}
 	if m.TZ != "" {
 		v.Set("tz", m.TZ)
+	}
+	if m.Trashed {
+		v.Set("trashed", "true")
 	}
 	return v
 }
@@ -284,6 +334,13 @@ type bulkJSON struct {
 	// DryRun (only with match) changes nothing and answers what the
 	// search covers.
 	DryRun bool `json:"dryRun"`
+	// Fingerprint is required with match without dryRun and refused
+	// otherwise: the dry run's fingerprint, passed back unchanged. It is
+	// bound to the action of its dry run.
+	Fingerprint string `json:"fingerprint"`
+	// Action is trash, restore or purge; absent (or update) means the
+	// field change below. The trash actions take no fields.
+	Action string `json:"action"`
 
 	AddTags       []string         `json:"addTags"`
 	RemoveTags    []string         `json:"removeTags"`
@@ -303,13 +360,30 @@ type bulkJSON struct {
 // inbox, favorite. Tags, or a correspondent or type to set, need
 // documents of a single owner (400 several_owners).
 //
-// With dryRun and match it answers {matched, owners, limit} and changes
-// nothing: the count the UI confirms before sending the change. Otherwise
-// {updated}: the number of changed documents (0 for a search without
-// matches). A change writes document.bulk_update (count, fields,
+// With dryRun and match it answers {matched, owners, limit, fingerprint}
+// and changes nothing: the count the UI confirms before sending the
+// change (fingerprint is left out above the limit). A change by match must
+// send that fingerprint (else 400 invalid_selection, as is a fingerprint
+// with ids or dryRun); it is applied only when the matches are still
+// exactly the counted set, else 409 match_changed with matched (the
+// number it would cover now) and nothing changes: the client counts again
+// and asks again. Otherwise {updated}: the number of changed documents (0
+// for a search that matched nothing at its dry run either). A change writes document.bulk_update (count, fields,
 // selection, ids, the search for match, bulkRun) and one document.update
 // per document (fields, bulkRun, and ownerId for another user's
 // document), in the same transaction.
+//
+// action trash, restore or purge (no fields) moves the documents to the
+// trash, back, or asks for their permanent deletion: by ids every one must
+// be in the state the action works on (409 in_trash, not_in_trash), and
+// match.trashed must be true for restore and purge and false for trash
+// (400 invalid_selection). A purge by match needs match.owner ("empty
+// trash" is always one user's trash: owner me, also for an admin who sees
+// everyone's documents), else 400 invalid_selection. The dry run and its
+// fingerprint are for the action sent with them. Audit:
+// document.bulk_delete, bulk_restore or bulk_purge as the summary (count,
+// ids, selection, the search, bulkRun) and one document.delete, restore or
+// purge per document. Answers {updated} with the number of documents.
 func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 	if !s.documentsAvailable(w, r) {
 		return
@@ -326,7 +400,26 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 		s.refuseDocument(w, codeInvalidSelect, "dryRun needs match")
 		return
 	}
-	sel := store.BulkSelection{IDs: in.IDs}
+	if in.Fingerprint != "" && (in.Match == nil || in.DryRun) {
+		s.refuseDocument(w, codeInvalidSelect, "fingerprint goes only with a change by search")
+		return
+	}
+	audit, ok := bulkAudits[in.Action]
+	if !ok {
+		s.refuseDocument(w, codeInvalidAction, "action must be update, trash, restore or purge")
+		return
+	}
+	action := store.BulkAction(in.Action)
+	onTrash := action == store.BulkRestore || action == store.BulkPurge
+	if in.Match != nil && in.Match.Trashed != onTrash {
+		s.refuseDocument(w, codeInvalidSelect, "match.trashed must be true for restore and purge, and false otherwise")
+		return
+	}
+	if in.Match != nil && action == store.BulkPurge && in.Match.Owner == "" {
+		s.refuseDocument(w, codeInvalidSelect, "a purge by search needs match.owner (empty the trash of one user)")
+		return
+	}
+	sel := store.BulkSelection{IDs: in.IDs, Action: action}
 	sc := requestScope(r)
 	if in.Match != nil {
 		q, _, err := listQuery(in.Match.values())
@@ -346,6 +439,11 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 			sel.Owner = &osc.UserID
 		}
 		sel.Match = &q
+		if !in.DryRun && in.Fingerprint == "" {
+			s.refuseDocument(w, codeInvalidSelect, "a change by search needs the fingerprint of its dry run")
+			return
+		}
+		sel.Fingerprint = in.Fingerprint
 	}
 	if in.DryRun {
 		m, err := s.store.CountBulkMatches(r.Context(), sc, sel)
@@ -353,7 +451,7 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 			s.failDocument(w, r, err)
 			return
 		}
-		s.writeJSON(w, http.StatusOK, map[string]int{"matched": m.Count, "owners": m.Owners, "limit": store.MaxBulkMatches})
+		s.writeJSON(w, http.StatusOK, bulkDryRunJSON{Matched: m.Count, Owners: m.Owners, Limit: store.MaxBulkMatches, Fingerprint: m.Fingerprint})
 		return
 	}
 	if in.IDs != nil {
@@ -386,13 +484,19 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	fields := c.Fields()
-	if len(fields) == 0 {
+	switch {
+	case audit.fields && len(fields) == 0:
 		s.refuseDocument(w, codeNothingToChange, "nothing to change")
+		return
+	case !audit.fields && len(fields) > 0:
+		s.refuseDocument(w, codeInvalidField, "the action "+in.Action+" takes no fields")
 		return
 	}
 
-	e := s.auditEntry(r, "document.bulk_update")
-	e.Detail("fields", fields)
+	e := s.auditEntry(r, audit.summary)
+	if audit.fields {
+		e.Detail("fields", fields)
+	}
 	e.Detail("bulkRun", newBulkRun())
 	if in.Match != nil {
 		e.Detail("selection", "match")
@@ -400,12 +504,39 @@ func (s *Server) handleBulkDocuments(w http.ResponseWriter, r *http.Request) {
 	} else {
 		e.Detail("selection", "ids")
 	}
-	changed, err := s.store.BulkUpdateDocuments(withAudit(r, e), sc, sel, c, "document.update")
+	changed, err := s.store.BulkUpdateDocuments(withAudit(r, e), sc, sel, c, audit.perDocument)
 	if err != nil {
 		s.failDocument(w, r, err)
 		return
 	}
+	if action == store.BulkPurge && len(changed) > 0 {
+		s.wakeSweeper()
+	}
 	s.writeJSON(w, http.StatusOK, map[string]int{"updated": len(changed)})
+}
+
+// bulkAudit names the audit actions of a bulk action, and whether it
+// takes fields.
+type bulkAudit struct {
+	summary, perDocument string
+	fields               bool
+}
+
+// bulkAudits are the bulk actions by their name in the body.
+var bulkAudits = map[string]bulkAudit{
+	"":                        {"document.bulk_update", "document.update", true},
+	string(store.BulkUpdate):  {"document.bulk_update", "document.update", true},
+	string(store.BulkTrash):   {"document.bulk_delete", "document.delete", false},
+	string(store.BulkRestore): {"document.bulk_restore", "document.restore", false},
+	string(store.BulkPurge):   {"document.bulk_purge", "document.purge", false},
+}
+
+// bulkDryRunJSON is the answer of a dry run.
+type bulkDryRunJSON struct {
+	Matched     int    `json:"matched"`
+	Owners      int    `json:"owners"`
+	Limit       int    `json:"limit"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // newBulkRun is a random ID that ties a bulk change's summary entry to its

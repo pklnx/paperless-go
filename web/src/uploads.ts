@@ -1,7 +1,7 @@
 // Uploading files: one XHR per file (fetch has no upload progress), at most
 // two at a time, each with its own row state.
 
-import { UNAUTHORIZED_EVENT, type DocumentSummary } from "./api";
+import { UNAUTHORIZED_EVENT, retryAfterHeader, type DocumentSummary } from "./api";
 import type { Messages } from "./i18n";
 
 /** Why the server (or the size check before sending) refused a file. */
@@ -11,8 +11,14 @@ export type UploadState =
   | { kind: "waiting" }
   | { kind: "uploading"; percent: number }
   | { kind: "imported"; document: DocumentSummary }
-  | { kind: "duplicate"; existingTitle?: string }
-  | { kind: "failed"; reason?: RefusalReason; message?: string }
+  /**
+   * The file is there already. existingId names the document when the
+   * caller may read it; trashed says it is in the trash (the row offers
+   * Restore), restored that it came back from there.
+   */
+  | { kind: "duplicate"; existingTitle?: string; existingId?: string; trashed?: boolean; restored?: boolean }
+  /** retryAfter: the server asked to send it again after that many seconds (503); the row can do that. */
+  | { kind: "failed"; reason?: RefusalReason; message?: string; retryAfter?: number }
   | { kind: "cancelled" };
 
 export interface UploadItem {
@@ -66,14 +72,23 @@ export function sendFile(file: File, onProgress: (percent: number) => void): { d
       if (xhr.status === 201) {
         resolve({ kind: "imported", document: body as unknown as DocumentSummary });
       } else if (xhr.status === 200 && body.duplicate === true) {
-        const existing = body.existing as { title?: string } | undefined;
-        resolve({ kind: "duplicate", existingTitle: existing?.title });
+        const existing = body.existing as { id?: string; title?: string } | undefined;
+        resolve({
+          kind: "duplicate",
+          existingTitle: existing?.title,
+          ...(typeof existing?.id === "string" ? { existingId: existing.id } : {}),
+          ...(body.trashed === true && typeof existing?.id === "string" ? { trashed: true } : {}),
+        });
       } else {
         if (xhr.status === 401 || body.passwordChangeRequired === true || body.twoFactorSetupRequired === true) {
           window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
         }
         const reason = typeof body.reason === "string" ? (body.reason as RefusalReason) : xhr.status === 413 ? "too_large" : undefined;
-        resolve({ kind: "failed", reason, message: typeof body.error === "string" ? body.error : xhr.statusText || String(xhr.status) });
+        const message = typeof body.error === "string" ? body.error : xhr.statusText || String(xhr.status);
+        // Busy, or the trashed document with this file is being deleted
+        // permanently: the same file goes through later.
+        const retryAfter = xhr.status === 503 ? retryAfterHeader(xhr.getResponseHeader("Retry-After")) : undefined;
+        resolve(retryAfter !== undefined ? { kind: "failed", reason, message, retryAfter } : { kind: "failed", reason, message });
       }
     };
     xhr.onerror = () => resolve({ kind: "failed" });
@@ -101,6 +116,8 @@ type Send = typeof sendFile;
 export class UploadQueue {
   private items: UploadItem[] = [];
   private files = new Map<number, File>();
+  /** The files of rows the server asked to send again later (503 with Retry-After). */
+  private later = new Map<number, File>();
   private aborts = new Map<number, () => void>();
   private nextId = 1;
   private listeners = new Set<(items: UploadItem[]) => void>();
@@ -150,7 +167,30 @@ export class UploadQueue {
   /** Removes the rows that are finished. */
   clearFinished() {
     this.items = this.items.filter((i) => i.state.kind === "waiting" || i.state.kind === "uploading");
+    this.later.clear();
     this.changed();
+  }
+
+  /** Whether a failed row can be sent again: the server asked for it later. */
+  canRetry(id: number): boolean {
+    return this.later.has(id);
+  }
+
+  /** Queues a row the server asked to send later again. */
+  retry(id: number) {
+    const file = this.later.get(id);
+    if (!file) return;
+    this.later.delete(id);
+    this.files.set(id, file);
+    this.set(id, { kind: "waiting" });
+    this.pump();
+  }
+
+  /** Marks a duplicate row whose trashed document was restored. */
+  markRestored(id: number) {
+    const item = this.items.find((i) => i.id === id);
+    if (item?.state.kind !== "duplicate") return;
+    this.set(id, { ...item.state, trashed: false, restored: true });
   }
 
   private set(id: number, state: UploadState) {
@@ -182,6 +222,7 @@ export class UploadQueue {
         .catch((): UploadOutcome => ({ kind: "failed" }))
         .then((outcome) => {
           this.aborts.delete(next.id);
+          if (outcome.kind === "failed" && outcome.retryAfter !== undefined) this.later.set(next.id, file);
           this.set(next.id, outcome);
           this.pump();
         });
@@ -206,6 +247,8 @@ export function stateText(state: UploadState, m: Messages, maxSize: string): str
     case "imported":
       return m.uploadImported;
     case "duplicate":
+      if (state.restored) return m.uploadRestored;
+      if (state.trashed) return state.existingTitle ? m.uploadInTrashOf(displayName(state.existingTitle)) : m.uploadInTrash;
       return state.existingTitle ? m.uploadDuplicateOf(displayName(state.existingTitle)) : m.uploadDuplicate;
     case "cancelled":
       return m.uploadCancelled;
@@ -220,6 +263,7 @@ export function stateText(state: UploadState, m: Messages, maxSize: string): str
         case "too_many_pixels":
           return m.uploadTooManyPixels;
       }
+      if (state.retryAfter !== undefined) return m.uploadRetryAfter(state.retryAfter);
       // The server's own text is English; show a translated one.
       return state.message ? m.uploadFailed : m.uploadNetworkError;
   }

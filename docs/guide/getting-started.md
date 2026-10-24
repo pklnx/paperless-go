@@ -4,8 +4,9 @@ paperless-go runs with Docker Compose: one container for PostgreSQL, one for
 the web server, and a one-shot container for commands.
 
 ::: warning Early development
-Uploads and OCR work; search and the full document views follow. See the
-[roadmap](../development/roadmap). The web UI is published on `localhost`
+Uploads, OCR, search, the document views, notes, saved views and the trash
+work; archive import/export, automatic assignment and deadlines follow. See
+the [roadmap](../development/roadmap). The web UI is published on `localhost`
 by default; to reach it from your network or a VPN, follow
 [Network access](../reference/security#network-access).
 :::
@@ -19,13 +20,6 @@ by default; to reach it from your network or a VPN, follow
   it must be PostgreSQL 17 or newer.
 
 ## Install
-
-::: warning No release yet
-No release has been published yet, so the bundle and the `ghcr.io` image
-below do not exist. Until the first release, install from source (see
-**From source instead** below): `git clone` the repository and continue
-with `cp .env.example .env`; `./pgo` builds the image locally.
-:::
 
 Download the Docker Compose bundle of the latest release, check it against
 the release's `SHA256SUMS` file and extract it:
@@ -87,7 +81,7 @@ add more users on the
 when needed and hides Docker Compose's progress output. Every `./pgo`
 command also works as `docker compose run --rm paperless-go …`, except that
 only `./pgo migrate` makes the data directory writable for the container and
-`./pgo backup` exists only in the wrapper.
+`./pgo backup` and `./pgo restore` exist only in the wrapper.
 :::
 
 ::: details From source instead
@@ -120,3 +114,17 @@ needs a fix by hand. `./pgo migrate` then prints a warning with the command:
   host: `docker run --rm --user 0 -v "$PWD/data:/data" alpine chown -R 65532:65532 /data`
 - Podman (untested): `podman unshare chown -R 65532:65532 data`
 :::
+
+## Install as an app
+
+The web UI can be added to the home screen or the dock and then opens in
+its own window, without the browser's address bar.
+
+- **iPhone and iPad (Safari):** Share, then **Add to Home Screen**.
+- **Android and desktop (Chrome):** **Install** in the browser menu or in the
+  address bar.
+
+Browsers offer this only when the site is served over HTTPS (or opened as
+`localhost` on the same computer); see
+[Running on the internet](./internet). The app is the same web page: it
+needs the server and stores nothing for offline use.

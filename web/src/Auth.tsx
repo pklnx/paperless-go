@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Button, CodeSnippet, Form, InlineNotification, PasswordInput, TextInput } from "@carbon/react";
 import { ApiError, UNAUTHORIZED_EVENT, passkeyApi, retryAfter, sessionApi, unknownPasskey, type SessionState, type User } from "./api";
+import { ProductMark } from "./ProductMark";
 import { PasswordForm, TwoFactorSettings } from "./Profile";
 import { ThemeToggle } from "./ThemeToggle";
 import { t } from "./i18n";
-import logo from "./logo.svg";
-import { button, input, primary } from "./styles";
 import { autofillSupported, browserError, credentialJSON, forgetPasskey, passkeysSupported, requestOptions } from "./webauthn";
 
 /** How to create the first admin, shown while no user exists. */
@@ -36,14 +36,20 @@ export function AuthGate({ children }: Props) {
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, check);
   }, [check]);
 
-  if ("loading" in state) return <Centered>{t.loading}</Centered>;
+  if ("loading" in state) {
+    return (
+      <Centered>
+        <p className="auth-page__text">{t.loading}</p>
+      </Centered>
+    );
+  }
   if ("error" in state) {
     return (
       <Centered>
-        <p className="text-danger">{t.failed(state.error)}</p>
-        <button type="button" className={`${primary} self-start`} onClick={check}>
-          {t.retry}
-        </button>
+        <ErrorNotice text={t.failed(state.error)} />
+        <div>
+          <Button onClick={check}>{t.retry}</Button>
+        </div>
       </Centered>
     );
   }
@@ -51,17 +57,22 @@ export function AuthGate({ children }: Props) {
     const logout = () => {
       sessionApi.logout().finally(() => setState({ user: null, setupRequired: false }));
     };
+    // The two gate screens keep the profile's forms, which are converted in
+    // part 6 of #150: a .legacy root until then (index.css).
     if (state.user.mustChangePassword) {
       const user = state.user;
       return (
         <Centered>
           <Brand />
-          <h2 className="font-semibold">{t.chooseOwnPassword}</h2>
-          <p>{t.chooseOwnPasswordText}</p>
-          <PasswordForm done={() => setState({ user: { ...user, mustChangePassword: false } })} />
-          <button type="button" className="self-start text-accent-ink hover:underline" onClick={logout}>
-            {t.logOut}
-          </button>
+          <Heading title={t.chooseOwnPassword} text={t.chooseOwnPasswordText} />
+          <div className="legacy auth-page__form">
+            <PasswordForm done={() => setState({ user: { ...user, mustChangePassword: false } })} />
+          </div>
+          <div>
+            <Button kind="ghost" onClick={logout}>
+              {t.logOut}
+            </Button>
+          </div>
         </Centered>
       );
     }
@@ -69,12 +80,15 @@ export function AuthGate({ children }: Props) {
       return (
         <Centered>
           <Brand />
-          <h2 className="font-semibold">{t.twoFactorSetup}</h2>
-          <p>{t.twoFactorRequired}</p>
-          <TwoFactorSettings user={state.user.name} onDone={check} />
-          <button type="button" className="self-start text-accent-ink hover:underline" onClick={logout}>
-            {t.logOut}
-          </button>
+          <Heading title={t.twoFactorSetup} text={t.twoFactorRequired} />
+          <div className="legacy auth-page__form">
+            <TwoFactorSettings user={state.user.name} onDone={check} />
+          </div>
+          <div>
+            <Button kind="ghost" onClick={logout}>
+              {t.logOut}
+            </Button>
+          </div>
         </Centered>
       );
     }
@@ -86,21 +100,45 @@ export function AuthGate({ children }: Props) {
 
 function Centered({ children }: { children: ReactNode }) {
   return (
-    <div className="relative flex min-h-full items-center justify-center p-4">
-      <div className="absolute top-3 right-3">
+    <div className="auth-page">
+      <div className="auth-page__theme">
         <ThemeToggle />
       </div>
-      <div className="flex w-full max-w-sm flex-col gap-4 text-sm">{children}</div>
+      <main className="auth-page__column">{children}</main>
     </div>
   );
 }
 
 function Brand() {
   return (
-    <div className="flex items-center gap-3">
-      <img src={logo} alt="" width={40} height={40} />
-      <h1 className="text-lg font-semibold">{t.appName}</h1>
+    <div className="auth-page__brand">
+      <ProductMark size={40} />
+      <h1 className="type-heading-04">{t.appName}</h1>
     </div>
+  );
+}
+
+function Heading({ title, text }: { title: string; text: string }) {
+  return (
+    <div>
+      <h2 className="type-heading-03">{title}</h2>
+      <p className="auth-page__text">{text}</p>
+    </div>
+  );
+}
+
+/** An error on the login screens: announced, and not closable (the next try clears it). */
+function ErrorNotice({ text, alert = false }: { text: string; alert?: boolean }) {
+  return (
+    <InlineNotification
+      className="auth-page__wide"
+      kind="error"
+      lowContrast
+      hideCloseButton
+      role={alert ? "alert" : "status"}
+      statusIconDescription={t.carbon.status.error}
+      subtitle={text}
+    />
   );
 }
 
@@ -242,32 +280,25 @@ function LoginPage({ done, passkeyOrigin }: { done: (user: User) => void; passke
     return (
       <Centered>
         <Brand />
-        <h2 className="font-semibold">{t.twoFactorLogin}</h2>
-        <p>{t.twoFactorLoginText}</p>
-        <form className="flex flex-col gap-3" onSubmit={submitCode}>
-          <label className="flex flex-col gap-1">
-            {t.twoFactorCode}
-            {/* Text, not numeric: recovery codes contain letters. */}
-            <input
-              className={input}
-              required
-              autoFocus
-              autoComplete="one-time-code"
-              autoCapitalize="none"
-              spellCheck={false}
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-            />
-          </label>
-          {error && (
-            <p role="alert" className="text-danger">
-              {error}
-            </p>
-          )}
-          <button type="submit" className={`${primary} mt-1`} disabled={busy}>
+        <Heading title={t.twoFactorLogin} text={t.twoFactorLoginText} />
+        <Form className="auth-page__form" onSubmit={submitCode}>
+          {/* Text, not numeric: recovery codes contain letters. */}
+          <TextInput
+            id="login-code"
+            labelText={t.twoFactorCode}
+            required
+            autoFocus
+            autoComplete="one-time-code"
+            autoCapitalize="none"
+            spellCheck={false}
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+          />
+          {error && <ErrorNotice text={error} alert />}
+          <Button type="submit" className="auth-page__wide" disabled={busy}>
             {busy ? t.loggingIn : t.logIn}
-          </button>
-        </form>
+          </Button>
+        </Form>
       </Centered>
     );
   }
@@ -275,50 +306,39 @@ function LoginPage({ done, passkeyOrigin }: { done: (user: User) => void; passke
   return (
     <Centered>
       <Brand />
-      <form className="flex flex-col gap-3" onSubmit={submit}>
-        <label className="flex flex-col gap-1">
-          {t.userName}
-          <input
-            className={input}
-            required
-            autoFocus
-            autoCapitalize="none"
-            autoComplete={passkeys ? "username webauthn" : "username"}
-            spellCheck={false}
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          {t.fieldPassword}
-          <input
-            className={input}
-            type="password"
-            required
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </label>
-        {error && (
-          <p role="alert" className="text-danger">
-            {error}
-          </p>
-        )}
-        <button type="submit" className={`${primary} mt-1`} disabled={busy}>
+      <Form className="auth-page__form" onSubmit={submit}>
+        <TextInput
+          id="login-user"
+          labelText={t.userName}
+          required
+          autoFocus
+          autoCapitalize="none"
+          autoComplete={passkeys ? "username webauthn" : "username"}
+          spellCheck={false}
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+        <PasswordInput
+          id="login-password"
+          labelText={t.fieldPassword}
+          showPasswordLabel={t.carbon.showPassword}
+          hidePasswordLabel={t.carbon.hidePassword}
+          required
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        {error && <ErrorNotice text={error} alert />}
+        <Button type="submit" className="auth-page__wide" disabled={busy}>
           {busy ? t.loggingIn : t.logIn}
-        </button>
-      </form>
+        </Button>
+      </Form>
       {passkeys && (
         <>
-          <div className="flex items-center gap-3 text-ink-muted">
-            <span className="h-px flex-1 bg-line" />
-            {t.or}
-            <span className="h-px flex-1 bg-line" />
-          </div>
-          <button
-            type="button"
-            className={button}
+          <p className="auth-page__or auth-page__text">{t.or}</p>
+          <Button
+            kind="tertiary"
+            className="auth-page__wide"
             disabled={busy}
             onClick={() => {
               setError("");
@@ -326,7 +346,7 @@ function LoginPage({ done, passkeyOrigin }: { done: (user: User) => void; passke
             }}
           >
             {t.passkeySignIn}
-          </button>
+          </Button>
         </>
       )}
     </Centered>
@@ -337,12 +357,13 @@ function SetupNotice({ check }: { check: () => void }) {
   return (
     <Centered>
       <Brand />
-      <h2 className="font-semibold">{t.setupTitle}</h2>
-      <p>{t.setupText}</p>
-      <pre className="overflow-x-auto rounded-md bg-surface-hover px-3 py-2">{firstAdminCommand}</pre>
-      <button type="button" className={`${primary} self-start`} onClick={check}>
-        {t.checkAgain}
-      </button>
+      <Heading title={t.setupTitle} text={t.setupText} />
+      <CodeSnippet type="single" className="auth-page__wide" aria-label={t.carbon.copy} copyButtonDescription={t.carbon.copy} feedback={t.carbon.copied}>
+        {firstAdminCommand}
+      </CodeSnippet>
+      <div>
+        <Button onClick={check}>{t.checkAgain}</Button>
+      </div>
     </Centered>
   );
 }

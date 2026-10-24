@@ -71,7 +71,7 @@ SET is_favorite = COALESCE($1::boolean, is_favorite),
                             ELSE correspondent_id END,
     document_type_id = CASE WHEN $5::boolean THEN $6::uuid
                             ELSE document_type_id END,
-    modified_at = now()
+    modified_at = GREATEST(now(), modified_at + interval '1 microsecond')
 WHERE id = ANY ($7::uuid[])
 `
 
@@ -86,7 +86,7 @@ type BulkUpdateDocumentsParams struct {
 }
 
 // Sets the given columns of the locked documents as PatchDocument does,
-// and touches modified_at of every one of them.
+// and advances modified_at of every one of them.
 func (q *Queries) BulkUpdateDocuments(ctx context.Context, arg BulkUpdateDocumentsParams) error {
 	_, err := q.db.Exec(ctx, bulkUpdateDocuments,
 		arg.IsFavorite,
@@ -194,9 +194,10 @@ func (q *Queries) CreateDocument(ctx context.Context, arg CreateDocumentParams) 
 	return id, err
 }
 
-const deleteDocument = `-- name: DeleteDocument :execrows
+const deleteDocument = `-- name: DeleteDocument :one
 DELETE FROM documents
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+RETURNING owner_id
 `
 
 type DeleteDocumentParams struct {
@@ -205,15 +206,59 @@ type DeleteDocumentParams struct {
 }
 
 func (q *Queries) DeleteDocument(ctx context.Context, arg DeleteDocumentParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteDocument, arg.ID, arg.Owner)
+	row := q.db.QueryRow(ctx, deleteDocument, arg.ID, arg.Owner)
+	var owner_id int64
+	err := row.Scan(&owner_id)
+	return owner_id, err
+}
+
+const deleteDueDocuments = `-- name: DeleteDueDocuments :many
+DELETE FROM documents
+WHERE id = ANY ($1::uuid[]) AND deleted_at IS NOT NULL
+RETURNING id, owner_id, purge_at, original_sha256, archive_sha256, thumbnail_sha256
+`
+
+type DeleteDueDocumentsRow struct {
+	ID              pgtype.UUID
+	OwnerID         int64
+	PurgeAt         *time.Time
+	OriginalSha256  string
+	ArchiveSha256   *string
+	ThumbnailSha256 *string
+}
+
+// Deletes the locked documents the sweeper checked, with their tag links,
+// deadlines and jobs (cascades), and returns what the audit and the file
+// removal need.
+func (q *Queries) DeleteDueDocuments(ctx context.Context, ids []pgtype.UUID) ([]DeleteDueDocumentsRow, error) {
+	rows, err := q.db.Query(ctx, deleteDueDocuments, ids)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+	var items []DeleteDueDocumentsRow
+	for rows.Next() {
+		var i DeleteDueDocumentsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OwnerID,
+			&i.PurgeAt,
+			&i.OriginalSha256,
+			&i.ArchiveSha256,
+			&i.ThumbnailSha256,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const documentByASN = `-- name: DocumentByASN :one
-SELECT id, title FROM documents WHERE owner_id = $1 AND archive_serial_number = $2
+SELECT id, title, deleted_at, purge_at FROM documents WHERE owner_id = $1 AND archive_serial_number = $2
 `
 
 type DocumentByASNParams struct {
@@ -222,19 +267,26 @@ type DocumentByASNParams struct {
 }
 
 type DocumentByASNRow struct {
-	ID    pgtype.UUID
-	Title string
+	ID        pgtype.UUID
+	Title     string
+	DeletedAt *time.Time
+	PurgeAt   *time.Time
 }
 
 func (q *Queries) DocumentByASN(ctx context.Context, arg DocumentByASNParams) (DocumentByASNRow, error) {
 	row := q.db.QueryRow(ctx, documentByASN, arg.OwnerID, arg.ArchiveSerialNumber)
 	var i DocumentByASNRow
-	err := row.Scan(&i.ID, &i.Title)
+	err := row.Scan(
+		&i.ID,
+		&i.Title,
+		&i.DeletedAt,
+		&i.PurgeAt,
+	)
 	return i, err
 }
 
 const documentByOriginal = `-- name: DocumentByOriginal :one
-SELECT id, title FROM documents WHERE owner_id = $1 AND original_sha256 = $2
+SELECT id, title, deleted_at, purge_at FROM documents WHERE owner_id = $1 AND original_sha256 = $2
 `
 
 type DocumentByOriginalParams struct {
@@ -243,15 +295,116 @@ type DocumentByOriginalParams struct {
 }
 
 type DocumentByOriginalRow struct {
-	ID    pgtype.UUID
-	Title string
+	ID        pgtype.UUID
+	Title     string
+	DeletedAt *time.Time
+	PurgeAt   *time.Time
 }
 
+// Also a trashed document: it still holds the owner's copy of the file.
 func (q *Queries) DocumentByOriginal(ctx context.Context, arg DocumentByOriginalParams) (DocumentByOriginalRow, error) {
 	row := q.db.QueryRow(ctx, documentByOriginal, arg.OwnerID, arg.OriginalSha256)
 	var i DocumentByOriginalRow
-	err := row.Scan(&i.ID, &i.Title)
+	err := row.Scan(
+		&i.ID,
+		&i.Title,
+		&i.DeletedAt,
+		&i.PurgeAt,
+	)
 	return i, err
+}
+
+const documentOwner = `-- name: DocumentOwner :one
+SELECT owner_id FROM documents
+WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
+`
+
+type DocumentOwnerParams struct {
+	ID    pgtype.UUID
+	Owner *int64
+}
+
+// DocumentOwner and DocumentOwners read the owner of documents in the
+// scope, without a lock, so a writer can take the owner's write lock
+// (store.lockOwners) before it locks or writes the rows.
+func (q *Queries) DocumentOwner(ctx context.Context, arg DocumentOwnerParams) (int64, error) {
+	row := q.db.QueryRow(ctx, documentOwner, arg.ID, arg.Owner)
+	var owner_id int64
+	err := row.Scan(&owner_id)
+	return owner_id, err
+}
+
+const documentOwners = `-- name: DocumentOwners :many
+SELECT DISTINCT owner_id FROM documents
+WHERE id = ANY ($1::uuid[]) AND ($2::bigint IS NULL OR owner_id = $2)
+ORDER BY owner_id
+`
+
+type DocumentOwnersParams struct {
+	Ids   []pgtype.UUID
+	Owner *int64
+}
+
+func (q *Queries) DocumentOwners(ctx context.Context, arg DocumentOwnersParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, documentOwners, arg.Ids, arg.Owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var owner_id int64
+		if err := rows.Scan(&owner_id); err != nil {
+			return nil, err
+		}
+		items = append(items, owner_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const dueDocuments = `-- name: DueDocuments :many
+SELECT id, owner_id FROM documents
+WHERE deleted_at IS NOT NULL
+  AND coalesce(purge_at, deleted_at + $1::bigint * interval '1 microsecond') <= $2::timestamptz
+ORDER BY owner_id, id
+LIMIT $3
+`
+
+type DueDocumentsParams struct {
+	RetentionUs int64
+	Now         time.Time
+	Lim         int32
+}
+
+type DueDocumentsRow struct {
+	ID      pgtype.UUID
+	OwnerID int64
+}
+
+// Trashed documents due for purge at now: their purge was asked for, or
+// the retention passed. Without a lock: the sweeper locks and checks them
+// again per owner.
+func (q *Queries) DueDocuments(ctx context.Context, arg DueDocumentsParams) ([]DueDocumentsRow, error) {
+	rows, err := q.db.Query(ctx, dueDocuments, arg.RetentionUs, arg.Now, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DueDocumentsRow
+	for rows.Next() {
+		var i DueDocumentsRow
+		if err := rows.Scan(&i.ID, &i.OwnerID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getDocument = `-- name: GetDocument :one
@@ -259,15 +412,22 @@ SELECT d.id, d.owner_id, d.title, d.document_date, d.created_at, d.modified_at, 
        d.is_inbox, d.archive_serial_number, d.page_count, d.extracted_text, d.text_source, d.source,
        d.original_file_name, d.original_sha256, d.original_size, d.original_mime, d.archive_sha256,
        d.archive_size, d.correspondent_id, d.document_type_id, d.thumbnail_sha256, d.processing_note,
+       d.deleted_at, d.purge_at,
        COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
                  WHERE dt.document_id = d.id), '{}')::uuid[] AS tag_ids
 FROM documents d
 WHERE d.id = $1 AND ($2::bigint IS NULL OR d.owner_id = $2)
+  -- A trashed document is found until it is due for purge (store.trashDue).
+  AND (d.deleted_at IS NULL
+       OR coalesce(d.purge_at, d.deleted_at + $3::bigint * interval '1 microsecond')
+          > $4::timestamptz)
 `
 
 type GetDocumentParams struct {
-	ID    pgtype.UUID
-	Owner *int64
+	ID          pgtype.UUID
+	Owner       *int64
+	RetentionUs int64
+	Now         time.Time
 }
 
 type GetDocumentRow struct {
@@ -295,13 +455,20 @@ type GetDocumentRow struct {
 	DocumentTypeID      pgtype.UUID
 	ThumbnailSha256     *string
 	ProcessingNote      string
+	DeletedAt           *time.Time
+	PurgeAt             *time.Time
 	TagIds              []pgtype.UUID
 }
 
 // The columns are listed: the search vectors (search_text, search_links)
 // can be large and are never read.
 func (q *Queries) GetDocument(ctx context.Context, arg GetDocumentParams) (GetDocumentRow, error) {
-	row := q.db.QueryRow(ctx, getDocument, arg.ID, arg.Owner)
+	row := q.db.QueryRow(ctx, getDocument,
+		arg.ID,
+		arg.Owner,
+		arg.RetentionUs,
+		arg.Now,
+	)
 	var i GetDocumentRow
 	err := row.Scan(
 		&i.ID,
@@ -328,6 +495,8 @@ func (q *Queries) GetDocument(ctx context.Context, arg GetDocumentParams) (GetDo
 		&i.DocumentTypeID,
 		&i.ThumbnailSha256,
 		&i.ProcessingNote,
+		&i.DeletedAt,
+		&i.PurgeAt,
 		&i.TagIds,
 	)
 	return i, err
@@ -338,10 +507,11 @@ SELECT d.id, d.owner_id, d.title, d.document_date, d.created_at, d.modified_at, 
        d.is_inbox, d.archive_serial_number, d.page_count, d.extracted_text, d.text_source, d.source,
        d.original_file_name, d.original_sha256, d.original_size, d.original_mime, d.archive_sha256,
        d.archive_size, d.correspondent_id, d.document_type_id, d.thumbnail_sha256, d.processing_note,
+       d.deleted_at, d.purge_at,
        COALESCE((SELECT array_agg(dt.tag_id ORDER BY dt.tag_id) FROM document_tags dt
                  WHERE dt.document_id = d.id), '{}')::uuid[] AS tag_ids
 FROM documents d
-WHERE $1::bigint IS NULL OR d.owner_id = $1
+WHERE ($1::bigint IS NULL OR d.owner_id = $1) AND d.deleted_at IS NULL
 ORDER BY d.created_at DESC, d.id
 `
 
@@ -370,6 +540,8 @@ type ListDocumentsRow struct {
 	DocumentTypeID      pgtype.UUID
 	ThumbnailSha256     *string
 	ProcessingNote      string
+	DeletedAt           *time.Time
+	PurgeAt             *time.Time
 	TagIds              []pgtype.UUID
 }
 
@@ -407,6 +579,8 @@ func (q *Queries) ListDocuments(ctx context.Context, owner *int64) ([]ListDocume
 			&i.DocumentTypeID,
 			&i.ThumbnailSha256,
 			&i.ProcessingNote,
+			&i.DeletedAt,
+			&i.PurgeAt,
 			&i.TagIds,
 		); err != nil {
 			return nil, err
@@ -420,7 +594,7 @@ func (q *Queries) ListDocuments(ctx context.Context, owner *int64) ([]ListDocume
 }
 
 const lockDocument = `-- name: LockDocument :one
-SELECT owner_id FROM documents
+SELECT owner_id, modified_at, deleted_at, purge_at FROM documents
 WHERE id = $1 AND ($2::bigint IS NULL OR owner_id = $2)
 FOR NO KEY UPDATE
 `
@@ -430,19 +604,32 @@ type LockDocumentParams struct {
 	Owner *int64
 }
 
-// LockDocument locks the document row for a change of its tags and returns
-// its owner. FOR NO KEY UPDATE: no key column changes, so the foreign-key
-// checks of rows referencing the document (document_tags, jobs; FOR KEY
-// SHARE) need not wait for the change.
-func (q *Queries) LockDocument(ctx context.Context, arg LockDocumentParams) (int64, error) {
+type LockDocumentRow struct {
+	OwnerID    int64
+	ModifiedAt time.Time
+	DeletedAt  *time.Time
+	PurgeAt    *time.Time
+}
+
+// LockDocument locks the document row for a change and returns its owner,
+// modified_at (PatchDocument's precondition) and its trash state. FOR NO KEY UPDATE: no
+// key column changes, so the foreign-key checks of rows referencing the
+// document (document_tags, jobs; FOR KEY SHARE) need not wait for the
+// change.
+func (q *Queries) LockDocument(ctx context.Context, arg LockDocumentParams) (LockDocumentRow, error) {
 	row := q.db.QueryRow(ctx, lockDocument, arg.ID, arg.Owner)
-	var owner_id int64
-	err := row.Scan(&owner_id)
-	return owner_id, err
+	var i LockDocumentRow
+	err := row.Scan(
+		&i.OwnerID,
+		&i.ModifiedAt,
+		&i.DeletedAt,
+		&i.PurgeAt,
+	)
+	return i, err
 }
 
 const lockDocuments = `-- name: LockDocuments :many
-SELECT id, owner_id FROM documents
+SELECT id, owner_id, deleted_at, purge_at FROM documents
 WHERE id = ANY ($1::uuid[]) AND ($2::bigint IS NULL OR owner_id = $2)
 ORDER BY id
 FOR NO KEY UPDATE
@@ -454,13 +641,14 @@ type LockDocumentsParams struct {
 }
 
 type LockDocumentsRow struct {
-	ID      pgtype.UUID
-	OwnerID int64
+	ID        pgtype.UUID
+	OwnerID   int64
+	DeletedAt *time.Time
+	PurgeAt   *time.Time
 }
 
-// LockDocuments locks the documents of ids in the scope, in id order, so
-// two bulk changes over overlapping sets wait for each other instead of
-// deadlocking. It returns the locked ids with their owners. FOR NO KEY
+// LockDocuments locks the documents of ids in the scope, in id order, and
+// returns the locked ids with their owners and trash state. FOR NO KEY
 // UPDATE as in LockDocument.
 func (q *Queries) LockDocuments(ctx context.Context, arg LockDocumentsParams) ([]LockDocumentsRow, error) {
 	rows, err := q.db.Query(ctx, lockDocuments, arg.Ids, arg.Owner)
@@ -471,7 +659,12 @@ func (q *Queries) LockDocuments(ctx context.Context, arg LockDocumentsParams) ([
 	var items []LockDocumentsRow
 	for rows.Next() {
 		var i LockDocumentsRow
-		if err := rows.Scan(&i.ID, &i.OwnerID); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.OwnerID,
+			&i.DeletedAt,
+			&i.PurgeAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -495,7 +688,7 @@ SET title = COALESCE($1::text, title),
                             ELSE correspondent_id END,
     document_type_id = CASE WHEN $10::boolean THEN $11::uuid
                             ELSE document_type_id END,
-    modified_at = now()
+    modified_at = GREATEST(now(), modified_at + interval '1 microsecond')
 WHERE id = $12
 `
 
@@ -516,6 +709,10 @@ type PatchDocumentParams struct {
 
 // Sets only the given columns: a NULL narg, or a false set_* flag, keeps
 // the stored value. The caller has locked the row (LockDocument).
+// Every write of a PATCH-able field or of document_tags advances
+// modified_at strictly (GREATEST: now() is the transaction's start, so two
+// writes in one transaction, or in the same microsecond, would otherwise
+// get the same value); equal modified_at means unchanged since read.
 func (q *Queries) PatchDocument(ctx context.Context, arg PatchDocumentParams) (int64, error) {
 	result, err := q.db.Exec(ctx, patchDocument,
 		arg.Title,
@@ -537,54 +734,48 @@ func (q *Queries) PatchDocument(ctx context.Context, arg PatchDocumentParams) (i
 	return result.RowsAffected(), nil
 }
 
-const touchDocument = `-- name: TouchDocument :exec
-UPDATE documents SET modified_at = now() WHERE id = $1
+const purgeDocuments = `-- name: PurgeDocuments :exec
+UPDATE documents SET purge_at = $1::timestamptz
+WHERE id = ANY ($2::uuid[]) AND deleted_at IS NOT NULL
 `
 
-func (q *Queries) TouchDocument(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, touchDocument, id)
+type PurgeDocumentsParams struct {
+	Now time.Time
+	Ids []pgtype.UUID
+}
+
+// Marks the documents for the sweeper: from now on they are due.
+func (q *Queries) PurgeDocuments(ctx context.Context, arg PurgeDocumentsParams) error {
+	_, err := q.db.Exec(ctx, purgeDocuments, arg.Now, arg.Ids)
 	return err
 }
 
-const updateDocument = `-- name: UpdateDocument :execrows
-UPDATE documents
-SET title = $1,
-    document_date = COALESCE($2::timestamptz, document_date), notes = $3,
-    is_favorite = $4, is_inbox = $5,
-    archive_serial_number = $6,
-    correspondent_id = $7, document_type_id = $8,
-    modified_at = now()
-WHERE id = $9 AND ($10::bigint IS NULL OR owner_id = $10)
+const restoreDocuments = `-- name: RestoreDocuments :exec
+UPDATE documents SET deleted_at = NULL, purge_at = NULL
+WHERE id = ANY ($1::uuid[]) AND deleted_at IS NOT NULL
 `
 
-type UpdateDocumentParams struct {
-	Title               string
-	DocumentDate        *time.Time
-	Notes               string
-	IsFavorite          bool
-	IsInbox             bool
-	ArchiveSerialNumber *int32
-	CorrespondentID     pgtype.UUID
-	DocumentTypeID      pgtype.UUID
-	ID                  pgtype.UUID
-	Owner               *int64
+func (q *Queries) RestoreDocuments(ctx context.Context, ids []pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, restoreDocuments, ids)
+	return err
 }
 
-func (q *Queries) UpdateDocument(ctx context.Context, arg UpdateDocumentParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateDocument,
-		arg.Title,
-		arg.DocumentDate,
-		arg.Notes,
-		arg.IsFavorite,
-		arg.IsInbox,
-		arg.ArchiveSerialNumber,
-		arg.CorrespondentID,
-		arg.DocumentTypeID,
-		arg.ID,
-		arg.Owner,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+const trashDocuments = `-- name: TrashDocuments :exec
+
+UPDATE documents SET deleted_at = $1::timestamptz
+WHERE id = ANY ($2::uuid[]) AND deleted_at IS NULL
+`
+
+type TrashDocumentsParams struct {
+	Now time.Time
+	Ids []pgtype.UUID
+}
+
+// The trash (documents_trash.go). The callers have locked the rows
+// (LockDocument, LockDocuments) and checked their state. None of these
+// touches a column of the search triggers, and modified_at stays: the
+// document itself did not change.
+func (q *Queries) TrashDocuments(ctx context.Context, arg TrashDocumentsParams) error {
+	_, err := q.db.Exec(ctx, trashDocuments, arg.Now, arg.Ids)
+	return err
 }

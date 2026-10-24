@@ -78,6 +78,9 @@ func (s *Server) protect(next http.Handler, bodyOf func(*http.Request) body) htt
 			http.Error(w, "host not allowed", http.StatusForbidden)
 			return
 		}
+		// After the host check: a scanner or a client with a wrong Host must
+		// not use up the one warning and get its address named as the proxy.
+		s.warnIgnoredForwardedFor(r)
 		// An API key request carries its credential in a header that a
 		// cross-site page cannot set, never in a cookie (see bearerKey), so
 		// it needs neither Origin nor a particular content type.

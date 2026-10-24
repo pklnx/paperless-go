@@ -14,13 +14,13 @@ Compose, set them in `.env`; `docker-compose.yml` passes them on.
 | `WEB_BIND` | `127.0.0.1` | Address the web UI is published on. See [Security](./security#network-access). |
 | `WEB_PORT` | `8080` | Port the web UI is published on. |
 | `POSTGRES_PORT` | `5432` | Port PostgreSQL is published on, on `127.0.0.1` only. |
-| `PAPERLESS_GO_IMAGE` | the bundle's version | Image of the web server and the CLI. |
+| `PAPERLESS_GO_IMAGE` | the bundle's version | Image of the web server and the CLI. A value set in `.env` stays when you extract a newer bundle; see [Upgrades](../guide/operations#upgrades). |
 
 ## Server
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PAPERLESS_GO_DATABASE_URL` | (required) | PostgreSQL URL; PostgreSQL 17 or newer (older servers are refused). Compose sets it. |
+| `PAPERLESS_GO_DATABASE_URL` | (required) | PostgreSQL URL; PostgreSQL 17 or newer (older servers are refused). Compose sets it. The connection pool has `max(4, number of CPUs)` connections; `pool_max_conns` in the URL changes that (`postgres://…/paperless?pool_max_conns=10`). Writes of one user wait for each other without holding a connection, so the pool fills only with concurrent work of different users. |
 | `PAPERLESS_GO_DATA_DIR` | `./data` (`/data` in the image) | Directory of the document files. |
 | `PAPERLESS_GO_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `PAPERLESS_GO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Host names accepted in the `Host` header, comma-separated, without port. See [DNS rebinding](./security#dns-rebinding). |
@@ -34,3 +34,4 @@ Compose, set them in `.env`; `docker-compose.yml` passes them on.
 | `PAPERLESS_GO_OCR_LANGUAGES` | `deu+eng` | Tesseract languages, joined with `+`. `serve` and `process` refuse to start when Tesseract lacks one; the image has `deu`, `eng` and `osd`. |
 | `PAPERLESS_GO_CONSUME_DIR` | (none; `/consume` in Compose) | The [consume folder](../guide/import#consume-folder) `serve` imports from, with one folder per user. Empty turns it off. It must be writable for the server's user (UID 65532 in the image). |
 | `PAPERLESS_GO_OCR_TIMEOUT` | `30m` | Limit of each processing attempt (at least `1m`, for example `2h`). An attempt that takes longer is stopped and retried. |
+| `PAPERLESS_GO_TRASH_RETENTION` | `720h` (30 days) | How long a deleted document stays in the trash before the server removes it for good, as a Go duration (`h`, `m`, `s`; no days: `168h` for a week). A negative or unreadable value stops the start of `serve` and of every other command (`migrate`, `user`, `import`, …). It counts from the deletion and is read every time, so shortening it applies at once to documents already in the trash: those whose time is up are gone within a minute. `0` removes a deleted document at the next sweep (within a minute), so "Undo" after a delete in the web UI fails. "Delete permanently" and "empty trash" do not wait for it. |

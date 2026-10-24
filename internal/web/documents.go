@@ -61,6 +61,10 @@ type documentJSON struct {
 	CorrespondentID *string  `json:"correspondentId"`
 	DocumentTypeID  *string  `json:"documentTypeId"`
 	TagIDs          []string `json:"tagIds"`
+	// DeletedAt is when the document went to the trash and PurgeAt when
+	// it is removed for good; both null while it is live.
+	DeletedAt *time.Time `json:"deletedAt"`
+	PurgeAt   *time.Time `json:"purgeAt"`
 }
 
 // processingJSON is a document's processing status.
@@ -130,27 +134,38 @@ func toDocumentJSON(d *store.Document, job *store.Job) documentJSON {
 		OriginalMIME: d.OriginalMIME, HasArchive: d.ArchiveSHA256 != nil, ArchiveSize: d.ArchiveSize,
 		ProcessingNote: d.ProcessingNote, Processing: toProcessingJSON(job), ThumbnailURL: thumbnailURL(d),
 		CorrespondentID: d.CorrespondentID, DocumentTypeID: d.DocumentTypeID, TagIDs: tags,
+		DeletedAt: d.DeletedAt, PurgeAt: d.PurgeAt,
 	}
 }
 
 // fillOwnerNames sets the owner names of docs for an admin; for anybody
 // else it does nothing.
 func (s *Server) fillOwnerNames(r *http.Request, docs ...*documentJSON) error {
-	if !requestScope(r).All || len(docs) == 0 {
+	if len(docs) == 0 {
 		return nil
+	}
+	names, err := s.ownerNames(r)
+	for _, d := range docs {
+		d.OwnerName = names[d.OwnerID]
+	}
+	return err
+}
+
+// ownerNames maps user IDs to names for an admin (one ListUsers); for
+// anybody else it is nil and reads nothing.
+func (s *Server) ownerNames(r *http.Request) (map[int64]string, error) {
+	if !requestScope(r).All {
+		return nil, nil
 	}
 	users, err := s.store.ListUsers(r.Context())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	names := make(map[int64]string, len(users))
 	for _, u := range users {
 		names[u.ID] = u.Name
 	}
-	for _, d := range docs {
-		d.OwnerName = names[d.OwnerID]
-	}
-	return nil
+	return names, nil
 }
 
 // latestJobs reads the processing status of docs.
@@ -266,6 +281,16 @@ func listQuery(v url.Values) (q search.Query, isSearch bool, err error) {
 		*p.dst = ids
 	}
 	typed := len(q.Text) > 0 || len(q.Filters) > 0
+	switch v.Get("trashed") {
+	case "", "false":
+	case "true":
+		q.Trashed = true
+	default:
+		return q, false, listError("trashed must be true or false")
+	}
+	if q.Sort == search.SortDeleted && (!q.Trashed || q.Ascending) {
+		return q, false, listError("invalid sort")
+	}
 	for _, p := range []struct{ name, value string }{{"inbox", search.IsInbox}, {"favorite", search.IsFavorite}} {
 		switch v.Get(p.name) {
 		case "":
@@ -287,7 +312,7 @@ func listQuery(v url.Values) (q search.Query, isSearch bool, err error) {
 
 // searchAuditParams are the parameters a document.search entry records:
 // the query as typed and the filters, not the paging and sort options.
-var searchAuditParams = []string{"q", "tag", "correspondent", "type", "inbox", "favorite", "owner"}
+var searchAuditParams = []string{"q", "tag", "correspondent", "type", "inbox", "favorite", "owner", "trashed"}
 
 // searchEntry is the audit entry of the first page of a search.
 func (s *Server) searchEntry(r *http.Request) *store.AuditEntry {
@@ -310,7 +335,9 @@ func (s *Server) searchEntry(r *http.Request) *store.AuditEntry {
 // match first, each with a snippet. Parameters: q (the search syntax),
 // tag, correspondent and type (UUIDs, repeatable, any of them), inbox and
 // favorite (true, false), owner (me, or for an admin a user ID; see
-// listScope), sort (relevance, added, date), order (desc, asc), tz (an
+// listScope), trashed (true: the trash instead of the live documents),
+// sort (relevance, added, date, and deleted for the trash, its default
+// without ranked text; deleted only descending), order (desc, asc), tz (an
 // IANA zone for the days of date filters, default UTC), limit (1 to 100,
 // default 100) and cursor (nextCursor of the previous page). Invalid
 // input answers 400 with fixed wording. The first page of a typed search
@@ -410,7 +437,7 @@ func (s *Server) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 // from processing stays. It writes document.reprocess in the queueing
 // transaction. Answers: 202 with the document when it was queued, 200 when
 // it was queued or running already, 404 for a document outside the scope,
-// 503 without the audit log.
+// 409 in_trash for a document in the trash, 503 without the audit log.
 func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 	if !s.documentsAvailable(w, r) {
 		return
@@ -425,7 +452,7 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 	e.Detail("selection", "ids")
 	n, err := s.store.Reprocess(withAudit(r, e), store.ReprocessSelection{IDs: []string{d.ID}})
 	if err != nil {
-		s.failStore(w, r, err)
+		s.failDocument(w, r, err)
 		return
 	}
 	jobs, err := s.latestJobs(r, d)
@@ -640,6 +667,9 @@ type duplicateJSON struct {
 	// Existing is omitted when the existing document could not be named,
 	// and for an API key without read.
 	Existing *documentRefJSON `json:"existing,omitempty"`
+	// Trashed: the existing document is in the trash (the UI offers to
+	// restore it). Only with Existing.
+	Trashed bool `json:"trashed,omitempty"`
 }
 
 type documentRefJSON struct {
@@ -676,7 +706,18 @@ func (s *Server) refuseUpload(w http.ResponseWriter, reason ingest.Reason) {
 // the name is in X-File-Name. Answers: 201 with the document, 200 with
 // duplicate (and the existing document, if it can be named and the caller
 // may read: a session or a key with read), 413, 415 or
-// 422 with the reason of a refusal.
+// 422 with the reason of a refusal, 503 with Retry-After: 5 when another
+// change of the caller's documents ran longer than ownerWait.
+//
+// A duplicate whose document is in the trash answers trashed: true to a
+// caller that may read, which restores nothing (the UI offers Restore).
+// A key that cannot read (the iPhone Shortcut's upload key) sees no
+// Restore button and would take "duplicate" for "archived": for it the
+// server restores the document (document.restore, via upload) and
+// answers {"duplicate": true} as for any duplicate, so the key learns
+// nothing about the trash. A duplicate whose document is due for purge
+// answers 503 with Retry-After: 60 to every caller: once the sweeper
+// deleted it, the same upload imports the file as new.
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if !s.documentsAvailable(w, r) {
 		return
@@ -743,10 +784,32 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, http.StatusCreated, out)
 	case ingest.Duplicate:
 		out := duplicateJSON{Duplicate: true}
+		k := currentAPIKey(r)
+		canRead := k == nil || k.Allows(store.ScopeRead)
+		if !canRead && res.Existing.Trashed {
+			re := s.auditEntry(r, "document.restore")
+			re.SetTarget(store.TargetDocument, res.Existing.ID, res.Existing.Title)
+			re.Detail("via", "upload")
+			_, err := s.store.RestoreDocument(withAudit(r, re), store.Scope{UserID: sc.UserID}, res.Existing.ID)
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				// Due for purge (or purged) since the duplicate check:
+				// the next try imports the file as new.
+				err = store.ErrPurgePending
+			case errors.Is(err, store.ErrNotInTrash):
+				// Restored by someone else meanwhile: a plain duplicate.
+				err = nil
+			}
+			if err != nil {
+				s.failStore(w, r, err)
+				return
+			}
+		}
 		// A key that cannot read (upload or write only) learns only that
 		// the file is in the archive, not which document it is.
-		if k := currentAPIKey(r); res.Existing.ID != "" && (k == nil || k.Allows(store.ScopeRead)) {
+		if res.Existing.ID != "" && canRead {
 			out.Existing = &documentRefJSON{ID: res.Existing.ID, Title: res.Existing.Title}
+			out.Trashed = res.Existing.Trashed
 		}
 		s.writeJSON(w, http.StatusOK, out)
 	default:

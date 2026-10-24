@@ -122,10 +122,11 @@ func (q *Queries) DocumentJobs(ctx context.Context, documentID pgtype.UUID) ([]J
 }
 
 const enqueueAllDocuments = `-- name: EnqueueAllDocuments :execrows
-INSERT INTO jobs (document_id) SELECT id FROM documents
+INSERT INTO jobs (document_id) SELECT id FROM documents WHERE deleted_at IS NULL
 ON CONFLICT (document_id, kind) WHERE state IN ('queued', 'running') DO NOTHING
 `
 
+// Every live document; trashed ones are left alone.
 func (q *Queries) EnqueueAllDocuments(ctx context.Context) (int64, error) {
 	result, err := q.db.Exec(ctx, enqueueAllDocuments)
 	if err != nil {
@@ -139,11 +140,12 @@ INSERT INTO jobs (document_id)
 SELECT l.document_id
 FROM (SELECT DISTINCT ON (document_id) document_id, state FROM jobs
       WHERE kind = 'process' ORDER BY document_id, id DESC) l
+JOIN documents d ON d.id = l.document_id AND d.deleted_at IS NULL
 WHERE l.state = 'failed'
 ON CONFLICT (document_id, kind) WHERE state IN ('queued', 'running') DO NOTHING
 `
 
-// Queues the documents whose latest job failed.
+// Queues the live documents whose latest job failed.
 func (q *Queries) EnqueueFailedDocuments(ctx context.Context) (int64, error) {
 	result, err := q.db.Exec(ctx, enqueueFailedDocuments)
 	if err != nil {
@@ -171,22 +173,28 @@ func (q *Queries) EnqueueJobs(ctx context.Context, documentIds []pgtype.UUID) (i
 }
 
 const existingDocumentIDs = `-- name: ExistingDocumentIDs :many
-SELECT id FROM documents WHERE id = ANY($1::uuid[])
+SELECT id, (deleted_at IS NOT NULL)::boolean AS trashed FROM documents WHERE id = ANY($1::uuid[])
 `
 
-func (q *Queries) ExistingDocumentIDs(ctx context.Context, ids []pgtype.UUID) ([]pgtype.UUID, error) {
+type ExistingDocumentIDsRow struct {
+	ID      pgtype.UUID
+	Trashed bool
+}
+
+// The documents of ids that exist, and whether each is in the trash.
+func (q *Queries) ExistingDocumentIDs(ctx context.Context, ids []pgtype.UUID) ([]ExistingDocumentIDsRow, error) {
 	rows, err := q.db.Query(ctx, existingDocumentIDs, ids)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []pgtype.UUID
+	var items []ExistingDocumentIDsRow
 	for rows.Next() {
-		var id pgtype.UUID
-		if err := rows.Scan(&id); err != nil {
+		var i ExistingDocumentIDsRow
+		if err := rows.Scan(&i.ID, &i.Trashed); err != nil {
 			return nil, err
 		}
-		items = append(items, id)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
