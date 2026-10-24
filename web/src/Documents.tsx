@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Button, ProgressBar } from "@carbon/react";
 import { documentsApi } from "./api";
 import { lang, t } from "./i18n";
 import { trashErrorText } from "./Trash";
-import { button, primary } from "./styles";
 import { displayName, formatSize, stateText, type UploadItem, type UploadQueue } from "./uploads";
 
 /** The queue's items, rendered again on each change. */
@@ -64,9 +64,8 @@ export function WindowDrop({ onFiles }: { onFiles: (files: File[]) => void }) {
 
   if (!dragging) return null;
   return (
-    // Unconverted markup outside every view: a .legacy root (index.css) until part 3 of #150.
-    <div className="legacy pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-scrim p-6">
-      <p className="rounded-lg border-2 border-dashed border-accent bg-surface-raised px-8 py-10 text-lg font-semibold text-accent-ink">{t.dropHere}</p>
+    <div className="app-drop">
+      <p className="app-drop__box">{t.dropHere}</p>
     </div>
   );
 }
@@ -82,21 +81,26 @@ export function DocumentsUpload({ queue, maxSize, onRestored }: { queue: UploadQ
   return <UploadPanel queue={queue} items={items} limit={maxSize ? formatSize(maxSize, lang) : ""} onRestored={onRestored} />;
 }
 
+/**
+ * A drop area in the look of Carbon's file drop container, with "Choose
+ * files" as the view's one primary button (decision 3 of #150). The whole
+ * window takes drops (WindowDrop), so the area itself needs no handlers.
+ */
 function UploadPanel({ queue, items, limit, onRestored }: { queue: UploadQueue; items: UploadItem[]; limit: string; onRestored?: () => void }) {
   const picker = useRef<HTMLInputElement>(null);
   const finished = items.some((i) => i.state.kind !== "waiting" && i.state.kind !== "uploading");
   return (
-    <section className="flex flex-col gap-3 rounded-lg border border-dashed border-line-control p-5">
-      <h2 className="font-semibold">{t.uploadTitle}</h2>
-      <p className="text-sm text-ink-muted">{t.uploadHint(limit)}</p>
-      <div className="flex flex-wrap gap-2">
-        <button type="button" className={primary} onClick={() => picker.current?.click()}>
+    <section className="upload-panel">
+      <h2 className="upload-panel__title">{t.uploadTitle}</h2>
+      <p className="upload-panel__hint app-text-secondary">{t.uploadHint(limit)}</p>
+      <div className="upload-panel__actions">
+        <Button kind="primary" size="md" onClick={() => picker.current?.click()}>
           {t.chooseFiles}
-        </button>
+        </Button>
         {finished && (
-          <button type="button" className={button} onClick={() => queue.clearFinished()}>
+          <Button kind="ghost" size="md" onClick={() => queue.clearFinished()}>
             {t.clearFinished}
-          </button>
+          </Button>
         )}
         <input
           ref={picker}
@@ -113,7 +117,7 @@ function UploadPanel({ queue, items, limit, onRestored }: { queue: UploadQueue; 
         />
       </div>
       {items.length > 0 && (
-        <ul aria-label={t.uploadsLabel} className="flex flex-col gap-1">
+        <ul aria-label={t.uploadsLabel} className="upload-list">
           {items.map((i) => (
             <UploadRow
               key={i.id}
@@ -133,13 +137,14 @@ function UploadPanel({ queue, items, limit, onRestored }: { queue: UploadQueue; 
   );
 }
 
-const stateColor: Record<UploadItem["state"]["kind"], string> = {
-  waiting: "text-ink-muted",
-  uploading: "text-ink-muted",
-  imported: "text-ok",
-  duplicate: "text-ink-muted",
-  failed: "text-danger",
-  cancelled: "text-ink-muted",
+/** The class of a row's state text: imported in the success colour, a failure in the error colour, the rest secondary. */
+const stateClass: Record<UploadItem["state"]["kind"], string> = {
+  waiting: "app-text-secondary",
+  uploading: "app-text-secondary",
+  imported: "upload-row__state--ok",
+  duplicate: "app-text-secondary",
+  failed: "app-text-error",
+  cancelled: "app-text-secondary",
 };
 
 function UploadRow({ item, limit, cancel, retry, restored }: { item: UploadItem; limit: string; cancel: () => void; retry?: () => void; restored: () => void }) {
@@ -165,37 +170,35 @@ function UploadRow({ item, limit, cancel, retry, restored }: { item: UploadItem;
     );
   };
   return (
-    <li className="flex flex-col gap-1 text-sm">
-      <div className="flex flex-wrap items-baseline gap-x-3">
-        <span className="min-w-0 basis-full wrap-anywhere sm:basis-0 sm:flex-1">{name}</span>
-        <span className="text-ink-muted">{formatSize(item.size, lang)}</span>
-        <span className={stateColor[item.state.kind]} role="status">
+    <li className="upload-row">
+      <div className="upload-row__line">
+        <span className="upload-row__name">{name}</span>
+        <span className="app-text-secondary">{formatSize(item.size, lang)}</span>
+        <span className={stateClass[item.state.kind]} role="status">
           {stateText(item.state, t, limit)}
         </span>
         {active && (
-          <button type="button" className="text-accent-ink hover:underline" aria-label={t.cancelUpload(name)} onClick={cancel}>
+          <Button kind="ghost" size="sm" aria-label={t.cancelUpload(name)} onClick={cancel}>
             {t.cancel}
-          </button>
+          </Button>
         )}
         {trashedId && (
-          <button type="button" className="text-accent-ink hover:underline pointer-coarse:min-h-11" aria-label={t.uploadRestoreLabel(name)} disabled={busy} onClick={restore}>
+          <Button kind="ghost" size="sm" aria-label={t.uploadRestoreLabel(name)} disabled={busy} onClick={restore}>
             {t.restore}
-          </button>
+          </Button>
         )}
         {retry && (
-          <button type="button" className="text-accent-ink hover:underline pointer-coarse:min-h-11" aria-label={t.retryUpload(name)} onClick={retry}>
+          <Button kind="ghost" size="sm" aria-label={t.retryUpload(name)} onClick={retry}>
             {t.tryAgain}
-          </button>
+          </Button>
         )}
       </div>
       {error && (
-        <p role="alert" className="text-danger">
+        <p role="alert" className="app-text-error">
           {error}
         </p>
       )}
-      {item.state.kind === "uploading" && (
-        <progress className="h-1.5 w-full" max={100} value={item.state.percent} aria-label={name} />
-      )}
+      {item.state.kind === "uploading" && <ProgressBar className="upload-row__progress" size="small" hideLabel label={name} max={100} value={item.state.percent} />}
     </li>
   );
 }

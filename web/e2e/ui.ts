@@ -37,7 +37,7 @@ export function noThumbnail(row: Locator): Locator {
   return row.getByTestId("no-thumbnail");
 }
 
-/** The processing badge of a row ("Queued", "Processing"). */
+/** The processing badge of a row ("Queued", "Processing"): a Carbon Tag with role status. */
 export function processingStatus(row: Locator): Locator {
   return row.getByRole("status").filter({ hasText: /^(Queued|Queued again|Processing)$/ });
 }
@@ -214,13 +214,13 @@ export function pdfPage(page: Page, n: number): Locator {
  * - a native window.confirm (API key revoke, unsaved changes, lock, reset
  *   2FA and remove user), which Playwright would otherwise dismiss, so the
  *   action would silently not happen;
- * - an in-DOM confirmation, when confirm names its button: a Sheet
- *   ("Delete permanently") or an inline panel (role="group", the admin's
- *   "Reset password"). The button is found by its name only, without
- *   assuming a dialog role. When the page has another button of that name
- *   (the one that asked), confirm is the button itself, as a Locator.
- * It fails when no confirmation shows. #150's Carbon modals change only
- * this helper.
+ * - an in-DOM confirmation, when confirm names its button: a Carbon Modal
+ *   ("Delete permanently", since #150 part 3) or an inline panel
+ *   (role="group", the admin's "Reset password"). The button is found by
+ *   its name only, without assuming a dialog role. When the page has
+ *   another button of that name (the one that asked), confirm is the
+ *   button itself, as a Locator.
+ * It fails when no confirmation shows.
  */
 export async function confirmDialog(page: Page, action: () => Promise<void>, confirm?: string | RegExp | Locator): Promise<void> {
   let native = false;
@@ -311,10 +311,11 @@ export async function logInThroughForm(page: Page, name: string, password: strin
 }
 
 /**
- * A dialog by its title: a native <dialog> opened with showModal (bulk
- * edit, Save view, the metadata page, the permanent delete) until its part
- * of #150, or a Carbon Modal (the saved-view menu's Rename and Delete since
- * part 2): both have the role and the name.
+ * A dialog by its title: a Carbon Modal (the saved-view menu's Rename and
+ * Delete since #150 part 2; the bulk bar's forms and confirmations, Save
+ * view, Empty trash and the permanent delete since part 3), or the
+ * metadata page's native <dialog> until part 5: both have the role and the
+ * name.
  */
 export function sheet(page: Page, title: string | RegExp): Locator {
   return page.getByRole("dialog", { name: title, exact: true });
@@ -330,22 +331,22 @@ export function undoButton(page: Page): Locator {
   return page.getByRole("button", { name: "Undo", exact: true });
 }
 
-/** A document's checkbox in the list. */
+/** A document's checkbox in the list (a Carbon Checkbox named by its hidden label). */
 export function selectBox(page: Page, title: string): Locator {
   return documentRow(page, title).getByRole("checkbox", { name: `Select ${title}`, exact: true });
 }
 
-/** "Select all loaded" above the list. */
+/** "Select all loaded" above the list (indeterminate while some rows are checked). */
 export function selectAllLoaded(page: Page): Locator {
   return page.getByRole("checkbox", { name: "Select all loaded", exact: true });
 }
 
-/** The bar that changes the checked documents. */
+/** The bar that changes the checked documents: a sticky bar in the look of Carbon's batch actions, with the count and the actions as buttons. */
 export function bulkBar(page: Page): Locator {
   return page.getByRole("region", { name: "Change the selected documents", exact: true });
 }
 
-/** A document's tag chips in its row. */
+/** A document's tag chips in its row (Carbon Tags in a list named "Tags"). */
 export function rowTags(page: Page, title: string): Locator {
   return documentRow(page, title).getByRole("list", { name: "Tags", exact: true });
 }

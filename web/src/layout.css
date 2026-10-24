@@ -338,6 +338,529 @@ body,
   padding-inline-end: 0.75rem;
 }
 
+/* The documents page (App): the upload panel and the list in one column.
+   Text is body-01. */
+.docs-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  max-inline-size: 56rem;
+  margin-inline: auto;
+  padding: 1.5rem 1rem 2rem;
+  color: var(--cds-text-primary);
+  font-size: 0.875rem;
+  line-height: 1.42857;
+  letter-spacing: 0.16px;
+}
+
+/* The upload panel (Documents.tsx): the look of Carbon's file drop
+   container (a dashed border), with the one primary button of the view. */
+.upload-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  border: 1px dashed var(--cds-border-strong-01);
+}
+.upload-panel__title {
+  /* heading-02 */
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+.upload-panel__hint {
+  margin: 0;
+}
+.upload-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.upload-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.upload-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.upload-row__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 0.75rem;
+}
+.upload-row__name {
+  flex: 1 1 100%;
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+@media (min-width: 42rem) {
+  .upload-row__name {
+    flex-basis: 0;
+  }
+}
+.upload-row__state--ok {
+  color: var(--cds-support-success);
+}
+.upload-row p {
+  margin: 0;
+}
+.upload-row__progress .cds--progress-bar__track {
+  inline-size: 100%;
+}
+
+/* The overlay while files are dragged over the window (WindowDrop): above
+   everything, taking no pointer events, so the drop reaches the window. */
+.app-drop {
+  position: fixed;
+  z-index: 9500;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background-color: var(--cds-overlay);
+  pointer-events: none;
+}
+.app-drop__box {
+  /* heading-03 */
+  margin: 0;
+  padding: 2.5rem 2rem;
+  border: 2px dashed var(--cds-border-interactive);
+  background-color: var(--cds-layer-01);
+  color: var(--cds-text-primary);
+  font-size: 1.25rem;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+/* The document list (DocumentList.tsx). */
+.docs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.docs-search .cds--search .cds--search-input {
+  /* Above 16px, where iOS zooms (the rule at the top keeps it on phones). */
+  font-size: 1rem;
+}
+.docs-list__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.docs-list__title {
+  /* heading-03 */
+  min-inline-size: 0;
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+  outline: none;
+}
+.docs-list__title:focus-visible {
+  outline: 2px solid var(--cds-focus);
+}
+.docs-list__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+}
+.docs-sort {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.docs-sort .cds--select {
+  flex: none;
+}
+.docs-list__note {
+  margin: 0;
+}
+.docs-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+}
+.docs-filters .cds--tag {
+  margin: 0;
+}
+.docs-list__more {
+  display: flex;
+}
+
+/* "Select all loaded", the count and the selection's links. */
+.selection-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.selection-head__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 0.5rem;
+}
+.selection-head__all.cds--form-item.cds--checkbox-wrapper {
+  flex: none;
+  margin: 0;
+}
+
+/* The rows: a card each on phones, a divided list from 48rem. */
+.doc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.doc-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--cds-border-subtle-01);
+  background-color: var(--cds-layer-01);
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.doc-row--checked {
+  border-color: var(--cds-border-interactive);
+  background-color: var(--cds-layer-selected-01);
+}
+@media (min-width: 48rem) {
+  .doc-list {
+    gap: 0;
+    border: 1px solid var(--cds-border-subtle-01);
+  }
+  .doc-row {
+    padding: 0.5rem 0.75rem;
+    border: 0;
+    border-block-end: 1px solid var(--cds-border-subtle-01);
+    user-select: auto;
+  }
+  .doc-row:last-child {
+    border-block-end: 0;
+  }
+  .doc-row--checked {
+    box-shadow: inset 3px 0 0 var(--cds-border-interactive);
+  }
+}
+/* Carbon keeps a checkbox's and a radio button's input clipped to one pixel
+   behind its label, so a pointer hits the label; in the list and the bulk
+   bar's forms the input itself covers its label, so a click (and a test's)
+   lands on the control it names. The box, the mark and the focus ring come
+   from Carbon's label as before. */
+.docs-list .cds--checkbox,
+.bulk-tags .cds--checkbox,
+.bulk-named .cds--radio-button {
+  inset: 0;
+  z-index: 1;
+  margin: 0;
+  block-size: 100%;
+  inline-size: 100%;
+  clip: auto;
+  opacity: 0;
+  cursor: pointer;
+}
+.bulk-named .cds--radio-button-wrapper {
+  position: relative;
+}
+/* The checkbox, without Carbon's form-item spacing; on a touch screen it
+   shows once something is selected (before, a long press selects). */
+.doc-row__select {
+  display: flex;
+  flex: none;
+  align-items: center;
+  min-block-size: 1.75rem;
+}
+.doc-row__select .cds--form-item.cds--checkbox-wrapper {
+  flex: none;
+  margin: 0;
+}
+@media (pointer: coarse) {
+  .doc-list:not(.doc-list--selecting) .doc-row__select {
+    display: none;
+  }
+}
+.doc-thumb {
+  flex: none;
+  inline-size: 3rem;
+  block-size: 4rem;
+  border: 1px solid var(--cds-border-subtle-01);
+  /* Pages keep a white paper in both themes. */
+  background-color: #ffffff;
+  object-fit: cover;
+  object-position: top;
+}
+.doc-thumb--none {
+  border-style: dashed;
+  background-color: transparent;
+}
+.doc-row__body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-inline-size: 0;
+}
+.doc-row__top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+}
+.doc-row__title.cds--link {
+  flex: 1 1 100%;
+  min-inline-size: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.42857;
+  overflow-wrap: anywhere;
+}
+@media (min-width: 42rem) {
+  .doc-row__title.cds--link {
+    flex-basis: 0;
+  }
+}
+.doc-row__flag {
+  display: inline-flex;
+  align-items: center;
+  color: var(--cds-icon-secondary);
+}
+.doc-row__flag--inbox {
+  color: var(--cds-icon-interactive);
+}
+.doc-row__flag--fav {
+  color: var(--cds-support-warning);
+}
+.doc-row__flag svg {
+  fill: currentColor;
+}
+.doc-row__date {
+  white-space: nowrap;
+}
+.doc-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 0.75rem;
+}
+.doc-row__fact {
+  overflow-wrap: anywhere;
+}
+.doc-row__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-inline-start: -0.5rem;
+}
+/* Rows of small ghost buttons without icons: Carbon keeps room for an icon
+   on the right; here it only makes the row wrap sooner. */
+.doc-row__actions .cds--btn--sm,
+.doc-processing .cds--btn--sm,
+.upload-row__line .cds--btn--sm,
+.selection-head__row .cds--btn--sm,
+.trash-actions__msg .cds--btn--sm {
+  padding-inline-end: 0.9375rem;
+}
+@media (pointer: coarse) {
+  .doc-row__actions .cds--btn--sm,
+  .doc-processing .cds--btn--sm,
+  .upload-row__line .cds--btn--sm,
+  .selection-head__row .cds--btn--sm {
+    min-block-size: 2.75rem;
+    align-items: center;
+  }
+}
+.doc-row__dates {
+  margin: 0;
+}
+.doc-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.doc-tags .cds--tag {
+  margin: 0;
+}
+.doc-processing {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 0.5rem;
+  align-self: flex-start;
+}
+.doc-processing .cds--tag {
+  margin: 0;
+}
+.doc-processing__error {
+  overflow-wrap: anywhere;
+}
+.doc-snippet {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.app-highlight {
+  padding-inline: 0.125rem;
+  background-color: var(--cds-highlight);
+  color: inherit;
+}
+
+/* Why the list is empty, and the next step (as mail-archive's). */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 2.5rem 1rem;
+  text-align: center;
+}
+.empty-state__icon {
+  display: grid;
+  place-items: center;
+  inline-size: 3rem;
+  block-size: 3rem;
+  margin-block-end: 0.25rem;
+  border-radius: 50%;
+  background-color: var(--cds-layer-02);
+  color: var(--cds-icon-secondary);
+}
+.empty-state__icon svg {
+  fill: currentColor;
+}
+.empty-state__title {
+  /* heading-02 */
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.empty-state__text {
+  max-inline-size: 24rem;
+  margin: 0;
+}
+.empty-state__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-block-start: 0.5rem;
+}
+
+/* "Empty trash" and its message, at the right edge. */
+.trash-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.25rem;
+}
+.trash-actions__msg {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0 0.25rem;
+  margin: 0;
+  text-align: end;
+}
+
+/* The bulk bar (BulkBar.tsx): the look of Carbon's batch-action bar, on
+   the brand colour, sticky at the bottom of the list. Its primary buttons
+   blend into it, as in Carbon's TableBatchActions. On phones it reaches
+   the screen's edges, with the home indicator kept clear. */
+.bulk-bar {
+  position: sticky;
+  z-index: 2;
+  inset-block-end: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-inline: -1rem;
+  padding: 0.25rem 0.5rem calc(0.25rem + env(safe-area-inset-bottom));
+  background-color: var(--cds-background-brand);
+  color: var(--cds-text-on-color);
+  box-shadow: 0 -2px 6px var(--cds-shadow, rgba(0, 0, 0, 0.3));
+}
+@media (min-width: 48rem) {
+  .bulk-bar {
+    margin-inline: 0;
+    padding-block-end: 0.25rem;
+  }
+}
+.bulk-bar__row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.bulk-bar__count {
+  flex: none;
+  padding-inline-start: 0.5rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.bulk-bar__actions {
+  display: flex;
+  overflow-x: auto;
+  flex: 1;
+  min-inline-size: 0;
+}
+@media (min-width: 42rem) {
+  .bulk-bar__actions {
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+}
+.bulk-bar__actions .cds--btn {
+  flex: none;
+}
+.bulk-bar__msg {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+  margin: 0;
+  padding: 0 0.5rem 0.25rem;
+}
+.bulk-bar__msg--error {
+  font-weight: 600;
+}
+.bulk-bar__icon {
+  flex: none;
+  fill: currentColor;
+}
+
+/* The bulk bar's tag form: two columns of checkboxes in tree order. */
+.bulk-tags {
+  display: flex;
+  gap: 1rem;
+}
+.bulk-tags__column {
+  flex: 1;
+  min-inline-size: 0;
+}
+.bulk-tags__row .cds--checkbox-label-text {
+  overflow-wrap: anywhere;
+}
+
 /* The notice (Toast.tsx): a Carbon toast notification at the bottom of the
    screen, centred, above the header and the sidebar and below Carbon's
    modals (z-index 9000). The live regions take no pointer events; the

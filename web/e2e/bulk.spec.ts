@@ -1,3 +1,4 @@
+import type { Request } from "@playwright/test";
 import { bulkNames, work } from "./demo";
 import { expect, test } from "./fixtures";
 import { bulkBar, documentList, documentRow, documentRows, listEntry, navigation, rowTags, search, selectAllLoaded, selectBox, sheet } from "./ui";
@@ -64,4 +65,48 @@ test("every match of a search is counted, confirmed and then changed", async ({ 
   // All of them have the type, also those that were never loaded: the
   // sidebar counts them.
   await expect(listEntry(navigation(page), bulkNames.type)).toHaveAccessibleName(`${bulkNames.type} ${work.batch.count}`);
+});
+
+test("Cancel in the every-match confirmation sends no change: the dry run is the only POST, and the documents are unchanged", async ({ page }) => {
+  // Every POST to the bulk endpoint, with its body.
+  const posts: Record<string, unknown>[] = [];
+  const onRequest = (r: Request) => {
+    if (r.method() === "POST" && new URL(r.url()).pathname === "/api/documents/bulk") posts.push(r.postDataJSON() as Record<string, unknown>);
+  };
+  page.on("request", onRequest);
+  await page.goto("/");
+  await search(page, work.batch.word);
+  await expect(documentRows(documentList(page, "Search results"))).toHaveCount(50);
+  await selectAllLoaded(page).check();
+  await page.getByRole("button", { name: "Select all matches of this search", exact: true }).click();
+  await expect(page.getByText(`All ${work.batch.count} matches of this search are selected.`, { exact: true })).toBeVisible();
+  const bar = bulkBar(page);
+  await expect(bar.getByText(`${work.batch.count} selected`, { exact: true })).toBeVisible();
+
+  // The action counts again (a dry run) and asks; Cancel sends nothing.
+  await bar.getByRole("button", { name: "Favorite", exact: true }).click();
+  const confirm = sheet(page, "Change all matches?");
+  await expect(confirm).toContainText(`This changes ${work.batch.count} documents: every match of this search, also those not loaded yet.`);
+  await confirm.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(confirm).toBeHidden();
+  // Escape sends nothing either.
+  await bar.getByRole("button", { name: "Favorite", exact: true }).click();
+  await expect(sheet(page, "Change all matches?")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(sheet(page, "Change all matches?")).toBeHidden();
+  // The selection and its count stay.
+  await expect(bar.getByText(`${work.batch.count} selected`, { exact: true })).toBeVisible();
+
+  // The dry runs (the selection's count and one per action) are the only POSTs: none without dryRun.
+  await expect.poll(() => posts.length).toBe(3);
+  expect(posts.every((b) => b.dryRun === true)).toBe(true);
+  expect(posts.some((b) => "fingerprint" in b)).toBe(false);
+  page.off("request", onRequest);
+
+  // The documents are unchanged: none is a favourite after a reload.
+  await page.reload();
+  const rows = documentRows(documentList(page, "Search results"));
+  await expect(rows).toHaveCount(50);
+  await expect(documentList(page, "Search results").getByText("Favorite", { exact: true })).toHaveCount(0);
+  await expect(posts.filter((b) => b.dryRun !== true)).toHaveLength(0);
 });

@@ -366,8 +366,7 @@ function Shell({ user, logout }: { user: User; logout: () => void }) {
             </aside>
             {browseOpen && <div aria-hidden className="nav-column__scrim" onClick={closeBrowse} />}
             <main inert={pageInert} className="docs-pane">
-              {/* A .legacy root (index.css) until part 3 of #150 converts the upload panel and the list. */}
-              <div className="legacy mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6">
+              <div className="docs-page">
                 {state.trash !== "1" && <DocumentsUpload queue={queue} maxSize={maxSize} onRestored={onUploadRestored} />}
                 <DocumentList
                   state={state}

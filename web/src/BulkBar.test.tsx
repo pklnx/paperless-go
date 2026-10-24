@@ -32,7 +32,13 @@ const byLabel = <T extends Element>(sel: string, label: string) => {
   if (!el) throw new Error(`no ${sel} labelled ${label}`);
   return el;
 };
-const box = (name: string) => byLabel<HTMLInputElement>("input[type=checkbox]", t.selectDocument(name));
+/** A row's Carbon checkbox: the input its (visually hidden) label names. */
+const box = (name: string) => {
+  const label = Array.from(document.querySelectorAll("label")).find((l) => l.textContent === t.selectDocument(name));
+  const el = label && document.getElementById(label.htmlFor);
+  if (!(el instanceof HTMLInputElement)) throw new Error(`no checkbox labelled ${t.selectDocument(name)}`);
+  return el;
+};
 const bar = () => within(byLabel<HTMLElement>("[role=region]", t.bulkActions));
 
 async function start() {
@@ -161,7 +167,8 @@ describe("selection", () => {
     expect(sheet.getByRole("alert").textContent).toBe(t.bulkTagAddAndRemove);
     const apply = sheet.getByRole("button", { name: t.apply });
     expect(apply.hasAttribute("disabled")).toBe(true);
-    fireEvent.submit(apply.closest("form")!);
+    // Enter in the form sends nothing either.
+    fireEvent.submit(add!.closest("form")!);
     expect(bulks()).toEqual([]);
   });
 
@@ -176,7 +183,7 @@ describe("selection", () => {
     fireEvent.click(bar().getByRole("button", { name: t.bulkTags }));
     let sheet = within(screen.getByRole("dialog", { name: t.bulkTagsTitle }));
     expect(within(sheet.getAllByRole("group")[0]!).getAllByRole("checkbox").map((c) => c.getAttribute("aria-label") ?? c.parentElement?.textContent)).toEqual(["Bob tag"]);
-    fireEvent.click(sheet.getByRole("button", { name: t.closeDialog }));
+    fireEvent.click(sheet.getByRole("button", { name: t.carbon.closeModal }));
     fireEvent.click(bar().getByRole("button", { name: t.bulkCorrespondent }));
     sheet = within(screen.getByRole("dialog", { name: t.bulkCorrespondentTitle }));
     expect(sheet.getAllByRole("radio").map((r) => r.parentElement?.textContent)).toEqual([t.bulkClearCorrespondent, "Bob corr"]);
@@ -288,7 +295,7 @@ describe("errors", () => {
     fireEvent.click(bar().getByRole("button", { name: t.bulkType }));
     let s = within(screen.getByRole("dialog", { name: t.bulkTypeTitle }));
     expect(s.getAllByRole("radio").map((r) => r.parentElement?.textContent)).toEqual([t.bulkClearType]);
-    fireEvent.click(s.getByRole("button", { name: t.closeDialog }));
+    fireEvent.click(s.getByRole("button", { name: t.carbon.closeModal }));
     // Correspondent: only clearing, which goes through for both owners.
     fireEvent.click(bar().getByRole("button", { name: t.bulkCorrespondent }));
     s = within(screen.getByRole("dialog", { name: t.bulkCorrespondentTitle }));
@@ -433,7 +440,7 @@ describe("all matches of a search", () => {
       fireEvent.click(bar().getByRole("button", { name: t.bulkTags }));
       const sheet = within(screen.getByRole("dialog", { name: t.bulkTagsTitle }));
       const names = within(sheet.getAllByRole("group")[0]!).getAllByRole("checkbox").map((c) => c.parentElement?.textContent);
-      fireEvent.click(sheet.getByRole("button", { name: t.closeDialog }));
+      fireEvent.click(sheet.getByRole("button", { name: t.carbon.closeModal }));
       return names;
     };
     expect(tagChoices()).toEqual(["Bob tag"]);
@@ -685,5 +692,199 @@ describe("all matches of a search", () => {
     // ... but not the list, which belongs to the change's list, not this one.
     expect(gets("/api/documents")).toHaveLength(lists);
     expect(screen.getByText("B 1")).toBeTruthy();
+  });
+});
+
+describe("the bar's Carbon modals (#150, part 3)", () => {
+  const twoPages = () => (p: URLSearchParams) => (p.get("cursor") ? page([doc("3", "Doc 3")]) : page([doc("1", "Doc 1"), doc("2", "Doc 2")], "c1"));
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  /** Every POST /api/documents/bulk as method, path and body. */
+  const posts = () => requests.filter((r) => r.path === "/api/documents/bulk").map((r) => ({ method: r.method, path: r.path, body: r.body }));
+  const dialog = (name: string) => screen.findByRole("dialog", { name });
+  const gone = (name: string) => waitFor(() => expect(screen.queryByRole("dialog", { name })).toBeNull());
+
+  it("sends nothing from the every-match confirmation on Cancel, Escape or the close button: the dry runs are the only requests", async () => {
+    server.documents = twoPages();
+    server.bulk = (b) => (b.dryRun ? { body: { matched: 3, owners: 1, limit: 5000, fingerprint: "v1.fp" } } : { body: { updated: 3 } });
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    await screen.findByText(t.allMatchesSelected(3));
+    const favorite = () => bar().getByRole("button", { name: t.bulkFavorite });
+    expect(bar().getByText(t.selectedCount(3))).toBeTruthy();
+
+    favorite().focus();
+    fireEvent.click(favorite());
+    let ask = within(await dialog(t.bulkConfirmTitle));
+    expect(ask.getByText(t.bulkConfirmText(3))).toBeTruthy();
+    fireEvent.click(ask.getByRole("button", { name: t.cancel }));
+    await gone(t.bulkConfirmTitle);
+    // The focus is back on the button that asked.
+    expect(document.activeElement).toBe(favorite());
+
+    fireEvent.click(favorite());
+    ask = within(await dialog(t.bulkConfirmTitle));
+    fireEvent.keyDown(ask.getByRole("button", { name: t.cancel }), { key: "Escape" });
+    await gone(t.bulkConfirmTitle);
+
+    fireEvent.click(favorite());
+    ask = within(await dialog(t.bulkConfirmTitle));
+    fireEvent.click(ask.getByRole("button", { name: t.carbon.closeModal }));
+    await gone(t.bulkConfirmTitle);
+
+    const dryRun = { method: "POST", path: "/api/documents/bulk", body: { match: { tz }, dryRun: true } };
+    expect(posts()).toEqual([dryRun, dryRun, dryRun, dryRun]);
+    expect(requests.filter((r) => r.method !== "GET" && !(r.body && r.body.dryRun === true))).toHaveLength(0);
+    // The bar is still there with its count, and the selection too.
+    expect(bar().getByText(t.selectedCount(3))).toBeTruthy();
+    expect(box("Doc 1").checked).toBe(true);
+  });
+
+  it("sends nothing from the question before checked documents go to the trash on Cancel or Escape", async () => {
+    server.documents = () => page([doc("1", "Doc 1"), doc("2", "Doc 2")]);
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 1") }));
+    fireEvent.click(box("Doc 2"));
+    expect(bar().getByText(t.selectedCount(2))).toBeTruthy();
+    fireEvent.click(bar().getByRole("button", { name: t.bulkDelete }));
+    let ask = within(await dialog(t.bulkTrashTitle));
+    expect(ask.getByText(t.bulkTrashText(2))).toBeTruthy();
+    expect(ask.getByRole("button", { name: t.bulkTrashConfirm(2) })).toBeTruthy();
+    fireEvent.click(ask.getByRole("button", { name: t.cancel }));
+    await gone(t.bulkTrashTitle);
+    fireEvent.click(bar().getByRole("button", { name: t.bulkDelete }));
+    ask = within(await dialog(t.bulkTrashTitle));
+    fireEvent.keyDown(ask.getByRole("button", { name: t.bulkTrashConfirm(2) }), { key: "Escape" });
+    await gone(t.bulkTrashTitle);
+    expect(posts()).toEqual([]);
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(0);
+    expect(box("Doc 1").checked && box("Doc 2").checked).toBe(true);
+  });
+
+  it("sends nothing from the every-match restore question on Cancel or Escape", async () => {
+    const trashed = { deletedAt: "2026-10-01T08:00:00Z", purgeAt: "2026-10-31T08:00:00Z" };
+    server.documents = (p) => (p.get("cursor") ? page([doc("3", "Doc 3", trashed)]) : page([doc("1", "Doc 1", trashed), doc("2", "Doc 2", trashed)], "c1"));
+    server.bulk = (b) => (b.dryRun ? { body: { matched: 3, owners: 1, limit: 5000, fingerprint: "v1.fp" } } : { body: { updated: 3 } });
+    window.history.replaceState(null, "", "/?trash=1");
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectAllLoaded }));
+    fireEvent.click(screen.getByRole("button", { name: t.selectAllMatches }));
+    await screen.findByText(t.allMatchesSelected(3));
+    fireEvent.click(bar().getByRole("button", { name: t.restore }));
+    let ask = within(await dialog(t.bulkRestoreTitle));
+    expect(ask.getByText(t.bulkRestoreText(3))).toBeTruthy();
+    expect(ask.getByText(t.bulkEveryMatch)).toBeTruthy();
+    fireEvent.click(ask.getByRole("button", { name: t.cancel }));
+    await gone(t.bulkRestoreTitle);
+    fireEvent.click(bar().getByRole("button", { name: t.restore }));
+    ask = within(await dialog(t.bulkRestoreTitle));
+    fireEvent.keyDown(ask.getByRole("button", { name: t.bulkRestoreConfirm(3) }), { key: "Escape" });
+    await gone(t.bulkRestoreTitle);
+    const match = { trashed: true, tz };
+    const dryRun = { method: "POST", path: "/api/documents/bulk", body: { match, dryRun: true, action: "restore" } };
+    expect(posts()).toEqual([dryRun, dryRun, dryRun]);
+  });
+
+  it("sends nothing from the permanent delete question on Cancel, Escape or the close button", async () => {
+    const trashed = { deletedAt: "2026-10-01T08:00:00Z", purgeAt: "2026-10-31T08:00:00Z" };
+    server.documents = () => page([doc("1", "Doc 1", trashed), doc("2", "Doc 2", trashed)]);
+    window.history.replaceState(null, "", "/?trash=1");
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 1") }));
+    fireEvent.click(box("Doc 2"));
+    const purge = () => bar().getByRole("button", { name: t.purge });
+    fireEvent.click(purge());
+    let ask = within(await dialog(t.purgeBulkTitle));
+    expect(ask.getByText(t.purgeText(2))).toBeTruthy();
+    fireEvent.click(ask.getByRole("button", { name: t.cancel }));
+    await gone(t.purgeBulkTitle);
+    fireEvent.click(purge());
+    ask = within(await dialog(t.purgeBulkTitle));
+    fireEvent.keyDown(ask.getByRole("button", { name: t.purgeConfirm(2) }), { key: "Escape" });
+    await gone(t.purgeBulkTitle);
+    fireEvent.click(purge());
+    ask = within(await dialog(t.purgeBulkTitle));
+    fireEvent.click(ask.getByRole("button", { name: t.carbon.closeModal }));
+    await gone(t.purgeBulkTitle);
+    expect(posts()).toEqual([]);
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(0);
+    expect(box("Doc 1").checked && box("Doc 2").checked).toBe(true);
+  });
+
+  it("closes the tag, correspondent and type forms on Cancel and Escape without sending anything", async () => {
+    server.documents = () => page([doc("1", "Doc 1")]);
+    server.tags = [tag("t1", "Steuer")];
+    server.correspondents = [named("c1", "Finanzamt")];
+    server.types = [named("d1", "Rechnung")];
+    await start();
+    fireEvent.click(await screen.findByRole("checkbox", { name: t.selectDocument("Doc 1") }));
+    for (const [button, title] of [
+      [t.bulkTags, t.bulkTagsTitle],
+      [t.bulkCorrespondent, t.bulkCorrespondentTitle],
+      [t.bulkType, t.bulkTypeTitle],
+    ] as const) {
+      fireEvent.click(bar().getByRole("button", { name: button }));
+      let d = within(await dialog(title));
+      expect(d.getByRole("button", { name: t.apply }).hasAttribute("disabled")).toBe(true);
+      fireEvent.click(d.getByRole("button", { name: t.cancel }));
+      await gone(title);
+      fireEvent.click(bar().getByRole("button", { name: button }));
+      d = within(await dialog(title));
+      fireEvent.keyDown(d.getByRole("button", { name: t.cancel }), { key: "Escape" });
+      await gone(title);
+    }
+    expect(posts()).toEqual([]);
+  });
+});
+
+describe("the list and the bar in German", () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it("names the search, the chips, the sort, the rows, the bar and its modals in German, nothing in English", async () => {
+    vi.resetModules();
+    vi.stubGlobal("navigator", { ...navigator, languages: ["de-DE", "en-US"], language: "de-DE" });
+    const { App: GermanApp } = await import("./App");
+    const { messagesFor } = await import("./i18n");
+    const de = messagesFor("de");
+    ({ server, requests } = stubServer());
+    server.tags = [tag("t1", "Steuer"), tag("t2", "2024", "t1")];
+    server.documents = () => page([doc("1", "Rechnung", { tagIds: ["t1"], isInbox: true, isFavorite: true, processing: { state: "queued", attempts: 0, maxAttempts: 3 } })]);
+    window.history.replaceState(null, "", "/?tag=t1");
+    render(<GermanApp />);
+    await screen.findByText("Rechnung");
+    await waitFor(() => expect(screen.queryByText(de.loading)).toBeNull());
+    // The search field and its clear button, the filter chip, the sort and its direction.
+    expect(screen.getByRole("searchbox", { name: de.searchLabel })).toBeTruthy();
+    expect(screen.getByRole("button", { name: de.carbon.clearSearch })).toBeTruthy();
+    expect(screen.getByRole("button", { name: de.removeFilter(de.tagFilter("Steuer")) })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: de.sortBy })).toBeTruthy();
+    expect(screen.getByRole("button", { name: de.sortNewestFirst })).toBeTruthy();
+    // The row: its checkbox, flags, badge, actions and tag chip.
+    const row = screen.getByText("Rechnung").closest("li")!;
+    expect(within(row).getByRole("checkbox", { name: de.selectDocument("Rechnung") })).toBeTruthy();
+    expect(within(row).getByText(de.inInbox)).toBeTruthy();
+    expect(within(row).getByText(de.favorite)).toBeTruthy();
+    expect(within(row).getByRole("status").textContent).toBe(de.processingQueued);
+    expect(within(row).getByRole("link", { name: de.download })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: de.deleteDocumentLabel("Rechnung") })).toBeTruthy();
+    expect(within(within(row).getByRole("list", { name: de.tags })).getAllByRole("listitem").map((c) => c.textContent)).toEqual(["Steuer"]);
+    // The selection and the bar with its count.
+    fireEvent.click(screen.getByRole("checkbox", { name: de.selectAllLoaded }));
+    const bar = within(screen.getByRole("region", { name: de.bulkActions }));
+    expect(bar.getByText(de.selectedCount(1))).toBeTruthy();
+    expect(screen.getByRole("button", { name: de.clearSelection })).toBeTruthy();
+    // A modal of the bar: Carbon's buttons in German.
+    fireEvent.click(bar.getByRole("button", { name: de.bulkTags }));
+    const ask = within(await screen.findByRole("dialog", { name: de.bulkTagsTitle }));
+    expect(ask.getByRole("group", { name: de.bulkAddTags })).toBeTruthy();
+    expect(ask.getByRole("button", { name: de.apply })).toBeTruthy();
+    expect(ask.getByRole("button", { name: de.cancel })).toBeTruthy();
+    expect(ask.getByRole("button", { name: de.carbon.closeModal })).toBeTruthy();
+    const html = document.body.innerHTML;
+    for (const s of ["Cancel", ">Close<", "Select all rows", "Dismiss", "Clear search input", "Clear filter", "Focus sentinel", "items selected", ">Apply<", "Load more", "Download"]) {
+      expect(html, s).not.toContain(s);
+    }
   });
 });
