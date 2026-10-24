@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
 import { adminWithout2FA, generatedPasswordUser, lockedUser, timeStep, totp, twoFactorUser, type Login } from "./demo";
 import { expect, test } from "./fixtures";
@@ -135,4 +135,63 @@ test("the product mark follows the colour scheme", async ({ page }) => {
   await expect(mark).toHaveClass(/(^|\s)app-mark--dark(\s|$)/);
   await expect(mark).not.toHaveClass(/app-mark--light/);
   await expect.poll(() => mark.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
+});
+
+test("the built assets are served as files only", async ({ request }) => {
+  // The built binary, whose embedded build holds the real hashed files and
+  // pdf.js's data files (the Go tests run without a build). The request
+  // fixture, not a page navigation: a 404 is the expected answer here, and
+  // the guards fail a test on the console error a page navigation to it
+  // logs (pklnx/mail-archive#250).
+  const html = await (await request.get("/")).text();
+  const script = /\ssrc="(\/assets\/[^"]+\.js)"/.exec(html)?.[1];
+  const style = /\shref="(\/assets\/[^"]+\.css)"/.exec(html)?.[1];
+  expect(script, "index.html names a script under /assets/").toBeTruthy();
+  expect(style, "index.html names a style sheet under /assets/").toBeTruthy();
+  const immutable = "public, max-age=31536000, immutable";
+
+  // The host's type table decides the exact JavaScript type string.
+  const js = await request.get(script!);
+  expect(js.status()).toBe(200);
+  expect(js.headers()["content-type"]).toMatch(/^(text|application)\/javascript/);
+  expect(js.headers()["cache-control"]).toBe(immutable);
+  expect(js.headers()["cross-origin-resource-policy"]).toBe("same-origin");
+  expect((await js.body()).length).toBeGreaterThan(0);
+  const css = await request.get(style!);
+  expect(css.status()).toBe(200);
+  expect(css.headers()["content-type"]).toMatch(/^text\/css/);
+  expect(css.headers()["cache-control"]).toBe(immutable);
+
+  // pdf.js's data files sit in a folder named by its version (vite.config.ts):
+  // the files are served, immutable, the folders are no listing.
+  const pdfjs = new URL("../node_modules/pdfjs-dist/", import.meta.url);
+  const { version } = JSON.parse(readFileSync(new URL("package.json", pdfjs), "utf8")) as { version: string };
+  const base = `/assets/pdfjs-${version}`;
+  const cmap = readdirSync(new URL("cmaps", pdfjs)).sort()[0]!;
+  // An extensionless file in a folder below, and a map in another.
+  for (const file of [`cmaps/${cmap}`, "wasm/LICENSE_OPENJPEG"]) {
+    const resp = await request.get(`${base}/${file}`);
+    expect(resp.status(), file).toBe(200);
+    expect(resp.headers()["cache-control"], file).toBe(immutable);
+    expect(Buffer.compare(await resp.body(), readFileSync(new URL(file, pdfjs))), file).toBe(0);
+  }
+
+  // No listing of any folder, and no redirect: a plain, uncached 404.
+  const name = script!.slice("/assets/".length);
+  for (const path of ["/assets/", "/assets/x/index.html", "/assets/nope.js", `${base}/`, `${base}/cmaps/`, `${base}/cmaps`, `${base}/wasm/`]) {
+    const resp = await request.get(path, { maxRedirects: 0 });
+    expect(resp.status(), path).toBe(404);
+    expect(resp.headers()["cache-control"], path).toBe("no-cache");
+    expect(resp.headers()["cross-origin-resource-policy"], path).toBe("same-origin");
+    const body = await resp.text();
+    expect(body, path).not.toContain(name);
+    expect(body, path).not.toContain(cmap);
+    expect(body, path).not.toContain("LICENSE_OPENJPEG");
+  }
+
+  // The mux routes on the decoded path: the folder under another spelling
+  // is the same file.
+  const encoded = await request.get(script!.replace("/assets/", "/%61ssets/"));
+  expect(encoded.status()).toBe(200);
+  expect(encoded.headers()["cache-control"]).toBe(immutable);
 });
