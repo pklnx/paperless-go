@@ -184,8 +184,9 @@ the retry stores the file again. The consume folder and `./pgo import` treat it 
 ## Upgrades
 
 Back up first (see [Backups](#backups)) and read the release notes of every
-version you skip: they list database migrations and manual steps. Then, in
-the directory that holds your `paperless-go/` directory:
+version you skip: they list database migrations and manual steps. Also
+check `.env` for a `PAPERLESS_GO_IMAGE` line (see the note below the steps).
+Then, in the directory that holds your `paperless-go/` directory:
 
 ```sh
 curl -fLO https://github.com/pklnx/paperless-go/releases/latest/download/paperless-go.tar.gz
@@ -204,6 +205,22 @@ The new bundle replaces `docker-compose.yml`, `./pgo`, `.env.example` and
 `https://github.com/pklnx/paperless-go/releases/download/v1.0.0/paperless-go.tar.gz`
 (and `SHA256SUMS` from the same release). The web server refuses to start
 while migrations are pending.
+
+A `PAPERLESS_GO_IMAGE` line in the kept `.env` (see [Versions](#versions))
+overrides the new bundle's image: the web server and the CLI (`./pgo`) go on
+using the image it names, and `./pgo --version` shows that image's version.
+Check it before `./pgo migrate`. Keep the line if it names a newer build of
+your own than the new release. Otherwise, if it names an `X.Y` tag of
+`ghcr.io/pklnx/paperless-go`, set it to the new release's `X.Y` tag, for
+example `ghcr.io/pklnx/paperless-go:1.2`, and run `docker compose pull web`
+(it restarts nothing; migrate before starting web): a tag that is already on
+the machine is not pulled again. In any other case, remove the line or set
+it to the new release's exact image, for example
+`ghcr.io/pklnx/paperless-go:X.Y.Z`. If you ran the steps above with the line
+in place, change it as described and repeat the upgrade from `./pgo migrate`
+on, with the manual steps from the release notes and the
+[Upgrade notes](#upgrade-notes) in their order, then run
+`docker compose up -d web`.
 
 With a clone of the repository, `git pull` replaces the download, and
 `./pgo migrate` rebuilds the image.
@@ -588,18 +605,24 @@ to an exact version or `1.0` (patch releases, which normally have no
 migration). `1.0` gets nothing new once a newer minor or major release is
 out. Then move the tag to the newest `X.Y` tag (for example `1.1`, or `2.0`
 after the major release's upgrade steps) after reading that release's notes:
-set `PAPERLESS_GO_IMAGE=ghcr.io/pklnx/paperless-go:1.1` in `.env`, back up and
-run `./pgo migrate` as in [Upgrades](#upgrades), then
-`docker compose up -d web`. `1` also installs minor releases, which may
-include a migration; until `./pgo migrate` runs, the web server does not
-start. A tool on `latest` installs breaking changes without their upgrade
-steps.
+set `PAPERLESS_GO_IMAGE=ghcr.io/pklnx/paperless-go:1.1` in `.env`, run
+`docker compose pull web`, back up and run `./pgo migrate` as in
+[Upgrades](#upgrades), then `docker compose up -d web`. That setting stays
+in `.env` when you extract a newer bundle: move it to the new release's
+`X.Y` tag as described below the steps in [Upgrades](#upgrades). `1` also
+installs minor releases, which may include a migration; until
+`./pgo migrate` runs, the web server does not start. A tool on `latest`
+installs breaking changes without their upgrade steps.
 
 Set `PAPERLESS_GO_IMAGE` in `.env` to use another tag or your own build;
 pinning an exact version is safer than `latest`, because migrations only run
-with `./pgo migrate`. Do not update images automatically (Watchtower, a floating tag):
-the server refuses to start while migrations are pending. See [Running on
-the internet](./internet#updates). The images carry a provenance attestation and an SBOM.
+with `./pgo migrate`. Do not update images automatically (Watchtower, a
+floating tag): the server refuses to start while migrations are pending.
+Here a floating tag means `latest` or a major tag such as `1`, not an exact
+version or an `X.Y` tag such as `1.4`, which gets patch releases only. If a
+tool updates the image anyway, pin an exact version or an `X.Y` tag, as
+described above. See [Running on the internet](./internet#updates). The
+images carry a provenance attestation and an SBOM.
 
 The image is based on Debian and contains OCRmyPDF with Tesseract (German
 and English), Poppler, img2pdf and libheif; it is about 145 MB to download.
