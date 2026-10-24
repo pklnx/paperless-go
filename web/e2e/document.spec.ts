@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { origin, seed, unique } from "./demo";
 import { expect, test } from "./fixtures";
-import { chosenNames, closeDocument, detail, detailForm, discardChanges, discardQuestion, documentLink, field, formError, keepEditing, logOut, notice, openSavedViewMenu, pdfPage, pick, pickTag, rowTags, saveDocument, search, sheet } from "./ui";
+import { chosenNames, closeDocument, createChoice, detail, detailForm, discardChanges, discardQuestion, documentLink, field, formError, keepEditing, logOut, notice, openSavedViewMenu, pdfPage, pick, pickTag, rowTags, saveDocument, search, sheet } from "./ui";
 
 /** The open document's ID, from the URL. */
 const openID = (page: Page) => new URL(page.url()).searchParams.get("doc") ?? "";
@@ -271,6 +271,66 @@ test("an emptied type field, left with its list closed, clears the type: the for
   await discardChanges(page);
   await expect(page).not.toHaveURL(/[?&]doc=/);
   expect(patches).toEqual([]);
+});
+
+test.describe("a type created from the picker while its request is slow", () => {
+  const typeName = unique("Slow type");
+  // The warranty card (its title is never saved by another test): the type
+  // it had before, and the new type, are put back and removed again
+  // through the API, whatever happened.
+  let before: { id: string; documentTypeId: string | null } | null = null;
+  const headers = { Origin: origin, "Content-Type": "application/json" };
+  test.beforeEach(async ({ request }) => {
+    const found = ((await (await request.get(`/api/documents?q=${seed.warranty.word}`)).json()) as { documents: { id: string; title: string }[] }).documents;
+    const row = found.find((d) => d.title === seed.warranty.title);
+    expect(row, "the warranty card").toBeTruthy();
+    const doc = (await (await request.get(`/api/documents/${row!.id}`)).json()) as { documentTypeId: string | null };
+    before = { id: row!.id, documentTypeId: doc.documentTypeId };
+  });
+  test.afterEach(async ({ request }) => {
+    if (!before) return;
+    const doc = (await (await request.get(`/api/documents/${before.id}`)).json()) as { documentTypeId: string | null; modifiedAt: string };
+    if (doc.documentTypeId !== before.documentTypeId) {
+      const res = await request.patch(`/api/documents/${before.id}`, { headers, data: { documentTypeId: before.documentTypeId, expectedModifiedAt: doc.modifiedAt } });
+      expect(res.ok(), `restore the type: ${res.status()}`).toBe(true);
+    }
+    const types = ((await (await request.get("/api/document-types")).json()) as { documentTypes: { id: string; name: string }[] }).documentTypes;
+    const type = types.find((x) => x.name === typeName);
+    if (!type) return;
+    const gone = await request.delete(`/api/document-types/${type.id}`, { headers });
+    expect(gone.ok(), `delete type: ${gone.status()} ${await gone.text()}`).toBe(true);
+  });
+
+  test("Save waits for the created type, and saves it (CI on 0a3a96a)", async ({ page }) => {
+    await page.goto("/");
+    await documentLink(page, seed.warranty.title).click();
+    await expect(detail(page, seed.warranty.title)).toBeVisible();
+    // The creation's request is held back until the test lets it through.
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let seen!: () => void;
+    const seenRequest = new Promise<void>((r) => (seen = r));
+    await page.route(
+      (url) => url.pathname === "/api/document-types",
+      async (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        seen();
+        await released;
+        await route.continue();
+      },
+    );
+    await createChoice(page, "Document type", typeName, { wait: false });
+    await seenRequest;
+    const save = detailForm(page).getByRole("button", { name: "Save", exact: true });
+    await expect(save).toBeDisabled();
+    await expect(detailForm(page).getByRole("button", { name: "Done", exact: true })).toBeDisabled();
+    release();
+    await expect(field(page, "Document type")).toHaveValue(typeName);
+    await expect(save).toBeEnabled();
+    await saveDocument(page);
+    await page.reload();
+    await expect(field(page, "Document type")).toHaveValue(typeName);
+  });
 });
 
 test.describe("the tag picker on the seeded lease", () => {

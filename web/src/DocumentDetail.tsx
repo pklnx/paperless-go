@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type MouseEvent, type ReactNode, type TouchEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent, type ReactNode, type TouchEvent } from "react";
 import { Button, Checkbox, ContentSwitcher, Form, IconButton, InlineNotification, Link, Switch, TextArea, TextInput } from "@carbon/react";
 import { ChevronLeft, ChevronRight, Close } from "@carbon/icons-react";
 import { ApiError, documentsApi, metadataApi, type DocumentDetail as Doc, type DocumentSummary, type Metadata, type MetadataKind, type User } from "./api";
@@ -212,7 +212,13 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   // Back and the sidebar still go through the guard; a late answer is
   // dropped then (visit).
   // Nor while a delete, restore or purge runs: its answer belongs to this document.
-  const busy = saving || trashBusy;
+  // Rows being created from the pickers: the form does not save (nor Done,
+  // nor move on) until they have answered, so a created choice is never
+  // left out of the save. The pickers are keyed by the document: another
+  // document gets fresh pickers, and a late answer is dropped.
+  const [pending, setPending] = useState(0);
+  const onPending = useCallback((p: boolean) => setPending((n) => n + (p ? 1 : -1)), []);
+  const busy = saving || trashBusy || pending > 0;
   const nav = useRef({ prev, next, close, open, saving: busy });
   nav.current = { prev, next, close, open, saving: busy };
 
@@ -328,7 +334,7 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
   };
 
   const save = (done: boolean) => {
-    if (!doc || !form || saving) return;
+    if (!doc || !form || saving || pending > 0) return;
     const r = patchFrom(doc, form);
     if ("invalid" in r) {
       setErrors({ [r.invalid]: r.invalid === "asn" ? t.invalidASN : t.invalidDate });
@@ -636,9 +642,9 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
                   <TextInput id={fieldId("asn")} labelText={t.fieldASN} inputMode="numeric" value={form.asn} maxLength={10} onChange={(e) => set("asn", e.target.value)} {...invalid("asn")} />
                 </div>
                 {metaError && <InlineNotification className="notification--full" kind="error" lowContrast hideCloseButton role="alert" statusIconDescription={t.carbon.status.error} subtitle={metaError} />}
-                <NamedPicker label={t.fieldCorrespondent} choices={options?.correspondents ?? []} selected={form.correspondentId} disabled={!options} onChange={(id) => set("correspondentId", id)} onCreate={creator("correspondents")} onEscape={close} />
-                <NamedPicker label={t.fieldType} choices={options?.types ?? []} selected={form.documentTypeId} disabled={!options} onChange={(id) => set("documentTypeId", id)} onCreate={creator("document-types")} onEscape={close} />
-                <TagPicker label={t.tags} choices={options?.tags ?? []} selected={form.tagIds} disabled={!options} readOnly={trashed} onChange={(ids) => set("tagIds", ids)} onCreate={creator("tags")} onEscape={close} />
+                <NamedPicker key={`c-${doc.id}`} label={t.fieldCorrespondent} choices={options?.correspondents ?? []} selected={form.correspondentId} disabled={!options} onChange={(id) => set("correspondentId", id)} onCreate={creator("correspondents")} onEscape={close} onPending={onPending} />
+                <NamedPicker key={`t-${doc.id}`} label={t.fieldType} choices={options?.types ?? []} selected={form.documentTypeId} disabled={!options} onChange={(id) => set("documentTypeId", id)} onCreate={creator("document-types")} onEscape={close} onPending={onPending} />
+                <TagPicker key={`g-${doc.id}`} label={t.tags} choices={options?.tags ?? []} selected={form.tagIds} disabled={!options} readOnly={trashed} onChange={(ids) => set("tagIds", ids)} onCreate={creator("tags")} onEscape={close} onPending={onPending} />
                 <div className="doc-notes">
                   <div className="doc-notes__head">
                     {/* The field's own label is Carbon's (hidden); this one names the rendered notes. */}
@@ -678,10 +684,10 @@ export function DocumentDetail({ id, user, docs, inboxList, open, close, onSaved
               {general && <InlineNotification className="notification--full" kind="error" lowContrast hideCloseButton role="alert" statusIconDescription={t.carbon.status.error} subtitle={general} />}
               {!trashed && (
                 <div className="doc-form__actions">
-                  <Button type="submit" kind="primary" size="md" disabled={saving || !dirty}>
+                  <Button type="submit" kind="primary" size="md" disabled={saving || pending > 0 || !dirty}>
                     {saving ? t.saving : t.save}
                   </Button>
-                  <Button type="button" kind="secondary" size="md" disabled={saving} title={inboxList ? t.doneHintInbox : t.doneHint} onClick={() => save(true)}>
+                  <Button type="button" kind="secondary" size="md" disabled={saving || pending > 0} title={inboxList ? t.doneHintInbox : t.doneHint} onClick={() => save(true)}>
                     {t.done}
                   </Button>
                   {saved && !dirty && (

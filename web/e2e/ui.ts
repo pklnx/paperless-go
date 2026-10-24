@@ -395,10 +395,18 @@ export function rowTags(page: Page, title: string): Locator {
   return documentRow(page, title).getByRole("list", { name: "Tags", exact: true });
 }
 
-/** Creates name (it must not exist yet) in the picker labelled label (correspondent, type or tags) and chooses it: the list's "Create “name”" item. */
-export async function createChoice(page: Page, label: string, name: string): Promise<void> {
+/**
+ * Creates name (it must not exist yet) in the picker labelled label
+ * (correspondent, type or tags) and chooses it: the list's "Create “name”"
+ * item. Returns once the row is created and chosen (the ComboBox shows it,
+ * the tag picker has its chip), so the next step does not race the request.
+ */
+export async function createChoice(page: Page, label: string, name: string, { wait = true } = {}): Promise<void> {
   await detailForm(page).getByRole("combobox", { name: label, exact: true }).fill(name);
   await page.getByRole("option", { name: `Create “${name}”` }).click();
+  if (!wait) return;
+  if (label === "Tags") await expect(chosenNames(page).filter({ hasText: name })).toHaveCount(1);
+  else await expect(field(page, label)).toHaveValue(name);
 }
 
 /** Saves the open document's form (its primary button) and waits for "Saved" (the form's status). */

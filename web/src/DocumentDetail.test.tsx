@@ -168,6 +168,7 @@ beforeEach(() => {
       return json(201, row);
     }
     if ((path === "/api/correspondents" || path === "/api/document-types") && method === "POST") {
+      if (createHold) await createHold;
       const b = body as { name: string; ownerId?: number };
       const row = named(`new-${b.name}`, b.name, b.ownerId ?? 1);
       if (path === "/api/correspondents") correspondents = [...correspondents, row];
@@ -1463,6 +1464,148 @@ describe("the Carbon pickers (#150 part 4): the ComboBox's field and the form ag
     await waitFor(() => expect(box.value).toBe("Finanzamt"));
     expect((detail().getByRole("button", { name: t.save }) as HTMLButtonElement).disabled).toBe(true);
     expect(detail().queryByText(t.unsaved)).toBeNull();
+  });
+});
+
+describe("the Carbon pickers (#150 part 4): a creation still pending (CI on 0a3a96a)", () => {
+  function holdCreates(): () => Promise<void> {
+    let release: () => void = () => {};
+    createHold = new Promise<void>((r) => (release = r));
+    return async () => {
+      createHold = null;
+      await act(async () => release());
+    };
+  }
+  const typeBox = async () => {
+    const box = detail().getByRole("combobox", { name: t.fieldType }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    return box;
+  };
+
+  it("neither Save nor Done nor previous/next go on while a type is being created; the save then has the new type", async () => {
+    serve(doc("d1", "A"), doc("d2", "B"));
+    await openAt("/?doc=d1");
+    fireEvent.change(titleField(), { target: { value: "A2" } });
+    const box = await typeBox();
+    const release = holdCreates();
+    fireEvent.change(box, { target: { value: "Neu" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Neu") }));
+    await waitFor(() => expect(requests.some((r) => r.method === "POST" && r.url === "/api/document-types")).toBe(true));
+    const save = detail().getByRole("button", { name: t.save }) as HTMLButtonElement;
+    const done = detail().getByRole("button", { name: t.done }) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(true));
+    expect(done.disabled).toBe(true);
+    expect((detail().getByRole("button", { name: t.nextDocument }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(save);
+    fireEvent.click(done);
+    fireEvent.submit(detail().getByRole("form", { name: t.editDocument }));
+    fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    expect(patches()).toHaveLength(0);
+    expect(docParam()).toBe("d1");
+    await release();
+    await waitFor(() => expect(box.value).toBe("Neu"));
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ title: "A2", documentTypeId: "new-Neu", expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
+
+  it("a creation that answers after another document was opened changes nothing there", async () => {
+    serve(doc("d1", "A"), doc("d2", "B"));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: "A" }));
+    await waitFor(() => expect(titleField().value).toBe("A"));
+    const box = await typeBox();
+    const release = holdCreates();
+    fireEvent.change(box, { target: { value: "Neu" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Neu") }));
+    await waitFor(() => expect(requests.some((r) => r.method === "POST" && r.url === "/api/document-types")).toBe(true));
+    // Nothing is unsaved yet: a Forward to B (history) goes without a question; the detail stays mounted and shows B.
+    act(() => {
+      window.history.pushState(null, "", "/?doc=d2");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await waitFor(() => expect(titleField().value).toBe("B"));
+    expect(docParam()).toBe("d2");
+    await release();
+    await act(async () => {});
+    expect((detail().getByRole("combobox", { name: t.fieldType }) as HTMLInputElement).value).toBe("");
+    expect((detail().getByRole("button", { name: t.save }) as HTMLButtonElement).disabled).toBe(true);
+    expect(detail().queryByText(t.unsaved)).toBeNull();
+    expect(patches()).toHaveLength(0);
+  });
+});
+
+describe("the Carbon pickers (#150 part 4): review A's delta follow-ups", () => {
+  it("a held Backspace (auto-repeat) in the empty tag field removes no chip", async () => {
+    tags = [tag("t1", "Steuer"), tag("t2", "Arzt")];
+    serve(doc("d1", "A", { tagIds: ["t1", "t2"] }));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.tags }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    const chips = () => within(detail().getByRole("list", { name: t.chosenIn(t.tags) })).getAllByRole("listitem").length;
+    box.focus();
+    fireEvent.keyDown(box, { key: "Backspace", repeat: true });
+    fireEvent.keyDown(box, { key: "Backspace", repeat: true });
+    await act(async () => {});
+    expect(chips()).toBe(2);
+    fireEvent.keyDown(box, { key: "Backspace" });
+    await waitFor(() => expect(chips()).toBe(1));
+  });
+
+  it("typing in the next picker while a creation settles keeps focus and text there, and both choices are saved (review B)", async () => {
+    correspondents = [];
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    const corr = detail().getByRole("combobox", { name: t.fieldCorrespondent }) as HTMLInputElement;
+    await waitFor(() => expect(corr.disabled).toBe(false));
+    let release: () => void = () => {};
+    createHold = new Promise<void>((r) => (release = r));
+    corr.focus();
+    fireEvent.change(corr, { target: { value: "Amt" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Amt") }));
+    await waitFor(() => expect(corr.disabled).toBe(true));
+    // Meanwhile the user is in the type field, typing a new type.
+    const type = detail().getByRole("combobox", { name: t.fieldType }) as HTMLInputElement;
+    type.focus();
+    fireEvent.change(type, { target: { value: "Ver" } });
+    await act(async () => {
+      createHold = null;
+      release();
+    });
+    await waitFor(() => expect(corr.value).toBe("Amt"));
+    expect(document.activeElement).toBe(type);
+    expect(type.value).toBe("Ver");
+    fireEvent.change(type, { target: { value: "Vertrag" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Vertrag") }));
+    await waitFor(() => expect(type.value).toBe("Vertrag"));
+    const save = detail().getByRole("button", { name: t.save }) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ correspondentId: "new-Amt", documentTypeId: "new-Vertrag", expectedModifiedAt: "2026-10-21T10:00:00Z" });
+  });
+
+  it("the field takes the focus back after a creation only when the user has not moved on", async () => {
+    serve(doc("d1", "A"));
+    await openAt("/?doc=d1");
+    const box = detail().getByRole("combobox", { name: t.fieldType }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    let release: () => void = () => {};
+    createHold = new Promise<void>((r) => (release = r));
+    box.focus();
+    fireEvent.change(box, { target: { value: "Neu" } });
+    fireEvent.click(detail().getByRole("option", { name: t.createNamed("Neu") }));
+    await waitFor(() => expect(box.disabled).toBe(true));
+    // Meanwhile the user is in the title.
+    titleField().focus();
+    expect(document.activeElement).toBe(titleField());
+    await act(async () => {
+      createHold = null;
+      release();
+    });
+    await waitFor(() => expect(box.value).toBe("Neu"));
+    expect(document.activeElement).toBe(titleField());
   });
 });
 

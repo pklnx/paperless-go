@@ -62,20 +62,41 @@ function createErrorText(err: unknown): string {
   return t.failed(err instanceof Error ? err.message : String(err));
 }
 
-/** Creates the row named name and answers its id; the error is kept for the field. */
-function useCreator(onCreate: ((name: string) => Promise<string>) | undefined) {
+/**
+ * Creates the row named name and answers its id; the error is kept for
+ * the field. The form is told while a creation is pending (onPending), so
+ * it does not save without the row; an answer that comes after the picker
+ * is gone (another document is shown) is dropped, never applied elsewhere.
+ */
+function useCreator(onCreate: ((name: string) => Promise<string>) | undefined, onPending: ((pending: boolean) => void) | undefined) {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
+  const live = useRef(true);
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
+  const tell = useRef(onPending);
+  tell.current = onPending;
+  useEffect(() => {
+    if (!creating) return;
+    tell.current?.(true);
+    return () => tell.current?.(false);
+  }, [creating]);
   const create = (name: string, then: (id: string) => void) => {
     if (!onCreate || creating) return;
     setCreating(true);
     setError("");
     onCreate(name).then(
       (id) => {
+        if (!live.current) return;
         setCreating(false);
         then(id);
       },
       (err: unknown) => {
+        if (!live.current) return;
         setCreating(false);
         setError(createErrorText(err));
       },
@@ -87,12 +108,16 @@ function useCreator(onCreate: ((name: string) => Promise<string>) | undefined) {
 /**
  * The field takes the focus back once a creation has settled: it was
  * disabled while the row was created, and a browser drops the focus from
- * a disabled field (review B of #192).
+ * a disabled field (review B of #192). Only when the focus is still there
+ * or nowhere (the body): a user who moved on to another field keeps it.
  */
-function useRefocus(creating: boolean, field: () => HTMLElement | null | undefined) {
+function useRefocus(creating: boolean, root: () => HTMLElement | null, field: () => HTMLElement | null | undefined) {
   const was = useRef(creating);
   useEffect(() => {
-    if (was.current && !creating) field()?.focus();
+    if (was.current && !creating) {
+      const active = document.activeElement;
+      if (active === null || active === document.body || (root()?.contains(active) ?? false)) field()?.focus();
+    }
     was.current = creating;
   });
 }
@@ -109,6 +134,8 @@ interface NamedProps {
   disabled?: boolean;
   /** Escape in the field while its list is closed: the document's Escape. */
   onEscape?: () => void;
+  /** A creation started (true) or settled (false): the form waits for it. */
+  onPending?: (pending: boolean) => void;
 }
 
 /**
@@ -117,11 +144,11 @@ interface NamedProps {
  * its clear button. Enter chooses the highlighted row (the first match
  * while typing), Escape closes the list and keeps the document open.
  */
-export function NamedPicker({ label, choices, selected, onChange, onCreate, disabled, onEscape }: NamedProps) {
+export function NamedPicker({ label, choices, selected, onChange, onCreate, disabled, onEscape, onPending }: NamedProps) {
   const id = useId();
   const root = useRef<HTMLDivElement>(null);
   const [typed, setTyped] = useState("");
-  const creator = useCreator(onCreate);
+  const creator = useCreator(onCreate, onPending);
   const items = useMemo<Choice[]>(() => {
     const name = typed.trim();
     return onCreate && canCreate(name, choices) ? [...choices, { id: CREATE, name: t.createNamed(name) }] : [...choices];
@@ -137,8 +164,11 @@ export function NamedPicker({ label, choices, selected, onChange, onCreate, disa
     const item = found ?? (choices.length === 0 ? null : { id: selected, name: t.unknownEntry });
     return item && resync > 0 ? { ...item } : item;
   }, [choices, selected, resync]);
-  const field = () => root.current?.querySelector("input");
-  useRefocus(creator.creating, field);
+  useRefocus(
+    creator.creating,
+    () => root.current,
+    () => root.current?.querySelector("input"),
+  );
   // Leaving the field: what it shows is what the form has. An emptied
   // field clears the choice (the form becomes dirty); other text that is
   // not the choice's name gives way to the name again (a choice is made
@@ -198,6 +228,8 @@ interface TagsProps {
   readOnly?: boolean;
   /** Escape in the field while its list is closed: the document's Escape. */
   onEscape?: () => void;
+  /** A creation started (true) or settled (false): the form waits for it. */
+  onPending?: (pending: boolean) => void;
 }
 
 /**
@@ -210,10 +242,10 @@ interface TagsProps {
  * that would remove every chosen tag at once (Escape, Delete, Backspace
  * while the list is closed) never reach the form.
  */
-export function TagPicker({ label, choices, selected, onChange, onCreate, disabled, readOnly, onEscape }: TagsProps) {
+export function TagPicker({ label, choices, selected, onChange, onCreate, disabled, readOnly, onEscape, onPending }: TagsProps) {
   const id = useId();
   const root = useRef<HTMLDivElement>(null);
-  const creator = useCreator(onCreate);
+  const creator = useCreator(onCreate, onPending);
   const byId = useMemo(() => new Map(choices.map((c) => [c.id, c])), [choices]);
   const chosen = selected.map((s) => byId.get(s) ?? { id: s, name: t.unknownEntry, path: t.unknownEntry });
   const selectedItems = useMemo(() => selected.map((s) => byId.get(s)).filter((c): c is TagChoice => c !== undefined), [selected, byId]);
@@ -231,17 +263,22 @@ export function TagPicker({ label, choices, selected, onChange, onCreate, disabl
     if (escapeClosed(e, root.current, onEscape)) return;
     if (!(e.target instanceof HTMLInputElement) || (e.key !== "Backspace" && e.key !== "Delete")) return;
     if (e.target.value === "") {
-      // The empty field: the last chosen tag goes (Carbon would drop them all).
+      // The empty field: the last chosen tag goes (Carbon would drop them
+      // all); a held key (auto-repeat, after erasing the text) removes none.
       e.preventDefault();
       e.stopPropagation();
-      if (selected.length > 0 && !disabled && !readOnly) onChange(selected.slice(0, -1));
+      if (!e.repeat && selected.length > 0 && !disabled && !readOnly) onChange(selected.slice(0, -1));
     } else if (e.key === "Delete" && !listOpen(root.current)) {
       // Delete edits the text; Carbon would clear the text and every chosen tag.
       e.stopPropagation();
     }
   };
   const chipsDisabled = disabled || readOnly;
-  useRefocus(creator.creating, () => root.current?.querySelector("input"));
+  useRefocus(
+    creator.creating,
+    () => root.current,
+    () => root.current?.querySelector("input"),
+  );
   return (
     <div ref={root} className="doc-form__tags" onKeyDownCapture={onKeyDownCapture}>
       <FilterableMultiSelect<TagChoice>
